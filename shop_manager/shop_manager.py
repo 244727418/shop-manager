@@ -70,14 +70,14 @@ except ImportError:
 try:
     from .dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
-        CostLibraryDialog, KnowledgeBaseDialog, ApiConfigDialog,
+        CostLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, ProductSpecDialog,
     )
 except ImportError:
     from dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
-        CostLibraryDialog, KnowledgeBaseDialog, ApiConfigDialog,
+        CostLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, ProductSpecDialog,
     )
@@ -187,13 +187,8 @@ class ShopManagerApp(QMainWindow):
         self.activateWindow()
     
     def open_knowledge_base(self):
-        """打开知识库"""
-        try:
-            from dialogs.knowledge_base import KnowledgeBaseDialog
-            self.kb_dialog = KnowledgeBaseDialog(self.db, self)
-            self.kb_dialog.show()
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开知识库失败：{e}")
+        """打开知识库（已废弃，保留兼容性）"""
+        self.show_knowledge_base()
     
     def quit_application(self):
         """退出应用"""
@@ -2023,58 +2018,45 @@ class ShopManagerApp(QMainWindow):
         dialog.show()
     
     def show_knowledge_base(self):
-        """打开知识库管理窗口（独立进程）"""
+        """打开独立知识库管理工具"""
         import subprocess
-        import sys
+        import os
         
-        # 获取Python解释器路径
-        python_exe = sys.executable
-        
-        # 知识库独立脚本路径
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        kb_script = os.path.join(script_dir, "..", "standalone_kb_app.py")
-        kb_script = os.path.normpath(kb_script)
-        
-        print(f"[DEBUG] shop_manager dir: {script_dir}", flush=True)
-        print(f"[DEBUG] kb_script path: {kb_script}", flush=True)
-        print(f"[DEBUG] kb_script exists: {os.path.exists(kb_script)}", flush=True)
-        
-        # 检查是否已有独立进程在运行
-        if hasattr(self, '_kb_process') and self._kb_process is not None:
-            try:
-                if self._kb_process.poll() is None:
-                    import ctypes
-                    EnumWindows = ctypes.windll.user32.EnumWindows
-                    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-                    GetWindowText = ctypes.windll.user32.GetWindowTextW
-                    SetForegroundWindow = ctypes.windll.user32.SetForegroundWindow
-                    IsWindowVisible = ctypes.windll.user32.IsWindowVisible
-                    
-                    def callback(hwnd, lParam):
-                        if IsWindowVisible(hwnd):
-                            length = GetWindowText(hwnd, None, 0)
-                            if length > 0:
-                                buff = ctypes.create_unicode_buffer(length + 1)
-                                GetWindowText(hwnd, buff, length + 1)
-                                if "知识库" in buff.value:
-                                    windows_found.append(hwnd)
-                        return True
-                    
-                    windows_found = []
-                    EnumWindows(EnumWindowsProc(callback), 0)
-                    if windows_found:
-                        SetForegroundWindow(windows_found[0])
-                        return
-            except:
-                pass
-        
-        # 启动独立进程
         try:
-            self._kb_process = subprocess.Popen(
-                [python_exe, kb_script],
-                cwd=script_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE if False else 0
-            )
+            # 设置独立知识库项目路径
+            kb_project_path = r"E:\zhuomian\knowledge_manager_project"
+            
+            # 检查独立项目是否存在
+            if not os.path.exists(kb_project_path):
+                QMessageBox.information(self, "提示", 
+                    "独立知识库项目未找到。\n\n"
+                    "请确保知识库管理工具已正确安装。\n"
+                    "预期路径: {}".format(kb_project_path))
+                return
+            
+            # 启动独立知识库应用
+            # 这里假设独立项目有可执行文件或启动脚本
+            # 您需要根据实际项目结构修改启动命令
+            
+            # 方案1: 如果有可执行文件
+            kb_exe = os.path.join(kb_project_path, "knowledge_manager.exe")
+            if os.path.exists(kb_exe):
+                subprocess.Popen([kb_exe], cwd=kb_project_path)
+                return
+            
+            # 方案2: 如果有启动脚本
+            kb_script = os.path.join(kb_project_path, "main.py")
+            if os.path.exists(kb_script):
+                subprocess.Popen(["python", "main.py"], cwd=kb_project_path)
+                return
+            
+            # 方案3: 如果以上都不存在，提示用户
+            QMessageBox.information(self, "提示", 
+                "未找到知识库管理工具的启动文件。\n\n"
+                "请检查以下文件是否存在：\n"
+                "- {}\n"
+                "- {}".format(kb_exe, kb_script))
+                
         except Exception as e:
             QMessageBox.critical(self, "错误", f"打开知识库失败：{e}")
     
