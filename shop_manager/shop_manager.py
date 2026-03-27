@@ -354,7 +354,8 @@ class ShopManagerApp(QMainWindow):
                 background-color: #219a52;
             }
         """)
-        btn_save_filter.clicked.connect(self.apply_tag_filter)
+        # 保存按钮连接筛选并关闭窗口
+        btn_save_filter.clicked.connect(lambda: self.apply_tag_filter(close_menu=True))
         
         btn_clear_filter = QPushButton("清空")
         btn_clear_filter.setStyleSheet("""
@@ -377,13 +378,14 @@ class ShopManagerApp(QMainWindow):
         
         self.current_filter_tags = set()
         
-        self.btn_filter_coupon.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_new_customer.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_limited_time.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_marketing.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_profit.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_loss.toggled.connect(self.apply_tag_filter)
-        self.btn_filter_break_even.toggled.connect(self.apply_tag_filter)
+        # 筛选按钮连接实时筛选（不关闭窗口）
+        self.btn_filter_coupon.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_new_customer.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_limited_time.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_marketing.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_profit.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_loss.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_break_even.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         
         search_layout.addWidget(search_label)
         search_layout.addWidget(self.search_input)
@@ -1625,8 +1627,12 @@ class ShopManagerApp(QMainWindow):
             print(f"计算利润分类失败: {e}")
             return 'loss'
     
-    def apply_tag_filter(self):
-        """应用标签筛选"""
+    def apply_tag_filter(self, close_menu=False):
+        """应用标签筛选
+        
+        Args:
+            close_menu: 是否关闭筛选菜单，True=关闭，False=保持打开
+        """
         try:
             filters = {}
             
@@ -1647,7 +1653,9 @@ class ShopManagerApp(QMainWindow):
             if self.btn_filter_break_even.isChecked():
                 profit_filters.append('break_even')
             
-            self.tag_filter_menu.close()
+            # 只有明确要求关闭菜单时才关闭
+            if close_menu:
+                self.tag_filter_menu.close()
             
             if not filters and not profit_filters:
                 self.clear_tag_filter()

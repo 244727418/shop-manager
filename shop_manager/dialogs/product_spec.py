@@ -1478,7 +1478,8 @@ class ProductSpecDialog(QDialog):
                     for item in knowledge_items:
                         knowledge_prompt += f"【{item['title']}】\n{item['content']}\n"
         else:
-            use_rag = self.db.get_setting("use_rag_retrieval", "1") == "1"
+            # RAG功能已分离到独立项目，主项目不再支持RAG检索
+            use_rag = False  # 强制禁用RAG检索
             if use_rag:
                 rag_query = f"SKU规格名称优化 {original_name} {self.product_name}"
                 rag_results = self.db.rag_retrieve(rag_query, top_k=3)
