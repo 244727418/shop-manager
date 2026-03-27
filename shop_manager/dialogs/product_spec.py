@@ -373,6 +373,12 @@ class ProductSpecDialog(QDialog):
         
         self.table.setAlternatingRowColors(True)
         
+        # 设置默认行高，确保输入框显示完整
+        self.table.verticalHeader().setDefaultSectionSize(35)  # 设置合适的行高
+        
+        # 启用自动行高调整
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        
         # 设置数值列居中显示（关联编码、自动成本、手动售价、券后价、单规格毛利）
         self.center_delegate = CenterAlignDelegate(self)
         for col in [2, 3, 4, 5, 6]:

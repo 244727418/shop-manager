@@ -13,6 +13,8 @@ class SpecNameDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setMaxLength(self.max_length)
+        # 设置输入框高度与行高匹配
+        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
         return editor
 
 
@@ -20,6 +22,13 @@ class CenterAlignDelegate(QStyledItemDelegate):
     """数值列居中对齐代理"""
     def __init__(self, parent=None):
         super().__init__(parent)
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setAlignment(Qt.AlignCenter)
+        # 设置输入框高度与行高匹配
+        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
+        return editor
 
     def paint(self, painter, option, index):
         painter.save()
@@ -52,6 +61,8 @@ class WeightDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        # 设置输入框高度与行高匹配
+        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
         text = index.data(Qt.DisplayRole) or ""
         num_text = text.replace("🔒", "").strip()
         try:
