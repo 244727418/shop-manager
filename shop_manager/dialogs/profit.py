@@ -585,25 +585,26 @@ class ProfitAnalysisDialog(QDialog):
                 common_section = "\n\n【用户-重要运营常识提醒】\n" + "\n".join([f"- {p}" for p in common_prompts])
                 prompt = prompt + common_section
 
-            saved_titles = self.db.get_setting("selected_knowledge_titles", "")
-            if saved_titles:
-                title_list = [t.strip() for t in saved_titles.split(",") if t.strip()]
-                if title_list:
-                    knowledge_items = self.db.get_knowledge_items_by_titles(title_list)
-                    if knowledge_items:
-                        knowledge_section = "\n\n【本地知识库参考】\n"
-                        for item in knowledge_items:
-                            knowledge_section += f"\n【{item['title']}】\n{item['content']}\n"
-                        prompt = prompt + knowledge_section
-            else:
-                use_rag = self.db.get_setting("use_rag_retrieval", "1") == "1"
-                if use_rag:
-                    rag_results = self.db.rag_retrieve(prompt[:500], top_k=3)
-                    if rag_results:
-                        knowledge_section = "\n\n【本地知识库参考（RAG检索）】\n"
-                        for item in rag_results:
-                            knowledge_section += f"\n【{item['title']}】(相似度:{item['similarity']:.2f})\n{item['content']}\n"
-                        prompt = prompt + knowledge_section
+            # 知识库功能已分离为独立项目，移除相关代码
+            # saved_titles = self.db.get_setting("selected_knowledge_titles", "")
+            # if saved_titles:
+            #     title_list = [t.strip() for t in saved_titles.split(",") if t.strip()]
+            #     if title_list:
+            #         knowledge_items = self.db.get_knowledge_items_by_titles(title_list)
+            #         if knowledge_items:
+            #             knowledge_section = "\n\n【本地知识库参考】\n"
+            #             for item in knowledge_items:
+            #                 knowledge_section += f"\n【{item['title']}】\n{item['content']}\n"
+            #             prompt = prompt + knowledge_section
+            # else:
+            #     use_rag = self.db.get_setting("use_rag_retrieval", "1") == "1"
+            #     if use_rag:
+            #         rag_results = self.db.rag_retrieve(prompt[:500], top_k=3)
+            #         if rag_results:
+            #             knowledge_section = "\n\n【本地知识库参考（RAG检索）】\n"
+            #             for item in rag_results:
+            #                 knowledge_section += f"\n【{item['title']}】(相似度:{item['similarity']:.2f})\n{item['content']}\n"
+            #             prompt = prompt + knowledge_section
 
             store_memo = ""
             if self.result_data.get("target_id"):
@@ -918,20 +919,20 @@ class ProfitCalculatorDialog(QDialog):
         transaction_amount = promotion * roi
         refund_amount = transaction_amount * (return_rate / 100)
         actual_transaction_amount = transaction_amount - refund_amount
-        product_cost = transaction_amount * (1 - margin_rate)
-        gross_profit = transaction_amount - product_cost
-        tech_fee = transaction_amount * 0.006
+        product_cost = actual_transaction_amount * (1 - margin_rate)  # 修正：基于实际成交计算成本
+        gross_profit = actual_transaction_amount - product_cost  # 修正：基于实际成交计算毛利润
+        tech_fee = actual_transaction_amount * 0.006  # 修正：基于实际成交计算技术服务费
         net_profit = actual_transaction_amount - product_cost - promotion - tech_fee
-        net_profit_rate = (net_profit / transaction_amount * 100) if transaction_amount > 0 else 0
-        promotion_ratio = (promotion / transaction_amount * 100) if transaction_amount > 0 else 0
+        net_profit_rate = (net_profit / actual_transaction_amount * 100) if actual_transaction_amount > 0 else 0  # 修正：基于实际成交计算净利率
+        promotion_ratio = (promotion / actual_transaction_amount * 100) if actual_transaction_amount > 0 else 0  # 修正：基于实际成交计算推广占比
         break_even_roi = 1 / margin_rate if margin_rate > 0 else 0
-        transaction_count = (transaction_amount / avg_price) if avg_price > 0 else 0
+        transaction_count = (actual_transaction_amount / avg_price) if avg_price > 0 else 0  # 修正：基于实际成交计算成交单量
         cost_per_transaction = (promotion / transaction_count) if transaction_count > 0 else 0
 
         profit_per_transaction = net_profit / transaction_count if transaction_count > 0 else 0
         best_roi = break_even_roi * 1.4 if break_even_roi > 0 else 0
 
-        net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.0006
+        net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.006  # 修正：技术服务费率改为0.6%
         net_break_even_roi = 1 / net_margin_formula if net_margin_formula > 0 else 0
 
         net_break_even_value = transaction_amount / net_break_even_roi if net_break_even_roi > 0 else 0
