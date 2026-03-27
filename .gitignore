@@ -1,0 +1,90 @@
+# ================= 打包文件 =================
+*.exe
+*.msi
+*.dmg
+*.app
+*.deb
+*.rpm
+dist/
+build/
+__pycache__/
+
+# ================= Python 缓存 =================
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ================= IDE 配置文件 =================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.venv/
+venv/
+env/
+
+# ================= 数据库文件 =================
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# ================= 临时文件 =================
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+
+# ================= 系统文件 =================
+Thumbs.db
+.DS_Store
+desktop.ini
+ehthumbs.db
+
+# ================= 图片资源（如果不想上传）================
+# 如果不想要图片资源，取消下面这行的注释
+# *.png
+# *.jpg
+# *.jpeg
+# *.gif
+# *.svg
+# *.ico
+
+# ================= 文档文件 =================
+*.pdf
+*.doc
+*.docx
+*.xlsx
+*.xls
+*.txt
+knowledge_base/*.txt
+knowledge_manager/*.txt
+*.txt
+
+# ================= 你的项目特定文件 =================
+# 如果这些文件不是代码，可以保留
+# 如果下面这些文件是代码库，注释掉
+knowledge_base.txt
+*.xlsx
+*.db
+shop_manager.db
+
+# ================= 模型文件（不备份）================
+models/
+icons/
+
+# ================= 图标文件 =================
+icons/
+*.svg
+
+# 模型和向量数据库
+shop_manager/sentence-transformers/
+shop_manager/vector_store/
