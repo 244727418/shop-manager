@@ -87,4 +87,7 @@ icons/
 
 # 模型和向量数据库
 shop_manager/sentence-transformers/
-shop_manager/vector_store/
+
+# 配置文件（有密钥，不上传）
+config.json 
+ 
