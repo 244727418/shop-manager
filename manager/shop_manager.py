@@ -1,4 +1,4 @@
-﻿# ================= 版本信息 =================
+# ================= 版本信息 =================
 VERSION = "2.1"
 
 # ================= 系统标准库 =================
@@ -58,17 +58,17 @@ import sqlite3
 import os
 
 try:
-    from .db import SafeDatabaseManager
+    from manager.db import SafeDatabaseManager
 except ImportError:
     from db import SafeDatabaseManager
 
 try:
-    from .widgets import ProductWidget, StoreWidget, RecordRow, InPlaceEditor
+    from manager.widgets import ProductWidget, StoreWidget, RecordRow, InPlaceEditor
 except ImportError:
     from widgets import ProductWidget, StoreWidget, RecordRow, InPlaceEditor
 
 try:
-    from .dialogs import (
+    from manager.dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
         CostLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
@@ -83,17 +83,17 @@ except ImportError:
     )
 
 try:
-    from .delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
+    from manager.delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
 except ImportError:
     from delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
 
 try:
-    from .prompts import get_default_prompt
+    from manager.prompts import get_default_prompt
 except ImportError:
     from prompts import get_default_prompt
 
 try:
-    from .ui_utils import convert_markdown_to_html
+    from manager.ui_utils import convert_markdown_to_html
 except ImportError:
     from ui_utils import convert_markdown_to_html
 
