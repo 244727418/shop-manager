@@ -74,7 +74,7 @@ knowledge_manager/*.txt
 # 如果下面这些文件是代码库，注释掉
 knowledge_base.txt
 *.xlsx
-*.db
+.db
 shop_manager.db
 
 # ================= 模型文件（不备份）================
@@ -83,11 +83,12 @@ icons/
 
 # ================= 图标文件 =================
 icons/
-*.svg
+.svg
 
 # 模型和向量数据库
 shop_manager/sentence-transformers/
 
 # 配置文件（有密钥，不上传）
-config.json 
+config.json
+manager/config.json 
  
