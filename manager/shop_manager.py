@@ -457,7 +457,7 @@ class ShopManagerApp(QMainWindow):
         self.frozen_table.viewport().installEventFilter(self)
         
         # 5. 绑定双击事件 (打开规格弹窗)
-        self.frozen_table.cellDoubleClicked.connect(self.open_product_spec_dialog)
+        self.frozen_table.cellDoubleClicked.connect(self.open_product_spec_dialog_from_table)
         
         # --- 布局代码 (保持你原有的不变) ---
         main_layout = QVBoxLayout()
@@ -1219,7 +1219,7 @@ class ShopManagerApp(QMainWindow):
         except:
             pass
 
-    def open_product_spec_dialog(self, row, col):
+    def open_product_spec_dialog_from_table(self, row, col):
         """双击格子打开规格管理弹窗"""
         if row not in self.row_data_map:
             return

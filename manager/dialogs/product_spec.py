@@ -487,6 +487,7 @@ class ProductSpecDialog(QDialog):
     def load_specs(self):
         """从数据库加载规格数据到表格，并初始化删除功能"""
         try:
+            print(f"[DEBUG] load_specs called for product_id={self.product_id}")
             # 0. 加载优惠券和新客立减金额
             discount_rows = self.db.safe_fetchall(
                 "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing FROM products WHERE id=?",
