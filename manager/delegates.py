@@ -65,6 +65,12 @@ class WeightDelegate(QStyledItemDelegate):
         editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
         text = index.data(Qt.DisplayRole) or ""
         num_text = text.replace("🔒", "").strip()
+        import re
+        match = re.match(r'^([\d.]+)', num_text)
+        if match:
+            num_text = match.group(1)
+        else:
+            num_text = ""
         try:
             current_val = float(num_text)
         except ValueError:
@@ -83,7 +89,13 @@ class WeightDelegate(QStyledItemDelegate):
                 cell_text = model.data(idx, Qt.DisplayRole) or ""
                 if cell_text.startswith("🔒"):
                     try:
-                        val = float(cell_text.replace("🔒", "").strip())
+                        clean_text = cell_text.replace("🔒", "").strip()
+                        import re
+                        match = re.match(r'^([\d.]+)', clean_text)
+                        if match:
+                            val = float(match.group(1))
+                        else:
+                            val = 0.0
                         locked_sum += val
                     except ValueError:
                         pass

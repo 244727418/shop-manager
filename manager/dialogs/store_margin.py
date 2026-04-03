@@ -5,10 +5,16 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
-    QAbstractItemView
+    QAbstractItemView, QFileDialog, QComboBox, QDialog
 )
 from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator
+
+try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
 
 class StoreMarginDialog(QDialog):
@@ -141,6 +147,7 @@ class StoreMarginDialog(QDialog):
         if old_margin is not None and new_margin is not None and abs(old_margin - new_margin) > 0.01:
             self.save_margin_log(old_margin, new_margin)
         self.main_app.show_toast(f"✅ 已保存 {saved_count} 项权重数据")
+        self.main_app.refresh_store_weight_sync_flag(self.store_id)
         if self.save_callback:
             self.save_callback(self.store_id, new_margin)
         self.close()
@@ -227,6 +234,9 @@ class StoreMarginDialog(QDialog):
         header_layout.addWidget(self.lbl_title)
         header_layout.addStretch()
         header_layout.addWidget(self.lbl_total_margin)
+        self.lbl_total_orders = QLabel("总订单: 0")
+        self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
+        header_layout.addWidget(self.lbl_total_orders)
         layout.addWidget(header_widget)
         self.table = QTableWidget()
         self.table.setColumnCount(8)
@@ -250,6 +260,18 @@ class StoreMarginDialog(QDialog):
             " QPushButton:hover { background-color: #8e44ad; }"
         )
         self.btn_profit_calc.clicked.connect(self.open_profit_calculator)
+        self.btn_import_orders = QPushButton("📥 导入订单")
+        self.btn_import_orders.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
+            " QPushButton:hover { background-color: #219a52; }"
+        )
+        self.btn_import_orders.clicked.connect(self.import_orders)
+        self.btn_sync_weight = QPushButton("🔄 同步订单权重")
+        self.btn_sync_weight.setStyleSheet(
+            "QPushButton { background-color: #e67e22; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
+            " QPushButton:hover { background-color: #d35400; }"
+        )
+        self.btn_sync_weight.clicked.connect(self.sync_order_weight)
         self.btn_save = QPushButton("💾 保存")
         self.btn_save.setStyleSheet(
             "QPushButton { background-color: #007bff; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
@@ -260,6 +282,8 @@ class StoreMarginDialog(QDialog):
         self.btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(self.btn_auto_balance)
         btn_layout.addWidget(self.btn_profit_calc)
+        btn_layout.addWidget(self.btn_import_orders)
+        btn_layout.addWidget(self.btn_sync_weight)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_close)
@@ -353,6 +377,10 @@ class StoreMarginDialog(QDialog):
             lock_label.setProperty("row", row)
             lock_label.setProperty("prod_id", prod_id)
             right_layout.addWidget(lock_label)
+            order_label = QLabel("")
+            order_label.setAlignment(Qt.AlignCenter)
+            order_label.setStyleSheet("color: #888; font-size: 10px;")
+            right_layout.addWidget(order_label)
             weight_layout.addWidget(left_widget, 3)
             weight_layout.addWidget(right_widget, 1)
             self.table.setCellWidget(row, 6, weight_widget)
@@ -365,8 +393,26 @@ class StoreMarginDialog(QDialog):
             btn_layout.addWidget(btn_edit)
             self.table.setCellWidget(row, 7, btn_widget)
             self.table.item(row, 1).setData(Qt.UserRole, prod_id)
+            prod_id_for_orders = prod_id
+            order_label.setProperty("prod_id", prod_id_for_orders)
+            self._update_order_label_for_row(row, weight_input, order_label, prod_id_for_orders)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.calculate_total_margin()
+        self.update_total_orders_label()
+
+    def _update_order_label_for_row(self, row, weight_input, order_label, prod_id):
+        """更新单量显示标签"""
+        spec_counts = self.db.safe_fetchall(
+            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            (prod_id,)
+        )
+        total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
+        if total_prod_orders > 0:
+            order_label.setText("")
+            weight_input.setToolTip(f"订单数: {total_prod_orders}单")
+        else:
+            order_label.setText("")
+            weight_input.setToolTip("")
 
     def get_product_margin(self, product_id):
         specs = self.db.safe_fetchall(
@@ -546,3 +592,279 @@ class StoreMarginDialog(QDialog):
     def open_spec_dialog(self, product_id, product_code, product_title):
         """通过 main_app 打开规格对话框，避免 dialogs 依赖主模块中的 ProductSpecDialog"""
         self.main_app.open_product_spec_dialog(self.db, product_id, product_code, product_title, self)
+
+    def import_orders(self):
+        """导入订单功能"""
+        if not OPENPYXL_AVAILABLE:
+            QMessageBox.warning(self, "缺少依赖", "请先安装 openpyxl 库：\npip install openpyxl")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择订单Excel文件", "", "Excel文件 (*.xlsx *.xls)")
+        if not file_path:
+            return
+        try:
+            wb = load_workbook(file_path, data_only=True)
+            sheet = wb.active
+            headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
+            if not headers or all(h == "" for h in headers):
+                QMessageBox.warning(self, "错误", "Excel文件没有找到有效的表头行")
+                return
+            col_mapping = self._auto_detect_columns(headers)
+            if not all(col_mapping.values()):
+                col_mapping = self._show_column_mapping_dialog(headers, col_mapping)
+                if not col_mapping:
+                    return
+            product_id_col = col_mapping["product_id"]
+            spec_code_col = col_mapping["spec_code"]
+            quantity_col = col_mapping["quantity"]
+            products_in_store = self.db.safe_fetchall(
+                "SELECT id, name FROM products WHERE store_id=? ORDER BY sort_order", (self.store_id,)
+            )
+            if not products_in_store:
+                QMessageBox.information(self, "提示", "当前店铺没有任何商品，请先添加商品")
+                return
+            product_code_to_id = {str(p[1]): p[0] for p in products_in_store}
+            product_codes_in_store = set(str(p[1]) for p in products_in_store)
+            all_store_specs = {}
+            for prod_id, prod_code in products_in_store:
+                specs = self.db.safe_fetchall(
+                    "SELECT spec_code FROM product_specs WHERE product_id=?", (prod_id,)
+                )
+                all_store_specs[prod_id] = set(str(s[0]) for s in specs if s[0])
+            order_data = {}
+            excel_product_codes_found = set()
+            total_row_count = 0
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                total_row_count += 1
+                if total_row_count > 10000:
+                    break
+                try:
+                    product_id_value = str(row[product_id_col]).strip() if product_id_col < len(row) else ""
+                    spec_code_value = str(row[spec_code_col]).strip() if spec_code_col < len(row) else ""
+                    quantity_value = row[quantity_col] if quantity_col < len(row) else None
+                except:
+                    continue
+                if not product_id_value or product_id_value == "None":
+                    continue
+                if product_id_value not in product_codes_in_store:
+                    continue
+                excel_product_codes_found.add(product_id_value)
+                prod_id = product_code_to_id.get(product_id_value)
+                if prod_id is None:
+                    continue
+                quantity = 1
+                if quantity_value is not None:
+                    try:
+                        quantity = max(1, int(quantity_value))
+                    except (ValueError, TypeError):
+                        quantity = 1
+                spec_codes = all_store_specs.get(prod_id, set())
+                spec_code_str = str(spec_code_value).strip() if spec_code_value else ""
+                if spec_code_str and spec_code_str != "None" and spec_code_str in spec_codes:
+                    key = (prod_id, spec_code_str)
+                    if key not in order_data:
+                        order_data[key] = 0
+                    order_data[key] += quantity
+            missing_product_codes = product_codes_in_store - excel_product_codes_found
+            if missing_product_codes:
+                msg = f"以下商品ID在表格中没有订单记录：\n{', '.join(missing_product_codes)}\n\n是否继续同步（未匹配的商品链接权重将设为0）？"
+                reply = QMessageBox.question(self, "部分商品无订单", msg, QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.No:
+                    return
+            import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
+            print(f"[DEBUG] 准备插入订单数据: {order_data}")
+            for (prod_id, spec_code), count in order_data.items():
+                print(f"[DEBUG] 插入: store_id={self.store_id}, prod_id={prod_id}, spec_code={spec_code}, count={count}")
+                self.db.safe_execute(
+                    "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time) VALUES (?, ?, ?, ?, ?)",
+                    (self.store_id, prod_id, spec_code, count, import_time)
+                )
+            self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
+            self.sync_order_weight()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
+
+    def _auto_detect_columns(self, headers):
+        """自动检测列映射"""
+        mapping = {"product_id": None, "spec_code": None, "quantity": None}
+        product_id_keywords = ["商品id", "商品ID", "id", "产品id", "产品ID", "product_id"]
+        spec_code_keywords = ["规格编码", "规格code", "spec_code", "规格code", "sku", "SKU"]
+        quantity_keywords = ["数量", "订单数量", "quantity", "count", "num", "销售数量"]
+        for idx, header in enumerate(headers):
+            header_lower = header.lower().strip()
+            if mapping["product_id"] is None:
+                for kw in product_id_keywords:
+                    if kw in header_lower:
+                        mapping["product_id"] = idx
+                        break
+            if mapping["spec_code"] is None:
+                for kw in spec_code_keywords:
+                    if kw in header_lower:
+                        mapping["spec_code"] = idx
+                        break
+            if mapping["quantity"] is None:
+                for kw in quantity_keywords:
+                    if kw in header_lower:
+                        mapping["quantity"] = idx
+                        break
+        return mapping
+
+    def _show_column_mapping_dialog(self, headers, auto_mapping):
+        """显示列映射对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📋 列映射选择")
+        dialog.resize(500, 300)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("请为每个字段选择对应的Excel列："))
+        combo_product_id = QComboBox()
+        combo_product_id.addItems(["-- 不选择 --"] + headers)
+        if auto_mapping["product_id"] is not None:
+            combo_product_id.setCurrentIndex(auto_mapping["product_id"] + 1)
+        layout.addWidget(QLabel("商品ID列："))
+        layout.addWidget(combo_product_id)
+        combo_spec_code = QComboBox()
+        combo_spec_code.addItems(["-- 不选择 --"] + headers)
+        if auto_mapping["spec_code"] is not None:
+            combo_spec_code.setCurrentIndex(auto_mapping["spec_code"] + 1)
+        layout.addWidget(QLabel("规格编码列："))
+        layout.addWidget(combo_spec_code)
+        combo_quantity = QComboBox()
+        combo_quantity.addItems(["-- 不选择（默认为1） --"] + headers)
+        if auto_mapping["quantity"] is not None:
+            combo_quantity.setCurrentIndex(auto_mapping["quantity"] + 1)
+        layout.addWidget(QLabel("数量列："))
+        layout.addWidget(combo_quantity)
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("确认")
+        btn_ok.setStyleSheet("QPushButton { background-color: #27ae60; color: white; padding: 8px 20px; border-radius: 4px; }")
+        btn_cancel = QPushButton("取消")
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        result = {"product_id": None, "spec_code": None, "quantity": None}
+        def on_ok():
+            result["product_id"] = combo_product_id.currentIndex() - 1 if combo_product_id.currentIndex() > 0 else None
+            result["spec_code"] = combo_spec_code.currentIndex() - 1 if combo_spec_code.currentIndex() > 0 else None
+            result["quantity"] = combo_quantity.currentIndex() - 1 if combo_quantity.currentIndex() > 0 else None
+            dialog.accept()
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dialog.reject)
+        if dialog.exec_() == QDialog.Accepted:
+            return result
+        return None
+
+    def sync_order_weight(self):
+        """同步订单权重"""
+        print(f"[DEBUG store_margin] sync_order_weight called for store_id={self.store_id}")
+        imported_data = self.db.safe_fetchall(
+            "SELECT product_id, spec_code, order_count FROM imported_orders WHERE store_id=?",
+            (self.store_id,)
+        )
+        print(f"[DEBUG store_margin] imported_data: {imported_data}")
+        if not imported_data:
+            self.main_app.show_toast("⚠️ 没有找到已导入的订单数据")
+            return
+        prod_order_totals = {}
+        spec_order_counts = {}
+        for product_id, spec_code, order_count in imported_data:
+            spec_code_str = str(spec_code).strip()
+            if product_id not in prod_order_totals:
+                prod_order_totals[product_id] = 0
+            prod_order_totals[product_id] += order_count
+            key = (product_id, spec_code_str)
+            if key not in spec_order_counts:
+                spec_order_counts[key] = 0
+            spec_order_counts[key] += order_count
+        products_in_store = self.db.safe_fetchall(
+            "SELECT id FROM products WHERE store_id=?", (self.store_id,)
+        )
+        store_total_orders = sum(prod_order_totals.get(p[0], 0) for p in products_in_store)
+        print(f"[DEBUG] 店铺总订单: {store_total_orders}")
+        print(f"[DEBUG] 每个商品订单: {prod_order_totals}")
+        print(f"[DEBUG] 每个规格订单: {spec_order_counts}")
+        for prod_id in prod_order_totals:
+            total = prod_order_totals[prod_id]
+            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
+            print(f"[DEBUG] 商品 {prod_id}: 订单{total}, 权重{weight:.2f}%")
+            self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, prod_id))
+            if prod_id in self.product_weights:
+                self.product_weights[prod_id]["weight"] = weight
+        for prod_id, prod_data in self.product_weights.items():
+            specs = self.db.safe_fetchall(
+                "SELECT spec_code FROM product_specs WHERE product_id=?", (prod_id,)
+            )
+            for (spec_code,) in specs:
+                if (prod_id, spec_code) not in spec_order_counts:
+                    self.db.safe_execute(
+                        "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
+                        (prod_id, spec_code)
+                    )
+        for (product_id, spec_code), count in spec_order_counts.items():
+            prod_total = prod_order_totals.get(product_id, 0)
+            weight = (count / prod_total * 100) if prod_total > 0 else 0
+            print(f"[DEBUG] 规格 {product_id}/{spec_code}: 订单{count}, 权重{weight:.2f}%")
+            self.db.safe_execute(
+                "UPDATE product_specs SET weight_percent=? WHERE product_id=? AND spec_code=?",
+                (weight, product_id, str(spec_code))
+            )
+        for row in range(self.table.rowCount()):
+            prod_id_item = self.table.item(row, 1)
+            if not prod_id_item:
+                continue
+            prod_id = prod_id_item.data(Qt.UserRole)
+            if not prod_id or prod_id not in prod_order_totals:
+                continue
+            total = prod_order_totals[prod_id]
+            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
+            cell_widget = self.table.cellWidget(row, 6)
+            if cell_widget:
+                weight_input = cell_widget.findChild(QLineEdit)
+                if weight_input:
+                    weight_input.blockSignals(True)
+                    weight_input.setText(f"{weight:.2f}%")
+                    weight_input.blockSignals(False)
+            spec_counts = self.db.safe_fetchall(
+                "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+                (prod_id,)
+            )
+            total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
+            order_label_widget = self.table.cellWidget(row, 7)
+            if order_label_widget:
+                order_label = order_label_widget.findChild(QLabel)
+                if order_label:
+                    order_label.setText("")
+            if weight_input and total_prod_orders > 0:
+                weight_input.setToolTip(f"订单数: {total_prod_orders}单")
+        self.update_total_orders_label()
+        self.main_app.show_toast("✅ 订单权重已同步")
+        self.main_app.refresh_store_weight_sync_flag(self.store_id)
+
+    def update_total_orders_label(self):
+        """更新总订单标签"""
+        imported_data = self.db.safe_fetchall(
+            "SELECT SUM(order_count) FROM imported_orders WHERE store_id=?",
+            (self.store_id,)
+        )
+        total = imported_data[0][0] if imported_data and imported_data[0][0] else 0
+        self.lbl_total_orders.setText(f"总订单: {total}")
+
+    def update_weight_display_with_orders(self):
+        """更新权重列显示单量"""
+        for row in range(self.table.rowCount()):
+            prod_id = self.table.item(row, 1).data(Qt.UserRole)
+            if not prod_id:
+                continue
+            spec_counts = self.db.safe_fetchall(
+                "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+                (prod_id,)
+            )
+            total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
+            cell_widget = self.table.cellWidget(row, 6)
+            if not cell_widget:
+                continue
+            weight_input = cell_widget.findChild(QLineEdit)
+            if weight_input:
+                current_weight = weight_input.text()
+                if total_prod_orders > 0:
+                    weight_input.setToolTip(f"订单数: {total_prod_orders}")
+

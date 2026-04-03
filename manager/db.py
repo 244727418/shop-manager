@@ -283,6 +283,24 @@ class SafeDatabaseManager:
                 store_id INTEGER NOT NULL, year INTEGER, month INTEGER, day INTEGER, 
                 records_json TEXT, PRIMARY KEY(store_id, year, month, day))''')
 
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS imported_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                spec_code TEXT NOT NULL,
+                order_count INTEGER DEFAULT 1,
+                import_time TEXT NOT NULL,
+                UNIQUE(store_id, product_id, spec_code))''')
+
+            self.cursor.execute("PRAGMA table_info(imported_orders)")
+            imported_columns = [col[1] for col in self.cursor.fetchall()]
+            if 'product_id' not in imported_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN product_id INTEGER")
+                    print("✅ 已添加product_id字段到imported_orders表")
+                except Exception as e:
+                    print(f"添加product_id字段失败: {e}")
+
             self.cursor.execute("PRAGMA table_info(profit_records)")
             columns = [col[1] for col in self.cursor.fetchall()]
             required_columns = {

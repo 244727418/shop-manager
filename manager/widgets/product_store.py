@@ -428,12 +428,26 @@ class StoreWidget(QWidget):
         label_layout.setContentsMargins(0, 0, 0, 0)
         label_layout.setSpacing(2)
 
+        top_row_widget = QWidget()
+        top_row_layout = QHBoxLayout(top_row_widget)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(5)
+
+        self.sync_flag_label = QLabel("")
+        self.sync_flag_label.setStyleSheet("background-color: #d4edda; color: #155724; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;")
+        self.sync_flag_label.setAlignment(Qt.AlignCenter)
+        self.sync_flag_label.hide()
+
         self.label = QLabel(f" {store_name}")
         self.label.setStyleSheet("background-color: #ffe0b2; font-weight: bold; padding: 5px; border-radius: 5px;")
         self.label.setWordWrap(True)
         self.label.setCursor(Qt.PointingHandCursor)
         self.label.setToolTip("左键双击查看店铺毛利 | 右键双击编辑店铺备注")
         self.label.installEventFilter(self)
+
+        top_row_layout.addWidget(self.sync_flag_label)
+        top_row_layout.addWidget(self.label)
+        top_row_layout.addStretch()
 
         memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
         store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
@@ -458,7 +472,7 @@ class StoreWidget(QWidget):
             self.margin_label = QLabel("   综合毛利: --")
             self.margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
 
-        label_layout.addWidget(self.label)
+        label_layout.addWidget(top_row_widget)
         label_layout.addWidget(self.memo_label)
         label_layout.addWidget(self.margin_label)
 
@@ -555,7 +569,7 @@ class StoreWidget(QWidget):
         if obj == self.label and event.type() == QEvent.MouseButtonDblClick:
             self.open_store_margin_dialog()
             return True
-        elif obj == self.memo_label and event.type() == QEvent.MouseButtonDblClick:
+        elif hasattr(self, 'memo_label') and obj == self.memo_label and event.type() == QEvent.MouseButtonDblClick:
             self.edit_store_memo()
             return True
         return super().eventFilter(obj, event)
@@ -616,6 +630,20 @@ class StoreWidget(QWidget):
             self.margin_label.setText("   综合毛利: --")
             self.margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
         self.margin_label.show()
+
+    def refresh_sync_flag(self):
+        """刷新权重已同步标签显示"""
+        imported_data = self.db.safe_fetchall(
+            "SELECT COUNT(*) FROM imported_orders WHERE store_id=?",
+            (self.store_id,)
+        )
+        has_imported = imported_data and imported_data[0][0] > 0 if imported_data else False
+        if has_imported:
+            self.sync_flag_label.setText("✅权重已同步")
+            self.sync_flag_label.show()
+        else:
+            self.sync_flag_label.setText("")
+            self.sync_flag_label.hide()
 
 
 class RecordRow(QWidget):

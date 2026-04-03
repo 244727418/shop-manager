@@ -885,6 +885,15 @@ class ShopManagerApp(QMainWindow):
         dialog = StoreMarginDialog(store_id, store_name, self, self, on_margin_changed)
         dialog.exec_()
 
+    def refresh_store_weight_sync_flag(self, store_id):
+        """刷新店铺的权重已同步标签（供 StoreMarginDialog 调用）"""
+        for row in range(self.frozen_table.rowCount()):
+            widget = self.frozen_table.cellWidget(row, 0)
+            if widget and hasattr(widget, 'store_id') and widget.store_id == store_id:
+                if hasattr(widget, 'refresh_sync_flag'):
+                    widget.refresh_sync_flag()
+                break
+
     def open_product_spec_dialog(self, db, product_id, product_code, product_title, parent):
         """打开规格与毛利对话框（供 StoreMarginDialog 等调用，避免 dialogs 依赖本模块）"""
         dialog = ProductSpecDialog(db, product_id, product_code, product_title, parent)

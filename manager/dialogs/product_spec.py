@@ -36,7 +36,7 @@ class ProductSpecDialog(QDialog):
         self.main_app = parent
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
-        self.resize(900, 900)
+        self.resize(980, 900)
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -343,28 +343,30 @@ class ProductSpecDialog(QDialog):
         
         # 2. 规格表格
         self.table = QTableWidget()
-        # 【关键修改】改为 9 列：AI按钮 + 规格名称 + 关联编码 + 自动成本 + 手动售价 + 券后价 + 单规格毛利 + 权重% + 操作
-        self.table.setColumnCount(9)
+        # 【关键修改】改为 10 列：AI按钮 + 规格名称 + 关联编码 + 自动成本 + 手动售价 + 券后价 + 单规格毛利 + 权重% + 单量 + 操作
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "操作"
+            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "单量", "操作"
         ])
         
         # 设置列宽策略 - 规格名称、权重和操作固定，AI按钮和自动拉伸
         header = self.table.horizontalHeader()
         
-        for i in range(9):
-            if i == 1 or i == 7 or i == 8:  # 规格名称(1)、权重(7)和操作(8)保持固定宽度
+        for i in range(10):
+            if i == 1 or i == 7 or i == 8 or i == 9:  # 规格名称(1)、权重(7)、单量(8)和操作(9)保持固定宽度
                 header.setSectionResizeMode(i, QHeaderView.Fixed)
                 if i == 1:
                     saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(300))
                 elif i == 7:
                     saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(60))  # 权重
+                elif i == 8:
+                    saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(50))  # 单量
                 else:
                     saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(50))
                 try:
                     self.table.setColumnWidth(i, int(saved_width))
                 except:
-                    self.table.setColumnWidth(i, 300 if i == 1 else (60 if i == 7 else 50))
+                    self.table.setColumnWidth(i, 300 if i == 1 else (60 if i == 7 else (50 if i == 8 else 50)))
             else:  # AI按钮(0)和其他列自动拉伸
                 header.setSectionResizeMode(i, QHeaderView.Stretch)
         
@@ -404,21 +406,36 @@ class ProductSpecDialog(QDialog):
         btn_avg = QPushButton("⚖️ 一键均分权重")
         btn_avg.clicked.connect(self.average_weights)
         
-        self.btn_profit_calc = QPushButton("🧮 计算利润")
+        self.btn_profit_calc = QPushButton("🧮 投产计算器")
         self.btn_profit_calc.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
                 color: white;
                 font-weight: bold;
-                padding: 5px 15px;
-                border-radius: 3px;
+                padding: 8px 16px;
+                border-radius: 4px;
             }
             QPushButton:hover {
                 background-color: #8e44ad;
             }
         """)
         self.btn_profit_calc.clicked.connect(self.open_profit_calculator)
-        
+
+        self.btn_sync_weight = QPushButton("🔄 同步订单权重")
+        self.btn_sync_weight.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d35400;
+            }
+        """)
+        self.btn_sync_weight.clicked.connect(self.sync_order_weight)
+
         btn_save = QPushButton("💾 保存数据")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px 20px;")
         btn_save.clicked.connect(self.save_data)
@@ -429,16 +446,23 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_add)
         btn_layout.addWidget(btn_avg)
         btn_layout.addWidget(self.btn_profit_calc)
+        btn_layout.addWidget(self.btn_sync_weight)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
-        
+
         # 4. 统计标签
         self.lbl_total_margin = QLabel("当前综合毛利率：0.00%")
         self.lbl_total_margin.setStyleSheet("font-size: 16px; font-weight: bold; color: #d9534f; padding: 10px;")
         self.lbl_total_margin.setAlignment(Qt.AlignRight)
         layout.addWidget(self.lbl_total_margin)
+
+        # 4.1 总订单标签
+        self.lbl_total_orders = QLabel("总订单: 0")
+        self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
+        self.lbl_total_orders.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.lbl_total_orders)
         
         # 5. 剩余可分配权重标签
         self.lbl_remaining_weight = QLabel("剩余可分配权重：100.00%")
@@ -594,18 +618,32 @@ class ProductSpecDialog(QDialog):
                 final_price_item = QTableWidgetItem(f"{final_price:.2f}")
                 final_price_item.setFlags(final_price_item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row_idx, 5, final_price_item)
-                
+
                 # 毛利列 (不可编辑)
                 margin_item = QTableWidgetItem(f"{margin_pct:.2f}%")
                 margin_item.setFlags(margin_item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row_idx, 6, margin_item)
-                
+
                 # 权重列 - 根据锁定状态显示锁图标
+                order_count_res = self.db.safe_fetchall(
+                    "SELECT order_count FROM imported_orders WHERE product_id=? AND spec_code=?",
+                    (self.product_id, str(spec_code))
+                )
+                order_count = order_count_res[0][0] if order_count_res and order_count_res[0][0] else 0
                 if is_locked == 1:
-                    weight_text = f"🔒 {weight_percent:.2f}"
+                    weight_text = f"🔒 {weight_percent:.2f}%"
                 else:
-                    weight_text = f"{weight_percent:.2f}"
-                self.table.setItem(row_idx, 7, QTableWidgetItem(weight_text))
+                    weight_text = f"{weight_percent:.2f}%"
+                weight_item = QTableWidgetItem(weight_text)
+                weight_item.setData(Qt.UserRole, order_count)
+                if order_count > 0:
+                    weight_item.setToolTip(f"订单数: {order_count}单")
+                self.table.setItem(row_idx, 7, weight_item)
+                
+                # 第 8 列添加单量
+                order_count_item = QTableWidgetItem(f"{order_count}单")
+                order_count_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row_idx, 8, order_count_item)
                 
                 # 第 9 列添加删除按钮
                 btn_delete = QPushButton("🗑️")
@@ -618,7 +656,7 @@ class ProductSpecDialog(QDialog):
                     QPushButton:pressed { background-color: #d9363e; }
                 """)
                 btn_delete.clicked.connect(lambda checked, r=row_idx: self.delete_spec_row(r))
-                self.table.setCellWidget(row_idx, 8, btn_delete)
+                self.table.setCellWidget(row_idx, 9, btn_delete)
                 
                 # 🔑【关键修复】强制更新表格
                 self.table.update()
@@ -626,6 +664,7 @@ class ProductSpecDialog(QDialog):
             # 5. 加载完成后，计算一次综合毛利
             self.calculate_total_margin()
             self.update_remaining_weight_label()
+            self.update_total_orders_label()
 
             # 🔑【关键修复】恢复之前选中的行
             if self._saved_current_row > 0 and self._saved_current_row < self.table.rowCount():
@@ -1334,14 +1373,21 @@ class ProductSpecDialog(QDialog):
                 # 提取数值 (去掉 % 号)
                 margin_val = float(margin_text.replace("%", "")) / 100.0
                 
-                # --- 处理权重 (关键修复：去掉锁图标) ---
+                # --- 处理权重 (关键修复：去掉锁图标和单量后缀) ---
                 weight_text = item_weight.data(Qt.DisplayRole) or ""
                 # 去掉锁图标和空格
                 clean_weight_text = weight_text.replace("🔒", "").strip()
-                
+                # 去掉单量后缀如 "(20单)" 或 "(20)"
+                import re
+                match = re.match(r'^([\d.]+)', clean_weight_text)
+                if match:
+                    clean_weight_text = match.group(1)
+                else:
+                    clean_weight_text = ""
+
                 if not clean_weight_text:
                     continue
-                    
+
                 weight_val = float(clean_weight_text)
                 
                 # --- 累加计算 ---
@@ -1889,7 +1935,78 @@ class ProductSpecDialog(QDialog):
         # 最后再去除一次·符号
         cleaned = cleaned.replace('·', '')
         return cleaned
-    
+
+    def sync_order_weight(self):
+        """同步订单权重（从已导入的订单数据中读取）"""
+        print(f"[DEBUG product_spec] sync_order_weight called for product_id={self.product_id}")
+        imported_data = self.db.safe_fetchall(
+            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            (self.product_id,)
+        )
+        print(f"[DEBUG product_spec] imported_data: {imported_data}")
+        if not imported_data:
+            QMessageBox.information(self, "提示", "没有找到该商品的已导入订单数据\n请先在店铺毛利管理中导入订单")
+            return
+        spec_order_counts = {str(row[0]): row[1] for row in imported_data}
+        total_orders = sum(spec_order_counts.values())
+        print(f"[DEBUG product_spec] spec_order_counts: {spec_order_counts}, total_orders: {total_orders}")
+        if total_orders == 0:
+            return
+        for row in range(self.table.rowCount()):
+            spec_code_item = self.table.item(row, 2)
+            if not spec_code_item:
+                continue
+            spec_code = str(spec_code_item.text()).strip()
+            print(f"[DEBUG product_spec] row={row}, spec_code='{spec_code}', checking in spec_order_counts: {spec_code in spec_order_counts}")
+            is_locked_item = self.table.item(row, 7)
+            is_locked = 1 if is_locked_item and "🔒" in is_locked_item.text() else 0
+            if spec_code in spec_order_counts:
+                count = spec_order_counts[spec_code]
+                weight = (count / total_orders) * 100
+                print(f"[DEBUG product_spec] Updating row {row}: count={count}, weight={weight:.2f}%")
+                self.db.safe_execute(
+                    "UPDATE product_specs SET weight_percent=? WHERE product_id=? AND spec_code=?",
+                    (weight, self.product_id, spec_code)
+                )
+                if is_locked == 1:
+                    weight_text = f"🔒 {weight:.2f}%"
+                else:
+                    weight_text = f"{weight:.2f}%"
+                weight_item = QTableWidgetItem(weight_text)
+                weight_item.setData(Qt.UserRole, count)
+                weight_item.setToolTip(f"订单数: {count}单")
+                self.table.setItem(row, 7, weight_item)
+                order_count_item = QTableWidgetItem(f"{count}单")
+                order_count_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 8, order_count_item)
+            else:
+                self.db.safe_execute(
+                    "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
+                    (self.product_id, spec_code)
+                )
+                weight_item = self.table.item(row, 7)
+                if weight_item:
+                    if is_locked == 1:
+                        weight_item.setText(f"🔒 0.00%")
+                    else:
+                        weight_item.setText("0.00%")
+                    weight_item.setData(Qt.UserRole, 0)
+                    weight_item.setToolTip("")
+                order_count_item = QTableWidgetItem("0单")
+                order_count_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 8, order_count_item)
+        self.update_total_orders_label()
+        self.main_app.show_toast("✅ 订单权重已同步")
+
+    def update_total_orders_label(self):
+        """更新总订单标签"""
+        imported_data = self.db.safe_fetchall(
+            "SELECT SUM(order_count) FROM imported_orders WHERE product_id=?",
+            (self.product_id,)
+        )
+        total = imported_data[0][0] if imported_data and imported_data[0][0] else 0
+        self.lbl_total_orders.setText(f"总订单: {total}")
+
     def calculate_weighted_avg_price(self):
         """根据权重计算加权平均客单价"""
         total_weight = 0.0
@@ -1906,6 +2023,12 @@ class ProductSpecDialog(QDialog):
                 price = float(price_item.text()) if price_item.text() else 0
                 weight_text = weight_item.data(Qt.DisplayRole) or ""
                 clean_weight_text = weight_text.replace("🔒", "").strip()
+                import re
+                match = re.match(r'^([\d.]+)', clean_weight_text)
+                if match:
+                    clean_weight_text = match.group(1)
+                else:
+                    clean_weight_text = "0"
                 weight = float(clean_weight_text) if clean_weight_text else 0
                 
                 if price > 0 and weight > 0:
@@ -2107,8 +2230,7 @@ class ProductSpecDialog(QDialog):
                 # 判断是否锁定（检查是否有锁图标）
                 is_locked = 1 if "🔒" in weight_text else 0
                 # 去掉锁图标和空格，只保留数字部分
-                clean_weight = weight_text.replace("🔒", "").strip()
-                
+                clean_weight = weight_text.replace("🔒", "").strip().replace("%", "")
                 try:
                     weight_percent = float(clean_weight) if clean_weight else 0.0
                 except ValueError:
