@@ -44,6 +44,7 @@ class ProductSpecDialog(QDialog):
         # 🔑【新增】保存当前选中的行
         self._saved_current_row = 0
         self.load_specs()
+        self.update_total_orders_label()
         self._col_resize_timer = QTimer(self)
         self._col_resize_timer.setSingleShot(True)
         self._col_resize_timer.timeout.connect(self._save_col_width_to_db)
@@ -463,6 +464,12 @@ class ProductSpecDialog(QDialog):
         self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
         self.lbl_total_orders.setAlignment(Qt.AlignRight)
         layout.addWidget(self.lbl_total_orders)
+
+        # 4.2 销售金额和客单价标签
+        self.lbl_sales_info = QLabel("销售额: - | 客单价: -")
+        self.lbl_sales_info.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
+        self.lbl_sales_info.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.lbl_sales_info)
         
         # 5. 剩余可分配权重标签
         self.lbl_remaining_weight = QLabel("剩余可分配权重：100.00%")
@@ -2007,6 +2014,23 @@ class ProductSpecDialog(QDialog):
         )
         total = imported_data[0][0] if imported_data and imported_data[0][0] else 0
         self.lbl_total_orders.setText(f"总订单: {total}")
+        spec_sales = self.db.safe_fetchall(
+            "SELECT ps.sale_price, io.order_count FROM product_specs ps "
+            "LEFT JOIN imported_orders io ON io.product_id = ps.product_id AND io.spec_code = ps.spec_code "
+            "WHERE ps.product_id = ?",
+            (self.product_id,)
+        )
+        total_amount = 0.0
+        total_orders = 0
+        for sale_price, order_count in spec_sales:
+            if sale_price and order_count:
+                total_amount += sale_price * order_count
+                total_orders += order_count
+        if total_orders > 0:
+            avg_price = total_amount / total_orders
+            self.lbl_sales_info.setText(f"销售额: ¥{total_amount:.2f} | 客单价: ¥{avg_price:.2f}")
+        else:
+            self.lbl_sales_info.setText("销售额: - | 客单价: -")
 
     def calculate_weighted_avg_price(self):
         """根据权重计算加权平均客单价"""

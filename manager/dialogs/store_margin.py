@@ -237,17 +237,20 @@ class StoreMarginDialog(QDialog):
         self.lbl_total_orders = QLabel("总订单: 0")
         self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
         header_layout.addWidget(self.lbl_total_orders)
+        self.lbl_total_amount = QLabel("总销售额: ¥0.00")
+        self.lbl_total_amount.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
+        header_layout.addWidget(self.lbl_total_amount)
         layout.addWidget(header_widget)
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
-        self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "操作"])
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "销售额", "操作"])
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
-        for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 60, 80]):
+        for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 60, 80, 80]):
             self.table.setColumnWidth(i, w)
         layout.addWidget(self.table)
         btn_widget = QWidget()
@@ -397,7 +400,8 @@ class StoreMarginDialog(QDialog):
             btn_edit.setFixedSize(40, 25)
             btn_edit.clicked.connect(lambda checked, pid=prod_id, pc=prod_code, pt=prod_title: self.open_spec_dialog(pid, pc, pt))
             btn_layout.addWidget(btn_edit)
-            self.table.setCellWidget(row, 8, btn_widget)
+            self.table.setCellWidget(row, 9, btn_widget)
+            self.table.setItem(row, 8, QTableWidgetItem("-"))
             self.table.item(row, 1).setData(Qt.UserRole, prod_id)
             order_label.setProperty("prod_id", prod_id)
             self._update_order_label_for_row(row, weight_input, order_label, prod_id)
@@ -407,7 +411,7 @@ class StoreMarginDialog(QDialog):
         self.update_product_avg_price()
 
     def update_product_avg_price(self):
-        """更新所有商品的客单价列"""
+        """更新所有商品的客单价和销售额列"""
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
@@ -430,8 +434,10 @@ class StoreMarginDialog(QDialog):
             if total_orders > 0:
                 avg_price = total_amount / total_orders
                 self.table.item(row, 4).setText(f"¥{avg_price:.2f}")
+                self.table.item(row, 8).setText(f"¥{total_amount:.2f}")
             else:
                 self.table.item(row, 4).setText("-")
+                self.table.item(row, 8).setText("-")
 
     def _update_order_label_for_row(self, row, weight_input, order_label, prod_id):
         """更新单量显示标签"""
@@ -902,6 +908,7 @@ class StoreMarginDialog(QDialog):
             self.lbl_total_orders.setText(f"总订单: {total} | 综合客单价: ¥{avg_price:.2f}")
         else:
             self.lbl_total_orders.setText(f"总订单: 0")
+        self.lbl_total_amount.setText(f"总销售额: ¥{total_amount:.2f}")
 
     def update_weight_display_with_orders(self):
         """更新权重列显示单量"""
