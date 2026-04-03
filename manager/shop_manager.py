@@ -1,6 +1,172 @@
 # ================= 版本信息 =================
 VERSION = "2.4"
 
+# ================= GitHub 和在线更新管理模块 =================
+# 【预留功能】GitHub链接管理和版本检测框架
+class GitHubUpdateManager:
+    """GitHub链接管理和在线更新预留接口"""
+
+    GITHUB_API_URL = "https://api.github.com"
+    GITHUB_REPO_OWNER = "244727418"
+    GITHUB_REPO_NAME = "shop-manager"
+
+    def __init__(self, current_version):
+        self.current_version = current_version
+        self.latest_version = None
+        self.release_info = None
+
+    def get_repo_url(self):
+        """获取仓库URL"""
+        return f"https://github.com/{self.GITHUB_REPO_OWNER}/{self.GITHUB_REPO_NAME}"
+
+    def get_repo_api_url(self):
+        """获取仓库API URL"""
+        return f"{self.GITHUB_API_URL}/repos/{self.GITHUB_REPO_OWNER}/{self.GITHUB_REPO_NAME}"
+
+    def get_release_url(self):
+        """获取最新Release页面URL"""
+        return f"{self.get_repo_url()}/releases/latest"
+
+    def check_for_updates(self):
+        """【预留】检查更新接口"""
+        try:
+            import urllib.request
+            import json
+            url = f"{self.get_repo_api_url()}/releases/latest"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Python'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode())
+                self.latest_version = data.get('tag_name', '').lstrip('v')
+                self.release_info = {
+                    'version': self.latest_version,
+                    'name': data.get('name', ''),
+                    'body': data.get('body', ''),
+                    'html_url': data.get('html_url', ''),
+                    'published_at': data.get('published_at', '')
+                }
+                return True
+        except Exception as e:
+            print(f"[GitHubUpdateManager] 检查更新失败: {e}")
+            return False
+
+    def check_github_connectivity(self):
+        """检测GitHub网络连接状态"""
+        try:
+            import urllib.request
+            test_urls = [
+                "https://github.com",
+                "https://api.github.com",
+                "https://www.github.com"
+            ]
+            for url in test_urls:
+                try:
+                    req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Python'})
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        if response.status == 200:
+                            return (True, "✅ GitHub连接正常")
+                except:
+                    continue
+            return (False, "⚠️ GitHub连接失败")
+        except Exception as e:
+            return (False, f"⚠️ GitHub连接异常: {str(e)[:20]}")
+
+    def is_new_version_available(self):
+        """【预留】判断是否有新版本"""
+        if not self.latest_version:
+            return False
+        try:
+            from packaging import version
+            return version.parse(self.latest_version) > version.parse(self.current_version)
+        except ImportError:
+            try:
+                current_parts = [int(x) for x in self.current_version.split('.')]
+                latest_parts = [int(x) for x in self.latest_version.split('.')]
+                for c, l in zip(current_parts, latest_parts):
+                    if l > c:
+                        return True
+                    elif c > l:
+                        return False
+                return len(latest_parts) > len(current_parts)
+            except:
+                return self.latest_version > self.current_version
+
+    def check_for_updates_with_info(self):
+        """检查更新并返回详细信息"""
+        result = {
+            'has_update': False,
+            'current_version': self.current_version,
+            'latest_version': None,
+            'release_name': '',
+            'release_body': '',
+            'download_url': '',
+            'release_url': '',
+            'error': None
+        }
+        try:
+            import urllib.request
+            import json
+            url = f"{self.get_repo_api_url()}/releases/latest"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Python', 'Accept': 'application/vnd.github.v3+json'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode())
+                self.latest_version = data.get('tag_name', '').lstrip('v')
+                self.release_info = data
+
+                result['latest_version'] = self.latest_version
+                result['release_name'] = data.get('name', '')
+                result['release_body'] = data.get('body', '')
+                result['release_url'] = data.get('html_url', '')
+
+                if data.get('assets'):
+                    for asset in data.get('assets', []):
+                        name = asset.get('name', '')
+                        if name.endswith('.exe') or name.endswith('.zip'):
+                            result['download_url'] = asset.get('browser_download_url', '')
+                            break
+
+                if not result['download_url']:
+                    result['download_url'] = result['release_url']
+
+                result['has_update'] = self.is_new_version_available()
+                return result
+        except Exception as e:
+            result['error'] = str(e)
+            print(f"[GitHubUpdateManager] 检查更新失败: {e}")
+            return result
+
+    def get_download_url(self):
+        """【预留】获取下载链接"""
+        if self.release_info and self.release_info.get('assets'):
+            for asset in self.release_info['assets']:
+                if asset.get('name', '').endswith('.exe') or asset.get('name', '').endswith('.zip'):
+                    return asset.get('browser_download_url', '')
+        return self.release_info.get('html_url', '') if self.release_info else ''
+
+    @staticmethod
+    def is_github_url(url):
+        """检测是否为GitHub链接"""
+        if not url:
+            return False
+        github_prefixes = (
+            "https://github.com/",
+            "https://www.github.com/",
+            "http://github.com/",
+            "http://www.github.com/"
+        )
+        return url.strip().lower().startswith(github_prefixes)
+
+    @staticmethod
+    def parse_github_url(url):
+        """解析GitHub链接，返回(owner, repo)或None"""
+        import re
+        if not GitHubUpdateManager.is_github_url(url):
+            return None
+        pattern = r"github\.com[/:]([\w-]+)/([\w.-]+)/?"
+        match = re.search(pattern, url)
+        if match:
+            return (match.group(1), match.group(2).rstrip('/'))
+        return None
+
 # ================= 系统标准库 =================
 import sys
 import os
@@ -119,7 +285,11 @@ class ShopManagerApp(QMainWindow):
         self.row_data_map = {}
         
         self.is_loading = False  # 防止重复加载
-        
+
+        # 初始化 GitHub 更新管理器（预留在线更新功能）
+        self.github_manager = GitHubUpdateManager(VERSION)
+        self.github_manager.current_version = VERSION
+
         self.init_ui()
         self.load_data_safe()
         
@@ -189,7 +359,73 @@ class ShopManagerApp(QMainWindow):
     def open_knowledge_base(self):
         """打开知识库（已废弃，保留兼容性）"""
         self.show_knowledge_base()
-    
+
+    def open_github_repo(self):
+        """打开GitHub仓库页面"""
+        import webbrowser
+        url = self.github_manager.get_repo_url()
+        webbrowser.open(url)
+        self.statusBar().showMessage(f"已打开GitHub仓库: {url}", 3000)
+
+    def check_github_connection(self):
+        """检测GitHub连接状态并更新界面显示"""
+        success, message = self.github_manager.check_github_connectivity()
+        self.lbl_github_status.setText(message)
+        if success:
+            self.lbl_github_status.setStyleSheet("color: #27ae60; font-size: 12px; padding: 0 5px;")
+        else:
+            self.lbl_github_status.setStyleSheet("color: #e74c3c; font-size: 12px; padding: 0 5px;")
+
+    def check_for_updates(self):
+        """检查软件更新"""
+        self.statusBar().showMessage("正在检查更新...", 3000)
+        self.btn_check_update.setEnabled(False)
+        QApplication.processEvents()
+
+        result = self.github_manager.check_for_updates_with_info()
+
+        self.btn_check_update.setEnabled(True)
+
+        if result['error']:
+            error_msg = result['error']
+            hint = ""
+            if "404" in str(error_msg):
+                hint = "\n\n可能原因：\n1. 仓库不存在或不可访问\n2. 仓库是私有的\n3. 还没有创建任何 Release\n\n提示：GitHub 上的 Release 需要手动创建。"
+            QMessageBox.warning(
+                self,
+                "检查更新失败",
+                f"无法连接到GitHub检查更新。\n\n错误信息：{error_msg}{hint}\n\n请确保网络连接正常后重试。"
+            )
+            return
+
+        current_v = result['current_version']
+        latest_v = result['latest_version']
+
+        if result['has_update']:
+            reply = QMessageBox.question(
+                self,
+                "发现新版本",
+                f"📢 发现新版本！\n\n"
+                f"当前版本：v{current_v}\n"
+                f"最新版本：v{latest_v}\n\n"
+                f"更新内容：\n{result['release_body'][:500]}{'...' if len(result['release_body']) > 500 else ''}\n\n"
+                f"是否前往下载更新？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                import webbrowser
+                download_url = result['download_url'] if result['download_url'] else result['release_url']
+                webbrowser.open(download_url)
+        else:
+            QMessageBox.information(
+                self,
+                "已是最新版本",
+                f"✅ 您当前使用的版本已是最新版本！\n\n"
+                f"当前版本：v{current_v}\n"
+                f"最新版本：v{latest_v}"
+            )
+
     def quit_application(self):
         """退出应用"""
         self.tray_icon.hide()
@@ -436,6 +672,49 @@ class ShopManagerApp(QMainWindow):
         toolbar.addWidget(self.lbl_month)
         toolbar.addWidget(btn_next)
         toolbar.addStretch()
+
+        # GitHub 仓库链接按钮（预留在线更新功能）- 移到状态栏右下角
+        github_widget = QWidget()
+        github_layout = QHBoxLayout(github_widget)
+        github_layout.setContentsMargins(0, 0, 5, 0)
+
+        self.lbl_github_status = QLabel("🔗 检测中...")
+        self.lbl_github_status.setStyleSheet("color: #888; font-size: 12px; padding: 0 5px;")
+        self.lbl_github_status.setAlignment(Qt.AlignVCenter)
+        github_layout.addWidget(self.lbl_github_status)
+
+        self.btn_github = QPushButton("⭐ GitHub")
+        self.btn_github.setFixedSize(80, 24)
+        self.btn_github.setStyleSheet("""
+            background-color: #24292e;
+            color: #ffffff;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+        """)
+        self.btn_github.clicked.connect(self.open_github_repo)
+        self.btn_github.setToolTip(f"仓库: {self.github_manager.GITHUB_REPO_OWNER}/{self.github_manager.GITHUB_REPO_NAME}\n点击访问GitHub仓库")
+        github_layout.addWidget(self.btn_github)
+
+        self.btn_check_update = QPushButton("🔄 检查更新")
+        self.btn_check_update.setFixedSize(90, 26)
+        self.btn_check_update.setStyleSheet("""
+            background-color: #17a2b8;
+            color: #ffffff;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 0 8px;
+        """)
+        self.btn_check_update.clicked.connect(self.check_for_updates)
+        self.btn_check_update.setToolTip("检查软件更新")
+        github_layout.addWidget(self.btn_check_update)
+
+        self.statusBar().addPermanentWidget(github_widget)
+
+        # 启动时检测GitHub连接
+        QTimer.singleShot(1000, self.check_github_connection)
+
         toolbar.addWidget(btn_add_store)
         
          # 1. 创建表格
