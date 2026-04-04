@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "2.4"
+VERSION = "2.5"
 
 # ================= GitHub 和在线更新管理模块 =================
 # 【预留功能】GitHub链接管理和版本检测框架
@@ -331,7 +331,12 @@ class ShopManagerApp(QMainWindow):
     
     def create_star_icon(self):
         """创建星星图标"""
-        svg_path = os.path.join(os.path.dirname(__file__), "icons", "xingxing.svg")
+        import sys
+        if getattr(sys, 'frozen', False):
+            icons_dir = os.path.join(sys._MEIPASS, "manager", "icons")
+        else:
+            icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        svg_path = os.path.join(icons_dir, "xingxing.svg")
         if os.path.exists(svg_path):
             renderer = QSvgRenderer(svg_path)
             pixmap = QPixmap(32, 32)
