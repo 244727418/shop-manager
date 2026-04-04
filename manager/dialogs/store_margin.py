@@ -7,8 +7,10 @@ from PyQt5.QtWidgets import (
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
     QAbstractItemView, QFileDialog, QComboBox, QDialog
 )
-from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator
+from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
+from PyQt5.QtGui import QClipboard
 
 try:
     from openpyxl import load_workbook
@@ -31,8 +33,74 @@ class StoreMarginDialog(QDialog):
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
         self.resize(1200, 800)
+
+        self.toast_label = QLabel(self)
+        self.toast_label.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.toast_label.setAttribute(Qt.WA_TranslucentBackground)
+        self.toast_label.setStyleSheet("""
+            background-color: rgba(128, 128, 128, 0.5);
+            color: black;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+        """)
+        self.toast_label.setAlignment(Qt.AlignCenter)
+        self.toast_label.hide()
+        self.toast_label.setGraphicsEffect(QGraphicsOpacityEffect(opacity=0.5))
+        self.toast_opacity_effect = QGraphicsOpacityEffect(opacity=0.5)
+        self.toast_label.setGraphicsEffect(self.toast_opacity_effect)
+
+        self.toast_fade_out_animation = QPropertyAnimation(self.toast_opacity_effect, b"opacity")
+        self.toast_fade_out_animation.setDuration(1000)
+        self.toast_fade_out_animation.setStartValue(0.5)
+        self.toast_fade_out_animation.setEndValue(0.0)
+        self.toast_fade_out_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.toast_fade_out_animation.finished.connect(self.toast_label.hide)
+
         self.init_ui()
         self.load_products()
+
+    def show_toast(self, message):
+        """显示气泡提示（淡入淡出1秒，不透明度50%）"""
+        self.toast_fade_out_animation.stop()
+        self.toast_opacity_effect.setOpacity(0.5)
+        self.toast_label.setText(message)
+        self.toast_label.adjustSize()
+        parent_pos = self.mapToGlobal(self.rect().bottomLeft())
+        x = parent_pos.x() + (self.width() - self.toast_label.width()) // 2
+        y = parent_pos.y() - 80
+        self.toast_label.move(x, y)
+        self.toast_label.show()
+        QTimer.singleShot(1000, self.fade_out_toast)
+
+    def fade_out_toast(self):
+        """淡出气泡提示"""
+        self.toast_fade_out_animation.start()
+
+    def get_sys_id_by_user_id(self, user_id):
+        """根据用户ID获取系统ID"""
+        for sys_id, uid in self.sys_id_to_user_id.items():
+            if uid == user_id:
+                return sys_id
+        return None
+
+    def get_main_spec(self, sys_id):
+        """获取商品的主卖规格"""
+        spec_counts = self.db.safe_fetchall(
+            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            (sys_id,)
+        )
+        if not spec_counts:
+            return None, 0
+        total_orders = sum(sc[1] for sc in spec_counts if sc[1])
+        if total_orders == 0:
+            return None, 0
+        max_spec = max(spec_counts, key=lambda x: x[1] if x[1] else 0)
+        return max_spec[0] if max_spec[0] else None, max_spec[1] if max_spec[1] else 0
+
+    def get_user_id_by_sys_id(self, sys_id):
+        """根据系统ID获取用户ID"""
+        return self.sys_id_to_user_id.get(sys_id)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonDblClick:
@@ -49,69 +117,57 @@ class StoreMarginDialog(QDialog):
                     return True
         return super().eventFilter(obj, event)
 
-    def on_weight_changed(self, prod_id, text):
-        if prod_id not in self.product_weights:
+    def on_weight_changed(self, user_id, text):
+        if user_id not in self.product_weights:
             return
         sender = self.sender()
         try:
             new_weight = float(text) if text else 0
         except ValueError:
             new_weight = 0
-        if new_weight < 0:
-            new_weight = 0
-            if sender:
-                sender.setText("0")
+        new_weight = max(0, min(100, new_weight))
         total_locked = sum(
-            data.get("weight", 0) for pid, data in self.product_weights.items()
-            if pid != prod_id and data.get("locked", 0)
+            data.get("weight", 0) for uid, data in self.product_weights.items()
+            if uid != user_id and data.get("locked", 0)
         )
         max_allowed = 100 - total_locked
         if new_weight > max_allowed:
             new_weight = max_allowed
-            if sender:
-                sender.blockSignals(True)
-                weight_str = str(int(new_weight)) if new_weight == int(new_weight) else f"{new_weight:.1f}"
-                sender.setText(weight_str)
-                sender.blockSignals(False)
-        if new_weight < 0:
-            new_weight = 0
-            if sender:
-                sender.blockSignals(True)
-                sender.setText("0")
-                sender.blockSignals(False)
-        if new_weight > 100:
-            new_weight = 100
-            if sender:
-                sender.blockSignals(True)
-                sender.setText("100")
-                sender.blockSignals(False)
-        self.product_weights[prod_id]["weight"] = new_weight
+        self.product_weights[user_id]["weight"] = new_weight
+        self.rebalance_unlocked_weights(user_id)
+        self.update_weight_inputs()
+        self.calculate_total_margin()
 
-    def on_weight_editing_finished(self, prod_id):
-        if prod_id not in self.product_weights:
+    def on_weight_editing_finished(self, user_id):
+        if user_id not in self.product_weights:
             return
-        new_weight = self.product_weights[prod_id].get("weight", 0)
-        self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (new_weight, prod_id))
-        self.rebalance_unlocked_weights(prod_id)
+        sys_id = self.get_sys_id_by_user_id(user_id)
+        if not sys_id:
+            return
+        new_weight = self.product_weights[user_id].get("weight", 0)
+        self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (new_weight, sys_id))
+        self.rebalance_unlocked_weights(user_id)
         self.calculate_total_margin()
         self.update_weight_inputs()
 
-    def rebalance_unlocked_weights(self, changed_prod_id):
+    def rebalance_unlocked_weights(self, changed_user_id):
         total_locked = sum(
             data.get("weight", 0) for data in self.product_weights.values() if data.get("locked", 0)
         )
-        changed_weight = self.product_weights[changed_prod_id]["weight"]
+        changed_weight = self.product_weights[changed_user_id]["weight"]
         remaining = max(0, 100 - total_locked - changed_weight)
         unlocked_prods = [
-            pid for pid, data in self.product_weights.items()
-            if pid != changed_prod_id and not data.get("locked", 0)
+            uid for uid, data in self.product_weights.items()
+            if uid != changed_user_id and not data.get("locked", 0)
         ]
         if not unlocked_prods:
             return
         avg_weight = remaining / len(unlocked_prods)
-        for pid in unlocked_prods:
-            self.product_weights[pid]["weight"] = avg_weight
-            self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (avg_weight, pid))
+        for uid in unlocked_prods:
+            self.product_weights[uid]["weight"] = avg_weight
+            sys_id = self.get_sys_id_by_user_id(uid)
+            if sys_id:
+                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (avg_weight, sys_id))
 
     def update_weight_inputs(self):
         for row in range(self.table.rowCount()):
@@ -136,11 +192,14 @@ class StoreMarginDialog(QDialog):
             prod_id = self.table.item(row, 1).data(Qt.UserRole)
             if not prod_id or prod_id not in self.product_weights:
                 continue
+            sys_id = self.get_sys_id_by_user_id(prod_id)
+            if not sys_id:
+                continue
             weight = self.product_weights[prod_id]["weight"]
             is_locked = self.product_weights[prod_id]["locked"]
             self.db.safe_execute(
                 "UPDATE products SET store_weight=?, store_weight_locked=? WHERE id=?",
-                (weight, is_locked, prod_id),
+                (weight, is_locked, sys_id),
             )
             saved_count += 1
         new_margin = self.calculate_total_margin()
@@ -166,55 +225,6 @@ class StoreMarginDialog(QDialog):
             self.db.save_store_record(self.store_id, year, month, day, records)
         except Exception as e:
             print(f"保存毛利日志失败: {e}")
-
-    def _calc_total_margin_from_db(self):
-        """计算当前综合毛利（从数据库权重）"""
-        try:
-            products = self.db.safe_fetchall(
-                "SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,)
-            )
-            if not products:
-                return None
-            total_weight = 0
-            total_weighted_margin = 0
-            for prod_id, store_weight in products:
-                if not store_weight or store_weight <= 0:
-                    continue
-                specs = self.db.safe_fetchall(
-                    "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
-                    (prod_id,),
-                )
-                if not specs:
-                    continue
-                coupon_res = self.db.safe_fetchall(
-                    "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?", (prod_id,)
-                )
-                coupon = (coupon_res[0][0] or 0) if coupon_res else 0
-                new_customer = (coupon_res[0][1] or 0) if coupon_res else 0
-                max_discount = max(coupon, new_customer)
-                total_spec_weight = 0
-                total_weighted_margin_prod = 0
-                for spec_code, sale_price, weight in specs:
-                    if not sale_price or sale_price <= 0:
-                        continue
-                    weight = weight or 0
-                    cost_res = self.db.safe_fetchall(
-                        "SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,)
-                    )
-                    cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
-                    final_price = sale_price - max_discount
-                    if final_price > 0 and cost > 0:
-                        margin = (final_price - cost) / final_price
-                        total_weighted_margin_prod += margin * weight
-                        total_spec_weight += weight
-                if total_spec_weight > 0:
-                    spec_margin = total_weighted_margin_prod / total_spec_weight
-                    total_weighted_margin += spec_margin * store_weight
-                    total_weight += store_weight
-            return (total_weighted_margin / total_weight) * 100 if total_weight > 0 else None
-        except Exception as e:
-            print(f"计算综合毛利失败: {e}")
-            return None
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -242,15 +252,15 @@ class StoreMarginDialog(QDialog):
         header_layout.addWidget(self.lbl_total_amount)
         layout.addWidget(header_widget)
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
-        self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "销售额", "操作"])
+        self.table.setColumnCount(11)
+        self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "销售额", "主卖规格", "操作"])
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
-        for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 60, 80, 80]):
+        for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 60, 80, 100, 80]):
             self.table.setColumnWidth(i, w)
         layout.addWidget(self.table)
         btn_widget = QWidget()
@@ -298,10 +308,15 @@ class StoreMarginDialog(QDialog):
             "SELECT id, name, title, image_path, store_weight, store_weight_locked FROM products WHERE store_id=? ORDER BY sort_order",
             (self.store_id,),
         )
-        self.product_weights = {prod[0]: {"weight": prod[4] or 0, "locked": 0} for prod in products}
+        self.sys_id_to_user_id = {}
+        self.product_weights = {}
+        for prod in products:
+            sys_id, prod_id, prod_title, image_path, store_weight, store_locked = prod
+            self.sys_id_to_user_id[sys_id] = prod_id
+            self.product_weights[prod_id] = {"sys_id": sys_id, "weight": store_weight or 0, "locked": 0}
         self.table.setRowCount(len(products))
         for row, prod in enumerate(products):
-            prod_id, prod_code, prod_title, image_path, store_weight, store_locked = prod
+            sys_id, prod_id, prod_title, image_path, store_weight, store_locked = prod
             if prod_id in self.product_weights:
                 self.product_weights[prod_id]["locked"] = store_locked or 0
             img_widget = QWidget()
@@ -324,13 +339,13 @@ class StoreMarginDialog(QDialog):
             img_layout.addWidget(img_label)
             self.table.setCellWidget(row, 0, img_widget)
             self.table.setRowHeight(row, 70)
-            item_id = QTableWidgetItem(str(prod_code))
+            item_id = QTableWidgetItem(str(prod_id))
             item_id.setFlags(item_id.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 1, item_id)
             item_title = QTableWidgetItem(prod_title or "")
             item_title.setFlags(item_title.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 2, item_title)
-            cost, price, margin = self.get_product_margin(prod_id)
+            cost, price, margin = self.get_product_margin(sys_id)
             self.table.setItem(row, 3, QTableWidgetItem(f"{cost:.2f}" if cost else "0.00"))
             item_price = QTableWidgetItem(f"{price:.2f}" if price else "0.00")
             item_price.setFlags(item_price.flags() & ~Qt.ItemIsEditable)
@@ -390,21 +405,36 @@ class StoreMarginDialog(QDialog):
             order_label_layout.setContentsMargins(0, 0, 0, 0)
             order_label = QLabel("")
             order_label.setAlignment(Qt.AlignCenter)
-            order_label.setStyleSheet("color: #888; font-size: 10px;")
+            order_label.setStyleSheet("color: black; font-size: 12px;")
             order_label_layout.addWidget(order_label)
             self.table.setCellWidget(row, 7, order_label_widget)
+            main_spec_widget = QWidget()
+            main_spec_layout = QHBoxLayout(main_spec_widget)
+            main_spec_layout.setContentsMargins(0, 0, 0, 0)
+            main_spec_label = QLabel("-")
+            main_spec_label.setAlignment(Qt.AlignCenter)
+            main_spec_label.setStyleSheet("color: black; font-size: 12px;")
+            main_spec_layout.addWidget(main_spec_label)
+            self.table.setCellWidget(row, 9, main_spec_widget)
+            if prod_id in self.product_weights:
+                self.product_weights[prod_id]["main_spec"] = main_spec_label
+                main_spec_code, spec_orders = self.get_main_spec(sys_id)
+                if spec_orders > 0 and main_spec_code:
+                    main_spec_label.setText(str(main_spec_code))
+                elif spec_orders == 0:
+                    main_spec_label.setText("无")
             btn_widget = QWidget()
             btn_layout = QHBoxLayout(btn_widget)
             btn_layout.setContentsMargins(0, 0, 0, 0)
             btn_edit = QPushButton("📦")
             btn_edit.setFixedSize(40, 25)
-            btn_edit.clicked.connect(lambda checked, pid=prod_id, pc=prod_code, pt=prod_title: self.open_spec_dialog(pid, pc, pt))
+            btn_edit.clicked.connect(lambda checked, sid=sys_id, pid=prod_id, pt=prod_title: self.open_spec_dialog(sid, pid, pt))
             btn_layout.addWidget(btn_edit)
-            self.table.setCellWidget(row, 9, btn_widget)
+            self.table.setCellWidget(row, 10, btn_widget)
             self.table.setItem(row, 8, QTableWidgetItem("-"))
             self.table.item(row, 1).setData(Qt.UserRole, prod_id)
             order_label.setProperty("prod_id", prod_id)
-            self._update_order_label_for_row(row, weight_input, order_label, prod_id)
+            self._update_order_label_for_row(row, weight_input, order_label, sys_id)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.calculate_total_margin()
         self.update_total_orders_label()
@@ -416,14 +446,17 @@ class StoreMarginDialog(QDialog):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            prod_id = prod_id_item.data(Qt.UserRole)
-            if not prod_id:
+            user_id = prod_id_item.data(Qt.UserRole)
+            if not user_id:
+                continue
+            sys_id = self.get_sys_id_by_user_id(user_id)
+            if not sys_id:
                 continue
             spec_sales = self.db.safe_fetchall(
                 "SELECT ps.sale_price, io.order_count FROM product_specs ps "
                 "LEFT JOIN imported_orders io ON io.product_id = ps.product_id AND io.spec_code = ps.spec_code "
                 "WHERE ps.product_id = ?",
-                (prod_id,)
+                (sys_id,)
             )
             total_amount = 0.0
             total_orders = 0
@@ -508,6 +541,10 @@ class StoreMarginDialog(QDialog):
             total_weighted_margin += margin * weight
         total_margin = (total_weighted_margin / total_weight) if total_weight > 0 else 0
         self.lbl_total_margin.setText(f"综合毛利: {total_margin:.2f}%")
+        if total_weight > 100:
+            self.lbl_total_margin.setToolTip(f"⚠️ 权重总和超过100% ({total_weight:.1f}%)，可能导致毛利计算不准")
+        else:
+            self.lbl_total_margin.setToolTip("")
         if total_margin < 10:
             self.lbl_total_margin.setStyleSheet(
                 "font-size: 20px; font-weight: bold; color: #c0392b; background-color: #fdeaa8; padding: 10px 20px; border-radius: 8px;"
@@ -557,19 +594,22 @@ class StoreMarginDialog(QDialog):
     def on_cell_changed(self, row, col):
         pass
 
-    def toggle_lock(self, row, prod_id):
-        current = self.product_weights.get(prod_id, {})
+    def toggle_lock(self, row, user_id):
+        sys_id = self.get_sys_id_by_user_id(user_id)
+        if not sys_id:
+            return
+        current = self.product_weights.get(user_id, {})
         is_locked = current.get("locked", 0)
         new_locked = 1 if not is_locked else 0
-        self.db.safe_execute("UPDATE products SET store_weight_locked=? WHERE id=?", (new_locked, prod_id))
+        self.db.safe_execute("UPDATE products SET store_weight_locked=? WHERE id=?", (new_locked, sys_id))
         if new_locked == 1:
             total_locked = sum(
-                data.get("weight", 0) for pid, data in self.product_weights.items()
-                if pid != prod_id and data.get("locked", 0)
+                data.get("weight", 0) for uid, data in self.product_weights.items()
+                if uid != user_id and data.get("locked", 0)
             )
             remaining = 100 - total_locked
             if current.get("weight", 0) > remaining:
-                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (remaining, prod_id))
+                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (remaining, sys_id))
         self.load_products()
 
     def auto_balance_weights(self):
@@ -585,11 +625,20 @@ class StoreMarginDialog(QDialog):
         )
         remaining = 100 - total_locked
         avg_weight = (remaining / len(unlocked_rows)) if remaining > 0 else 0
-        for prod_id in unlocked_rows:
-            self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (avg_weight, prod_id))
+        for user_id in unlocked_rows:
+            sys_id = self.get_sys_id_by_user_id(user_id)
+            if sys_id:
+                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (avg_weight, sys_id))
         self.load_products()
 
     def on_cell_double_clicked(self, row, col):
+        if col == 1:
+            prod_id = self.table.item(row, 1).data(Qt.UserRole)
+            if prod_id:
+                clipboard = QApplication.clipboard()
+                clipboard.setText(str(prod_id))
+                self.show_toast(f"✅ 商品ID {prod_id} 已复制到剪贴板")
+                return
         if col == 6:
             prod_id = self.table.item(row, 1).data(Qt.UserRole)
             if prod_id:
@@ -623,14 +672,17 @@ class StoreMarginDialog(QDialog):
                 menu.addAction(action_lock)
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
-    def open_spec_dialog_by_id(self, product_id):
-        prod = self.db.safe_fetchall("SELECT name, title FROM products WHERE id=?", (product_id,))
-        if prod:
-            self.open_spec_dialog(product_id, prod[0][0], prod[0][1])
+    def open_spec_dialog_by_id(self, user_id):
+        for sys_id, uid in self.sys_id_to_user_id.items():
+            if uid == user_id:
+                prod = self.db.safe_fetchall("SELECT title FROM products WHERE id=?", (sys_id,))
+                if prod:
+                    self.open_spec_dialog(sys_id, user_id, prod[0][0])
+                break
 
-    def open_spec_dialog(self, product_id, product_code, product_title):
+    def open_spec_dialog(self, sys_id, prod_id, prod_title):
         """通过 main_app 打开规格对话框，避免 dialogs 依赖主模块中的 ProductSpecDialog"""
-        self.main_app.open_product_spec_dialog(self.db, product_id, product_code, product_title, self)
+        self.main_app.open_product_spec_dialog(self.db, sys_id, prod_id, prod_title, self)
 
     def import_orders(self):
         """导入订单功能"""
@@ -815,56 +867,93 @@ class StoreMarginDialog(QDialog):
                 spec_order_counts[key] = 0
             spec_order_counts[key] += order_count
         products_in_store = self.db.safe_fetchall(
-            "SELECT id FROM products WHERE store_id=?", (self.store_id,)
+            "SELECT id, name FROM products WHERE store_id=?", (self.store_id,)
         )
         store_total_orders = sum(prod_order_totals.get(p[0], 0) for p in products_in_store)
         print(f"[DEBUG] 店铺总订单: {store_total_orders}")
         print(f"[DEBUG] 每个商品订单: {prod_order_totals}")
         print(f"[DEBUG] 每个规格订单: {spec_order_counts}")
-        for prod_id in prod_order_totals:
-            total = prod_order_totals[prod_id]
-            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
-            print(f"[DEBUG] 商品 {prod_id}: 订单{total}, 权重{weight:.2f}%")
-            self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, prod_id))
-            if prod_id in self.product_weights:
-                self.product_weights[prod_id]["weight"] = weight
-        for prod_id, prod_data in self.product_weights.items():
+        for sys_id, user_id in self.sys_id_to_user_id.items():
+            if sys_id in prod_order_totals:
+                total = prod_order_totals[sys_id]
+                weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
+                print(f"[DEBUG] 商品 {user_id}: 订单{total}, 权重{weight:.2f}%")
+                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, sys_id))
+                if user_id in self.product_weights:
+                    self.product_weights[user_id]["weight"] = weight
+            else:
+                print(f"[DEBUG] 商品 {user_id}: 订单0, 权重0.00%")
+                self.db.safe_execute("UPDATE products SET store_weight=0 WHERE id=?", (sys_id,))
+                if user_id in self.product_weights:
+                    self.product_weights[user_id]["weight"] = 0
+        for user_id, prod_data in self.product_weights.items():
+            sys_id = prod_data.get("sys_id")
+            if not sys_id:
+                continue
             specs = self.db.safe_fetchall(
-                "SELECT spec_code FROM product_specs WHERE product_id=?", (prod_id,)
+                "SELECT spec_code FROM product_specs WHERE product_id=?", (sys_id,)
             )
             for (spec_code,) in specs:
-                if (prod_id, spec_code) not in spec_order_counts:
+                key = (sys_id, str(spec_code))
+                if key not in spec_order_counts:
                     self.db.safe_execute(
                         "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
-                        (prod_id, spec_code)
+                        (sys_id, str(spec_code))
                     )
-        for (product_id, spec_code), count in spec_order_counts.items():
-            prod_total = prod_order_totals.get(product_id, 0)
+        for (sys_id, spec_code), count in spec_order_counts.items():
+            user_id = self.sys_id_to_user_id.get(sys_id)
+            prod_total = prod_order_totals.get(sys_id, 0)
             weight = (count / prod_total * 100) if prod_total > 0 else 0
-            print(f"[DEBUG] 规格 {product_id}/{spec_code}: 订单{count}, 权重{weight:.2f}%")
+            print(f"[DEBUG] 规格 {user_id}/{spec_code}: 订单{count}, 权重{weight:.2f}%")
             self.db.safe_execute(
                 "UPDATE product_specs SET weight_percent=? WHERE product_id=? AND spec_code=?",
-                (weight, product_id, str(spec_code))
+                (weight, sys_id, str(spec_code))
             )
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            prod_id = prod_id_item.data(Qt.UserRole)
-            if not prod_id or prod_id not in prod_order_totals:
+            user_id = prod_id_item.data(Qt.UserRole)
+            if not user_id:
                 continue
-            total = prod_order_totals[prod_id]
-            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
+            sys_id = self.get_sys_id_by_user_id(user_id)
+            if not sys_id:
+                continue
             cell_widget = self.table.cellWidget(row, 6)
+            weight_input = None
+            if sys_id not in prod_order_totals:
+                weight_input = cell_widget.findChild(QLineEdit) if cell_widget else None
+                if weight_input:
+                    weight_input.blockSignals(True)
+                    weight_input.setText("0")
+                    weight_input.blockSignals(False)
+                order_label_widget = self.table.cellWidget(row, 7)
+                if order_label_widget:
+                    order_label = order_label_widget.findChild(QLabel)
+                    if order_label:
+                        order_label.setText("0单")
+                        order_label.setStyleSheet("color: black; font-size: 12px;")
+                main_spec_widget = self.table.cellWidget(row, 9)
+                if main_spec_widget:
+                    main_spec_label = main_spec_widget.findChild(QLabel)
+                    if main_spec_label:
+                        main_spec_label.setText("无")
+                        main_spec_label.setStyleSheet("color: black; font-size: 12px;")
+                if user_id in self.product_weights:
+                    self.product_weights[user_id]["weight"] = 0
+                continue
+            total = prod_order_totals[sys_id]
+            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
             if cell_widget:
                 weight_input = cell_widget.findChild(QLineEdit)
                 if weight_input:
                     weight_input.blockSignals(True)
-                    weight_input.setText(f"{weight:.2f}%")
+                    weight_str = str(int(weight)) if weight == int(weight) else f"{weight:.1f}"
+                    weight_input.setText(weight_str)
                     weight_input.blockSignals(False)
             spec_counts = self.db.safe_fetchall(
                 "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
-                (prod_id,)
+                (sys_id,)
             )
             total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
             order_label_widget = self.table.cellWidget(row, 7)
@@ -872,10 +961,22 @@ class StoreMarginDialog(QDialog):
                 order_label = order_label_widget.findChild(QLabel)
                 if order_label:
                     order_label.setText(f"{total_prod_orders}单")
+                    order_label.setStyleSheet("color: black; font-size: 12px;")
+            main_spec_widget = self.table.cellWidget(row, 9)
+            if main_spec_widget:
+                main_spec_label = main_spec_widget.findChild(QLabel)
+                if main_spec_label:
+                    if total_prod_orders > 0:
+                        max_spec = max(spec_counts, key=lambda x: x[1] if x[1] else 0) if spec_counts else None
+                        main_spec_label.setText(str(max_spec[0]) if max_spec and max_spec[0] else "-")
+                    else:
+                        main_spec_label.setText("无")
+                    main_spec_label.setStyleSheet("color: black; font-size: 12px;")
             if weight_input and total_prod_orders > 0:
                 weight_input.setToolTip(f"订单数: {total_prod_orders}单")
         self.update_total_orders_label()
         self.update_product_avg_price()
+        self.calculate_total_margin()
         self.main_app.show_toast("✅ 订单权重已同步")
         self.main_app.refresh_store_weight_sync_flag(self.store_id)
 
@@ -891,14 +992,17 @@ class StoreMarginDialog(QDialog):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            prod_id = prod_id_item.data(Qt.UserRole)
-            if not prod_id:
+            user_id = prod_id_item.data(Qt.UserRole)
+            if not user_id:
+                continue
+            sys_id = self.get_sys_id_by_user_id(user_id)
+            if not sys_id:
                 continue
             spec_sales = self.db.safe_fetchall(
                 "SELECT ps.sale_price, io.order_count FROM product_specs ps "
                 "LEFT JOIN imported_orders io ON io.product_id = ps.product_id AND io.spec_code = ps.spec_code "
                 "WHERE ps.product_id = ?",
-                (prod_id,)
+                (sys_id,)
             )
             for sale_price, order_count in spec_sales:
                 if sale_price and order_count:
