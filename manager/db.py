@@ -46,6 +46,12 @@ class SafeDatabaseManager:
             if 'memo' not in store_columns:
                 self.cursor.execute("ALTER TABLE stores ADD COLUMN memo TEXT")
                 print("已添加memo字段到stores表")
+            if 'weight_synced' not in store_columns:
+                self.cursor.execute("ALTER TABLE stores ADD COLUMN weight_synced INTEGER DEFAULT 0")
+                print("已添加weight_synced字段到stores表")
+            if 'image_data' not in store_columns:
+                self.cursor.execute("ALTER TABLE stores ADD COLUMN image_data BLOB")
+                print("已添加image_data字段到stores表")
 
             self.cursor.execute("PRAGMA table_info(products)")
             columns = [col[1] for col in self.cursor.fetchall()]
@@ -124,6 +130,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加net_break_even_roi字段到products表")
                 except Exception as e:
                     print(f"添加net_break_even_roi字段失败: {e}")
+            if 'image_data' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN image_data BLOB")
+                    print("✅ 已添加image_data字段到products表")
+                except Exception as e:
+                    print(f"添加image_data字段失败: {e}")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
                                 (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL)''')

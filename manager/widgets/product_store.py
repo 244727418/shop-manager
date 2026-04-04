@@ -19,7 +19,7 @@ def _icons_dir():
 
 class ProductWidget(QWidget):
     """左侧冻结列中的商品展示控件"""
-    def __init__(self, prod_id, prod_code, prod_title, img_path, main_app):
+    def __init__(self, prod_id, prod_code, prod_title, image_data, main_app):
         super().__init__()
         self.prod_id = prod_id
         self.prod_code = prod_code
@@ -41,7 +41,7 @@ class ProductWidget(QWidget):
         self.img_label.setFixedSize(55, 55)
         self.img_label.setStyleSheet("border: 1px solid #ddd; border-radius: 4px;")
         self.img_label.setAlignment(Qt.AlignCenter)
-        self.set_image(img_path)
+        self.set_image_from_data(image_data)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(2)
@@ -382,10 +382,36 @@ class ProductWidget(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "选择商品主图", "", "Images (*.png *.jpg *.jpeg)")
         if path:
             try:
-                self.main_app.db.safe_execute("UPDATE products SET image_path=? WHERE id=?", (path, self.prod_id))
-                self.set_image(path)
+                with open(path, 'rb') as f:
+                    image_data = f.read()
+                self.main_app.db.safe_execute(
+                    "UPDATE products SET image_data=? WHERE id=?",
+                    (image_data, self.prod_id)
+                )
+                self.set_image_from_data(image_data)
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"更新图片失败: {e}")
+
+    def set_image_from_data(self, image_data):
+        if image_data:
+            try:
+                pixmap = QPixmap()
+                pixmap.loadFromData(image_data)
+                if not pixmap.isNull():
+                    container_size = 60
+                    if pixmap.width() > container_size or pixmap.height() > container_size:
+                        pixmap = pixmap.scaled(container_size, container_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.img_label.setPixmap(pixmap)
+                    self.img_label.setAlignment(Qt.AlignCenter)
+                else:
+                    self.img_label.setText("图片\n加载失败")
+                    self.img_label.setAlignment(Qt.AlignCenter)
+            except Exception:
+                self.img_label.setText("图片\n加载失败")
+                self.img_label.setAlignment(Qt.AlignCenter)
+        else:
+            self.img_label.setText("无图片")
+            self.img_label.setAlignment(Qt.AlignCenter)
 
     def delete_product(self):
         reply = QMessageBox.question(self, "确认", "确定删除该商品及其所有记录吗？")
@@ -638,7 +664,12 @@ class StoreWidget(QWidget):
             (self.store_id,)
         )
         has_imported = imported_data and imported_data[0][0] > 0 if imported_data else False
-        if has_imported:
+        synced_data = self.db.safe_fetchall(
+            "SELECT weight_synced FROM stores WHERE id=?",
+            (self.store_id,)
+        )
+        is_synced = synced_data and synced_data[0][0] == 1 if synced_data else False
+        if has_imported and is_synced:
             self.sync_flag_label.setText("✅权重已同步")
             self.sync_flag_label.show()
         else:

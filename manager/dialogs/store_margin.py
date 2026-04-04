@@ -134,6 +134,8 @@ class StoreMarginDialog(QDialog):
         if new_weight > max_allowed:
             new_weight = max_allowed
         self.product_weights[user_id]["weight"] = new_weight
+        self.db.safe_execute("UPDATE stores SET weight_synced=0 WHERE id=?", (self.store_id,))
+        self.main_app.refresh_store_weight_sync_flag(self.store_id)
         self.rebalance_unlocked_weights(user_id)
         self.update_weight_inputs()
         self.calculate_total_margin()
@@ -146,8 +148,6 @@ class StoreMarginDialog(QDialog):
             return
         new_weight = self.product_weights[user_id].get("weight", 0)
         self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (new_weight, sys_id))
-        self.rebalance_unlocked_weights(user_id)
-        self.calculate_total_margin()
         self.update_weight_inputs()
 
     def rebalance_unlocked_weights(self, changed_user_id):
@@ -305,18 +305,18 @@ class StoreMarginDialog(QDialog):
     def load_products(self):
         self.table.cellChanged.disconnect()
         products = self.db.safe_fetchall(
-            "SELECT id, name, title, image_path, store_weight, store_weight_locked FROM products WHERE store_id=? ORDER BY sort_order",
+            "SELECT id, name, title, image_data, store_weight, store_weight_locked FROM products WHERE store_id=? ORDER BY sort_order",
             (self.store_id,),
         )
         self.sys_id_to_user_id = {}
         self.product_weights = {}
         for prod in products:
-            sys_id, prod_id, prod_title, image_path, store_weight, store_locked = prod
+            sys_id, prod_id, prod_title, image_data, store_weight, store_locked = prod
             self.sys_id_to_user_id[sys_id] = prod_id
             self.product_weights[prod_id] = {"sys_id": sys_id, "weight": store_weight or 0, "locked": 0}
         self.table.setRowCount(len(products))
         for row, prod in enumerate(products):
-            sys_id, prod_id, prod_title, image_path, store_weight, store_locked = prod
+            sys_id, prod_id, prod_title, image_data, store_weight, store_locked = prod
             if prod_id in self.product_weights:
                 self.product_weights[prod_id]["locked"] = store_locked or 0
             img_widget = QWidget()
@@ -326,8 +326,9 @@ class StoreMarginDialog(QDialog):
             img_label.setFixedSize(60, 60)
             img_label.setScaledContents(False)
             img_label.setAlignment(Qt.AlignCenter)
-            if image_path and os.path.exists(image_path):
-                pixmap = QPixmap(image_path)
+            if image_data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(image_data)
                 if not pixmap.isNull():
                     img_label.setPixmap(pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
@@ -977,6 +978,7 @@ class StoreMarginDialog(QDialog):
         self.update_total_orders_label()
         self.update_product_avg_price()
         self.calculate_total_margin()
+        self.db.safe_execute("UPDATE stores SET weight_synced=1 WHERE id=?", (self.store_id,))
         self.main_app.show_toast("✅ 订单权重已同步")
         self.main_app.refresh_store_weight_sync_flag(self.store_id)
 

@@ -219,6 +219,7 @@ from PyQt5.QtGui import (
     QFontMetrics, QDoubleValidator, QIntValidator, QRegExpValidator,
     QPainter, QPen, QBrush, QCursor, QKeySequence, QPalette, QImage
 )
+from PyQt5.QtSvg import QSvgRenderer
 
 import sqlite3
 import os
@@ -302,48 +303,54 @@ class ShopManagerApp(QMainWindow):
 
     def init_system_tray(self):
         """初始化系统托盘"""
-        # 创建托盘图标
         self.tray_icon = QSystemTrayIcon(self)
+        icon = self.create_star_icon()
+        self.tray_icon.setIcon(icon)
         
-        # 使用应用图标或默认图标
-        app_icon = self.windowIcon()
-        if app_icon.isNull():
-            # 如果没有设置窗口图标，使用默认样式图标
-            self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        else:
-            self.tray_icon.setIcon(app_icon)
-        
-        # 创建托盘菜单
         tray_menu = QMenu()
-        
-        # 显示/隐藏窗口
-        self.show_action = QAction("显示主窗口", self)
+        self.show_action = QAction("⭐ 显示主窗口", self)
         self.show_action.triggered.connect(self.show_window)
         tray_menu.addAction(self.show_action)
         
         tray_menu.addSeparator()
         
-        # 退出应用
-        quit_action = QAction("退出", self)
+        quit_action = QAction("❌ 退出", self)
         quit_action.triggered.connect(self.quit_application)
         tray_menu.addAction(quit_action)
         
-        # 设置菜单
         self.tray_icon.setContextMenu(tray_menu)
-        
-        # 双击托盘图标显示窗口
         self.tray_icon.activated.connect(self.on_tray_activated)
-        
-        # 显示托盘图标
         self.tray_icon.show()
         
-        # 显示气泡提示
         self.tray_icon.showMessage(
             "电商店铺操作记录管理工具",
             "程序已最小化到系统托盘，双击图标可显示窗口",
             QSystemTrayIcon.Information,
             3000
         )
+    
+    def create_star_icon(self):
+        """创建星星图标"""
+        svg_path = os.path.join(os.path.dirname(__file__), "icons", "xingxing.svg")
+        if os.path.exists(svg_path):
+            renderer = QSvgRenderer(svg_path)
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            return QIcon(pixmap)
+        else:
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            font = QFont()
+            font.setPixelSize(24)
+            painter.setFont(font)
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, "⭐")
+            painter.end()
+            return QIcon(pixmap)
     
     def on_tray_activated(self, reason):
         """托盘图标被激活时的处理"""
@@ -1161,6 +1168,7 @@ class ShopManagerApp(QMainWindow):
         """打开店铺毛利管理对话框（供 StoreWidget 调用，避免 widgets 依赖本模块 Dialog）"""
         def on_margin_changed(sid, new_margin):
             self.load_data_safe()
+            self.refresh_store_weight_sync_flag(sid)
         dialog = StoreMarginDialog(store_id, store_name, self, self, on_margin_changed)
         dialog.exec_()
 
@@ -1270,7 +1278,7 @@ class ShopManagerApp(QMainWindow):
                 self.frozen_table.setRowHeight(row_idx, 120)
                 row_idx += 1
                 
-                products = self.db.safe_fetchall("SELECT id, name, title, image_path FROM products WHERE store_id=? ORDER BY sort_order", (store_id,))
+                products = self.db.safe_fetchall("SELECT id, name, title, image_data FROM products WHERE store_id=? ORDER BY sort_order", (store_id,))
                 for prod in products:
                     p_id, p_code, p_title, p_img = prod  # 注意这里：p_code是商品ID，p_title是商品标题
                     self.table.insertRow(row_idx)
