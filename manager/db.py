@@ -302,6 +302,8 @@ class SafeDatabaseManager:
                 spec_code TEXT NOT NULL,
                 order_count INTEGER DEFAULT 1,
                 import_time TEXT NOT NULL,
+                order_date TEXT,
+                actual_amount REAL DEFAULT 0,
                 UNIQUE(store_id, product_id, spec_code))''')
 
             self.cursor.execute("PRAGMA table_info(imported_orders)")
@@ -312,6 +314,18 @@ class SafeDatabaseManager:
                     print("✅ 已添加product_id字段到imported_orders表")
                 except Exception as e:
                     print(f"添加product_id字段失败: {e}")
+            if 'order_date' not in imported_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN order_date TEXT")
+                    print("✅ 已添加order_date字段到imported_orders表")
+                except Exception as e:
+                    print(f"添加order_date字段失败: {e}")
+            if 'actual_amount' not in imported_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN actual_amount REAL DEFAULT 0")
+                    print("✅ 已添加actual_amount字段到imported_orders表")
+                except Exception as e:
+                    print(f"添加actual_amount字段失败: {e}")
 
             self.cursor.execute("PRAGMA table_info(profit_records)")
             columns = [col[1] for col in self.cursor.fetchall()]

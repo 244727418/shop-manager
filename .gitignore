@@ -5,6 +5,7 @@
 *.app
 *.deb
 *.rpm
+*.spec
 dist/
 build/
 __pycache__/

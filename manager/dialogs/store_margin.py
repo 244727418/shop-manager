@@ -701,13 +701,14 @@ class StoreMarginDialog(QDialog):
                 QMessageBox.warning(self, "错误", "Excel文件没有找到有效的表头行")
                 return
             col_mapping = self._auto_detect_columns(headers)
-            if not all(col_mapping.values()):
-                col_mapping = self._show_column_mapping_dialog(headers, col_mapping)
-                if not col_mapping:
-                    return
+            if col_mapping["product_id"] is None or col_mapping["spec_code"] is None:
+                QMessageBox.warning(self, "错误", "无法识别商品ID列和规格编码列，请检查Excel表头")
+                return
             product_id_col = col_mapping["product_id"]
             spec_code_col = col_mapping["spec_code"]
             quantity_col = col_mapping["quantity"]
+            date_col = col_mapping.get("order_date")
+            amount_col = col_mapping.get("actual_amount")
             products_in_store = self.db.safe_fetchall(
                 "SELECT id, name FROM products WHERE store_id=? ORDER BY sort_order", (self.store_id,)
             )
@@ -732,7 +733,13 @@ class StoreMarginDialog(QDialog):
                 try:
                     product_id_value = str(row[product_id_col]).strip() if product_id_col < len(row) else ""
                     spec_code_value = str(row[spec_code_col]).strip() if spec_code_col < len(row) else ""
-                    quantity_value = row[quantity_col] if quantity_col < len(row) else None
+                    quantity_value = row[quantity_col] if quantity_col < len(row) and quantity_col is not None else None
+                    date_value = None
+                    if date_col is not None and date_col < len(row):
+                        date_value = row[date_col]
+                    amount_value = None
+                    if amount_col is not None and amount_col < len(row):
+                        amount_value = row[amount_col]
                 except:
                     continue
                 if not product_id_value or product_id_value == "None":
@@ -749,13 +756,28 @@ class StoreMarginDialog(QDialog):
                         quantity = max(1, int(quantity_value))
                     except (ValueError, TypeError):
                         quantity = 1
+                amount = 0
+                if amount_value is not None:
+                    try:
+                        amount = float(amount_value) if amount_value else 0
+                    except (ValueError, TypeError):
+                        amount = 0
+                order_date_str = None
+                if date_value is not None:
+                    if isinstance(date_value, datetime):
+                        order_date_str = date_value.strftime("%Y-%m-%d")
+                    else:
+                        order_date_str = str(date_value)[:10]
                 spec_codes = all_store_specs.get(prod_id, set())
                 spec_code_str = str(spec_code_value).strip() if spec_code_value else ""
                 if spec_code_str and spec_code_str != "None" and spec_code_str in spec_codes:
                     key = (prod_id, spec_code_str)
                     if key not in order_data:
-                        order_data[key] = 0
-                    order_data[key] += quantity
+                        order_data[key] = {"count": 0, "amount": 0, "dates": []}
+                    order_data[key]["count"] += quantity
+                    order_data[key]["amount"] += amount
+                    if order_date_str:
+                        order_data[key]["dates"].append(order_date_str)
             missing_product_codes = product_codes_in_store - excel_product_codes_found
             if missing_product_codes:
                 msg = f"以下商品ID在表格中没有订单记录：\n{', '.join(missing_product_codes)}\n\n是否继续同步（未匹配的商品链接权重将设为0）？"
@@ -765,11 +787,14 @@ class StoreMarginDialog(QDialog):
             import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
             print(f"[DEBUG] 准备插入订单数据: {order_data}")
-            for (prod_id, spec_code), count in order_data.items():
-                print(f"[DEBUG] 插入: store_id={self.store_id}, prod_id={prod_id}, spec_code={spec_code}, count={count}")
+            for (prod_id, spec_code), data in order_data.items():
+                earliest_date = min(data["dates"]) if data["dates"] else None
+                latest_date = max(data["dates"]) if data["dates"] else None
+                date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
+                print(f"[DEBUG] 插入: store_id={self.store_id}, prod_id={prod_id}, spec_code={spec_code}, count={data['count']}, amount={data['amount']}, dates={date_range}")
                 self.db.safe_execute(
-                    "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time) VALUES (?, ?, ?, ?, ?)",
-                    (self.store_id, prod_id, spec_code, count, import_time)
+                    "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (self.store_id, prod_id, spec_code, data["count"], import_time, date_range, data["amount"])
                 )
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
             self.sync_order_weight()
@@ -778,10 +803,12 @@ class StoreMarginDialog(QDialog):
 
     def _auto_detect_columns(self, headers):
         """自动检测列映射"""
-        mapping = {"product_id": None, "spec_code": None, "quantity": None}
+        mapping = {"product_id": None, "spec_code": None, "quantity": None, "order_date": None, "actual_amount": None}
         product_id_keywords = ["商品id", "商品ID", "id", "产品id", "产品ID", "product_id"]
         spec_code_keywords = ["规格编码", "规格code", "spec_code", "规格code", "sku", "SKU"]
         quantity_keywords = ["数量", "订单数量", "quantity", "count", "num", "销售数量"]
+        order_date_keywords = ["日期", "date", "时间", "time", "订单日期", "下单日期", "成交时间"]
+        actual_amount_keywords = ["实收", "金额", "actual", "amount", "销售额", "销售金额", "成交金额", "支付金额", "price", "总价", "order_amount"]
         for idx, header in enumerate(headers):
             header_lower = header.lower().strip()
             if mapping["product_id"] is None:
@@ -798,6 +825,16 @@ class StoreMarginDialog(QDialog):
                 for kw in quantity_keywords:
                     if kw in header_lower:
                         mapping["quantity"] = idx
+                        break
+            if mapping["order_date"] is None:
+                for kw in order_date_keywords:
+                    if kw in header_lower:
+                        mapping["order_date"] = idx
+                        break
+            if mapping["actual_amount"] is None:
+                for kw in actual_amount_keywords:
+                    if kw in header_lower:
+                        mapping["actual_amount"] = idx
                         break
         return mapping
 

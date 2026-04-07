@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "2.5"
+VERSION = "2.5.1"
 
 # ================= GitHub 和在线更新管理模块 =================
 # 【预留功能】GitHub链接管理和版本检测框架
@@ -175,7 +175,14 @@ import calendar
 import traceback
 import re
 import requests
+import subprocess
 from datetime import datetime
+
+# Windows下隐藏控制台窗口的常量（防止黑框闪烁）
+if sys.platform == 'win32':
+    CREATE_NO_WINDOW = 0x08000000
+else:
+    CREATE_NO_WINDOW = 0
 
 # ================= 第三方库 =================
 from typing import TYPE_CHECKING
@@ -369,8 +376,8 @@ class ShopManagerApp(QMainWindow):
         self.activateWindow()
     
     def open_knowledge_base(self):
-        """打开知识库（已废弃，保留兼容性）"""
-        self.show_knowledge_base()
+        """打开知识库（已禁用）"""
+        self.show_knowledge_base_disabled()
 
     def open_github_repo(self):
         """打开GitHub仓库页面"""
@@ -674,7 +681,7 @@ class ShopManagerApp(QMainWindow):
         
         btn_knowledge = QPushButton("📚 知识库")
         btn_knowledge.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; border-radius: 6px;")
-        btn_knowledge.clicked.connect(self.show_knowledge_base)
+        btn_knowledge.clicked.connect(self.show_knowledge_base_disabled)
         toolbar.addWidget(btn_knowledge)
         
         btn_export.clicked.connect(self.export_to_excel)
@@ -2326,48 +2333,11 @@ class ShopManagerApp(QMainWindow):
         dialog = ApiConfigDialog(self.db, self)
         dialog.show()
     
-    def show_knowledge_base(self):
-        """打开独立知识库管理工具"""
-        import subprocess
-        import os
-        
-        try:
-            # 设置独立知识库项目路径
-            kb_project_path = r"E:\zhuomian\knowledge_manager_project"
-            
-            # 检查独立项目是否存在
-            if not os.path.exists(kb_project_path):
-                QMessageBox.information(self, "提示", 
-                    "独立知识库项目未找到。\n\n"
-                    "请确保知识库管理工具已正确安装。\n"
-                    "预期路径: {}".format(kb_project_path))
-                return
-            
-            # 启动独立知识库应用
-            # 这里假设独立项目有可执行文件或启动脚本
-            # 您需要根据实际项目结构修改启动命令
-            
-            # 方案1: 如果有可执行文件
-            kb_exe = os.path.join(kb_project_path, "knowledge_manager.exe")
-            if os.path.exists(kb_exe):
-                subprocess.Popen([kb_exe], cwd=kb_project_path)
-                return
-            
-            # 方案2: 如果有启动脚本
-            kb_script = os.path.join(kb_project_path, "main.py")
-            if os.path.exists(kb_script):
-                subprocess.Popen(["python", "main.py"], cwd=kb_project_path)
-                return
-            
-            # 方案3: 如果以上都不存在，提示用户
-            QMessageBox.information(self, "提示", 
-                "未找到知识库管理工具的启动文件。\n\n"
-                "请检查以下文件是否存在：\n"
-                "- {}\n"
-                "- {}".format(kb_exe, kb_script))
-                
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开知识库失败：{e}")
+    def show_knowledge_base_disabled(self):
+        """知识库功能（暂时禁用）"""
+        QMessageBox.information(self, "提示",
+            "知识库功能正在完善中，暂时禁用。\n\n"
+            "请等待后续版本更新。")
     
     def show_daily_task_dialog(self):
         """打开每日任务大盘窗口"""
@@ -2396,9 +2366,8 @@ class ShopManagerApp(QMainWindow):
                 memory_info = f"错误: {str(e)[:20]}"
             
             try:
-                import subprocess
-                result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], 
-                                      capture_output=True, text=True, timeout=2)
+                result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                                      capture_output=True, text=True, timeout=2, creationflags=CREATE_NO_WINDOW)
                 if result.returncode == 0:
                     gpu_data = result.stdout.strip().split(',')
                     if len(gpu_data) >= 3:

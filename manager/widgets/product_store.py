@@ -465,7 +465,7 @@ class StoreWidget(QWidget):
         self.sync_flag_label.hide()
 
         self.label = QLabel(f" {store_name}")
-        self.label.setStyleSheet("background-color: #ffe0b2; font-weight: bold; padding: 5px; border-radius: 5px;")
+        self.label.setStyleSheet("background-color: #ffe0b2; font-weight: bold; padding: 1px; border-radius: 5px;")
         self.label.setWordWrap(True)
         self.label.setCursor(Qt.PointingHandCursor)
         self.label.setToolTip("左键双击查看店铺毛利 | 右键双击编辑店铺备注")
@@ -500,8 +500,9 @@ class StoreWidget(QWidget):
 
         net_margin = self.calculate_store_net_margin()
         if net_margin is not None:
+            net_margin_color = self._get_net_margin_color(net_margin)
             self.net_margin_label = QLabel(f"净利率: {net_margin:.1f}%")
-            self.net_margin_label.setStyleSheet("background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: #3498db; font-weight: bold;")
+            self.net_margin_label.setStyleSheet(f"background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: {net_margin_color}; font-weight: bold;")
         else:
             self.net_margin_label = QLabel("净利率: --")
             self.net_margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
@@ -687,6 +688,20 @@ class StoreWidget(QWidget):
         except Exception as e:
             print(f"计算店铺客单价失败: {e}")
             return None
+
+    def _get_net_margin_color(self, net_margin_pct):
+        if net_margin_pct > 5:
+            return "#006400"
+        elif net_margin_pct > 1:
+            return "#27ae60"
+        elif net_margin_pct >= -2:
+            return "#daa520"
+        elif net_margin_pct >= -5:
+            return "#ff8c00"
+        elif net_margin_pct >= -8:
+            return "#dc143c"
+        else:
+            return "#8b0000"
 
     def delete_store(self):
         reply = QMessageBox.question(self, "确认", f"确定删除店铺 '{self.store_name}' 及其所有商品和记录吗？\n此操作不可恢复！")
