@@ -350,6 +350,22 @@ class SafeDatabaseManager:
 
             self.conn.commit()
             print("数据库初始化完成")
+            
+            # 创建历史数据表
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS historical_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                total_amount REAL DEFAULT 0,
+                total_orders INTEGER DEFAULT 0,
+                avg_price REAL DEFAULT 0,
+                daily_amount REAL DEFAULT 0,
+                daily_orders REAL DEFAULT 0,
+                created_time TEXT NOT NULL,
+                UNIQUE(store_id, start_date, end_date)
+            )''')
+            print("✅ 历史数据表已创建")
 
         except Exception as e:
             print(f"数据库表创建失败：{e}")

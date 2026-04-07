@@ -5,7 +5,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
-    QAbstractItemView, QFileDialog, QComboBox, QDialog
+    QAbstractItemView, QFileDialog, QComboBox, QScrollArea
 )
 from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator
@@ -251,6 +251,108 @@ class StoreMarginDialog(QDialog):
         self.lbl_total_amount.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
         header_layout.addWidget(self.lbl_total_amount)
         layout.addWidget(header_widget)
+        
+        # 过往数据分析板块
+        historical_widget = QWidget()
+        historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 10px;")
+        historical_layout = QVBoxLayout(historical_widget)
+        historical_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 板块标题
+        historical_title = QLabel("📈 过往数据分析（基于导入订单）")
+        historical_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        historical_layout.addWidget(historical_title)
+        
+        # 日期选择行
+        date_row = QWidget()
+        date_layout = QHBoxLayout(date_row)
+        date_layout.setContentsMargins(0, 0, 0, 0)
+        
+        date_label = QLabel("数据周期:")
+        date_label.setStyleSheet("font-size: 12px; color: #666; padding: 0 5px;")
+        
+        # 使用日期选择器
+        from PyQt5.QtWidgets import QDateEdit
+        from PyQt5.QtCore import QDate
+        
+        self.date_start_input = QDateEdit()
+        self.date_start_input.setCalendarPopup(True)
+        self.date_start_input.setDate(QDate.currentDate().addDays(-7))  # 默认一周前
+        self.date_start_input.setDisplayFormat("yyyy-MM-dd")
+        self.date_start_input.setFixedWidth(100)
+        self.date_start_input.setStyleSheet("font-size: 11px; padding: 2px;")
+        
+        date_separator = QLabel("~")
+        date_separator.setStyleSheet("font-size: 12px; color: #666; padding: 0 5px;")
+        
+        self.date_end_input = QDateEdit()
+        self.date_end_input.setCalendarPopup(True)
+        self.date_end_input.setDate(QDate.currentDate())  # 默认今天
+        self.date_end_input.setDisplayFormat("yyyy-MM-dd")
+        self.date_end_input.setFixedWidth(100)
+        self.date_end_input.setStyleSheet("font-size: 11px; padding: 2px;")
+        
+        # 快捷按钮
+        self.btn_last_week = QPushButton("📅 近七天")
+        self.btn_last_week.setFixedWidth(60)
+        self.btn_last_week.setStyleSheet("font-size: 10px; padding: 3px 5px; background-color: #95a5a6; color: white; border-radius: 3px;")
+        self.btn_last_week.clicked.connect(self.set_last_week)
+        
+        self.btn_save_data = QPushButton("💾 保存数据")
+        self.btn_save_data.setFixedWidth(80)
+        self.btn_save_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #27ae60; color: white; border-radius: 3px;")
+        self.btn_save_data.clicked.connect(self.save_historical_data)
+        
+        self.btn_view_history = QPushButton("📊 查看历史")
+        self.btn_view_history.setFixedWidth(80)
+        self.btn_view_history.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
+        self.btn_view_history.clicked.connect(self.view_historical_data)
+        
+        date_layout.addWidget(date_label)
+        date_layout.addWidget(self.date_start_input)
+        date_layout.addWidget(date_separator)
+        date_layout.addWidget(self.date_end_input)
+        date_layout.addWidget(self.btn_last_week)
+        date_layout.addWidget(self.btn_save_data)
+        date_layout.addWidget(self.btn_view_history)
+        date_layout.addStretch()
+        
+        historical_layout.addWidget(date_row)
+        
+        # 数据展示行
+        data_row = QWidget()
+        data_layout = QHBoxLayout(data_row)
+        data_layout.setContentsMargins(0, 10, 0, 0)
+        
+        # 过往客单价
+        self.lbl_historical_avg_price = QLabel("过往客单价: --")
+        self.lbl_historical_avg_price.setStyleSheet("font-size: 12px; color: #27ae60; font-weight: bold; padding: 5px;")
+        
+        # 过往销售总额
+        self.lbl_historical_total_amount = QLabel("过往销售总额: --")
+        self.lbl_historical_total_amount.setStyleSheet("font-size: 12px; color: #e74c3c; font-weight: bold; padding: 5px;")
+        
+        # 过往总订单数
+        self.lbl_historical_total_orders = QLabel("过往总订单: --")
+        self.lbl_historical_total_orders.setStyleSheet("font-size: 12px; color: #3498db; font-weight: bold; padding: 5px;")
+        
+        # 日销售金额
+        self.lbl_daily_amount = QLabel("日销售金额: --")
+        self.lbl_daily_amount.setStyleSheet("font-size: 12px; color: #9b59b6; font-weight: bold; padding: 5px;")
+        
+        # 日单量
+        self.lbl_daily_orders = QLabel("日单量: --")
+        self.lbl_daily_orders.setStyleSheet("font-size: 12px; color: #f39c12; font-weight: bold; padding: 5px;")
+        
+        data_layout.addWidget(self.lbl_historical_avg_price)
+        data_layout.addWidget(self.lbl_historical_total_amount)
+        data_layout.addWidget(self.lbl_historical_total_orders)
+        data_layout.addWidget(self.lbl_daily_amount)
+        data_layout.addWidget(self.lbl_daily_orders)
+        
+        historical_layout.addWidget(data_row)
+        layout.addWidget(historical_widget)
+        
         self.table = QTableWidget()
         self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "销售额", "主卖规格", "操作"])
@@ -440,6 +542,7 @@ class StoreMarginDialog(QDialog):
         self.calculate_total_margin()
         self.update_total_orders_label()
         self.update_product_avg_price()
+        self.calculate_historical_data()
 
     def update_product_avg_price(self):
         """更新所有商品的客单价和销售额列"""
@@ -472,6 +575,252 @@ class StoreMarginDialog(QDialog):
             else:
                 self.table.item(row, 4).setText("-")
                 self.table.item(row, 8).setText("-")
+
+    def calculate_historical_data(self):
+        """计算过往数据分析"""
+        try:
+            # 获取店铺的所有导入订单数据
+            orders = self.db.safe_fetchall(
+                "SELECT actual_amount, order_count FROM imported_orders WHERE store_id=?",
+                (self.store_id,)
+            )
+            
+            if not orders:
+                self.lbl_historical_avg_price.setText("过往客单价: --")
+                self.lbl_historical_total_amount.setText("过往销售总额: --")
+                self.lbl_historical_total_orders.setText("过往总订单: --")
+                self.lbl_daily_amount.setText("日销售金额: --")
+                self.lbl_daily_orders.setText("日单量: --")
+                return
+            
+            # 计算总数据
+            total_amount = 0.0
+            total_orders = 0
+            
+            for actual_amount, order_count in orders:
+                if actual_amount:
+                    total_amount += actual_amount
+                if order_count:
+                    total_orders += order_count
+            
+            # 计算客单价
+            if total_orders > 0:
+                avg_price = total_amount / total_orders
+                self.lbl_historical_avg_price.setText(f"过往客单价: ¥{avg_price:.2f}")
+            else:
+                self.lbl_historical_avg_price.setText("过往客单价: --")
+            
+            # 显示销售总额和总订单
+            self.lbl_historical_total_amount.setText(f"过往销售总额: ¥{total_amount:.2f}")
+            self.lbl_historical_total_orders.setText(f"过往总订单: {total_orders}单")
+            
+            # 日销售金额和日单量（需要用户输入日期范围后计算）
+            self.lbl_daily_amount.setText("日销售金额: 请设置日期范围")
+            self.lbl_daily_orders.setText("日单量: 请设置日期范围")
+            
+        except Exception as e:
+            print(f"计算过往数据失败: {e}")
+            self.lbl_historical_avg_price.setText("过往客单价: 错误")
+            self.lbl_historical_total_amount.setText("过往销售总额: 错误")
+            self.lbl_historical_total_orders.setText("过往总订单: 错误")
+            self.lbl_daily_amount.setText("日销售金额: 错误")
+            self.lbl_daily_orders.setText("日单量: 错误")
+
+    def save_historical_data(self):
+        """保存当前导入订单数据到历史记录"""
+        try:
+            start_date = self.date_start_input.date().toString("yyyy-MM-dd")
+            end_date = self.date_end_input.date().toString("yyyy-MM-dd")
+            
+            if start_date > end_date:
+                QMessageBox.warning(self, "提示", "开始日期不能晚于结束日期")
+                return
+            
+            # 计算天数差
+            from datetime import datetime
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            days_diff = (end_dt - start_dt).days + 1
+            
+            if days_diff <= 0:
+                QMessageBox.warning(self, "提示", "日期范围无效")
+                return
+            
+            # 获取店铺的所有导入订单数据
+            orders = self.db.safe_fetchall(
+                "SELECT actual_amount, order_count FROM imported_orders WHERE store_id=?",
+                (self.store_id,)
+            )
+            
+            if not orders:
+                QMessageBox.information(self, "提示", "当前没有导入的订单数据")
+                return
+            
+            # 计算总数据
+            total_amount = 0.0
+            total_orders = 0
+            
+            for actual_amount, order_count in orders:
+                if actual_amount:
+                    total_amount += actual_amount
+                if order_count:
+                    total_orders += order_count
+            
+            # 计算客单价和日均数据
+            avg_price = total_amount / total_orders if total_orders > 0 else 0
+            daily_amount = total_amount / days_diff
+            daily_orders = total_orders / days_diff
+            
+            # 保存到数据库
+            created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self.db.safe_execute(
+                "INSERT OR REPLACE INTO historical_data (store_id, start_date, end_date, total_amount, total_orders, avg_price, daily_amount, daily_orders, created_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.store_id, start_date, end_date, total_amount, total_orders, avg_price, daily_amount, daily_orders, created_time)
+            )
+            
+            # 更新显示
+            self.lbl_daily_amount.setText(f"日销售金额: ¥{daily_amount:.2f}")
+            self.lbl_daily_orders.setText(f"日单量: {daily_orders:.1f}单")
+            
+            # 显示保存成功信息
+            self.show_toast(f"✅ 已保存 {start_date} ~ {end_date} 的数据")
+            
+        except Exception as e:
+            print(f"保存历史数据失败: {e}")
+            QMessageBox.warning(self, "错误", f"保存历史数据失败: {e}")
+
+    def view_historical_data(self):
+        """查看历史数据"""
+        try:
+            # 创建历史数据查看对话框
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"📊 {self.store_name} - 历史数据")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # 标题
+            title_label = QLabel("📈 历史数据分析记录")
+            title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+            layout.addWidget(title_label)
+            
+            # 获取历史数据
+            historical_data = self.db.safe_fetchall(
+                "SELECT id, start_date, end_date, total_amount, total_orders, avg_price, daily_amount, daily_orders, created_time FROM historical_data WHERE store_id=? ORDER BY start_date DESC, end_date DESC",
+                (self.store_id,)
+            )
+            
+            if not historical_data:
+                no_data_label = QLabel("暂无历史数据记录")
+                no_data_label.setStyleSheet("font-size: 14px; color: #999; text-align: center; padding: 20px;")
+                layout.addWidget(no_data_label)
+            else:
+                # 创建滚动区域
+                scroll_area = QScrollArea()
+                scroll_widget = QWidget()
+                scroll_layout = QVBoxLayout(scroll_widget)
+                scroll_layout.setSpacing(5)
+                
+                for data in historical_data:
+                    data_id, start_date, end_date, total_amount, total_orders, avg_price, daily_amount, daily_orders, created_time = data
+                    
+                    # 创建数据卡片
+                    card_widget = QWidget()
+                    card_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 8px;")
+                    card_layout = QVBoxLayout(card_widget)
+                    card_layout.setContentsMargins(8, 8, 8, 8)
+                    
+                    # 日期行
+                    date_row = QWidget()
+                    date_layout = QHBoxLayout(date_row)
+                    date_layout.setContentsMargins(0, 0, 0, 0)
+                    
+                    date_label = QLabel(f"📅 {start_date} ~ {end_date}")
+                    date_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+                    
+                    delete_btn = QPushButton("🗑️")
+                    delete_btn.setFixedSize(20, 20)
+                    delete_btn.setStyleSheet("font-size: 10px; padding: 0px; background-color: #dc3545; color: white; border-radius: 2px;")
+                    delete_btn.clicked.connect(lambda checked, d_id=data_id: self.delete_historical_data(d_id, dialog))
+                    
+                    date_layout.addWidget(date_label)
+                    date_layout.addStretch()
+                    date_layout.addWidget(delete_btn)
+                    
+                    # 数据行
+                    data_row = QWidget()
+                    data_layout = QHBoxLayout(data_row)
+                    data_layout.setContentsMargins(0, 5, 0, 0)
+                    
+                    amount_label = QLabel(f"总额: ¥{total_amount:.2f}")
+                    amount_label.setStyleSheet("font-size: 11px; color: #e74c3c;")
+                    
+                    orders_label = QLabel(f"订单: {total_orders}单")
+                    orders_label.setStyleSheet("font-size: 11px; color: #3498db;")
+                    
+                    avg_label = QLabel(f"客单价: ¥{avg_price:.2f}")
+                    avg_label.setStyleSheet("font-size: 11px; color: #27ae60;")
+                    
+                    daily_amount_label = QLabel(f"日销: ¥{daily_amount:.2f}")
+                    daily_amount_label.setStyleSheet("font-size: 11px; color: #9b59b6;")
+                    
+                    daily_orders_label = QLabel(f"日单: {daily_orders:.1f}")
+                    daily_orders_label.setStyleSheet("font-size: 11px; color: #f39c12;")
+                    
+                    data_layout.addWidget(amount_label)
+                    data_layout.addWidget(orders_label)
+                    data_layout.addWidget(avg_label)
+                    data_layout.addWidget(daily_amount_label)
+                    data_layout.addWidget(daily_orders_label)
+                    
+                    card_layout.addWidget(date_row)
+                    card_layout.addWidget(data_row)
+                    
+                    scroll_layout.addWidget(card_widget)
+                
+                scroll_layout.addStretch()
+                scroll_area.setWidget(scroll_widget)
+                scroll_area.setWidgetResizable(True)
+                layout.addWidget(scroll_area)
+            
+            # 关闭按钮
+            close_btn = QPushButton("关闭")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.exec_()
+            
+        except Exception as e:
+            print(f"查看历史数据失败: {e}")
+            QMessageBox.warning(self, "错误", f"查看历史数据失败: {e}")
+
+    def set_last_week(self):
+        """设置近七天的日期范围（昨天到过去七天）"""
+        from PyQt5.QtCore import QDate
+        
+        # 结束日期设置为昨天
+        yesterday = QDate.currentDate().addDays(-1)
+        # 开始日期设置为七天前
+        seven_days_ago = yesterday.addDays(-6)
+        
+        self.date_start_input.setDate(seven_days_ago)
+        self.date_end_input.setDate(yesterday)
+        
+        self.show_toast(f"已设置日期范围: {seven_days_ago.toString('yyyy-MM-dd')} ~ {yesterday.toString('yyyy-MM-dd')}")
+
+    def delete_historical_data(self, data_id, parent_dialog):
+        """删除历史数据"""
+        reply = QMessageBox.question(self, "确认删除", "确定删除这条历史数据记录吗？")
+        if reply == QMessageBox.Yes:
+            try:
+                self.db.safe_execute("DELETE FROM historical_data WHERE id=?", (data_id,))
+                # 刷新对话框
+                parent_dialog.accept()
+                self.view_historical_data()
+                self.show_toast("✅ 已删除历史数据")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"删除失败: {e}")
 
     def _update_order_label_for_row(self, row, weight_input, order_label, prod_id):
         """更新单量显示标签"""
