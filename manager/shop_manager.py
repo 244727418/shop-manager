@@ -766,10 +766,10 @@ class ShopManagerApp(QMainWindow):
         debug_layout.addWidget(self._debug_label_1)
         
         # 标签2: 左侧冻结列表格区
-        self._debug_label_2.setText("""【板块:主界面-冻结列\n文件:shop_manager.py】
+        self._debug_label_2.setText("""【板块:主界面-冻结列\n文件:widgets/product_store.py】
         - 店铺控件/商品ID+图片+标题
         - 毛利信息区（综合毛利显示）
-        - 净利状态区（血赚/微盈利/保本/微亏/一般亏/巨亏的颜色渐变显示）
+        - 净利状态区（盈利/微盈利/保本/微亏/一般亏/巨亏的颜色渐变显示）
         - 投产倍数区（当前投产/净保本投产）""")
         self._debug_label_2.setStyleSheet("background-color: #90EE90; color: #000; font-weight: bold; padding: 1px; font-size: 13px;")
         self._debug_label_2.setTextInteractionFlags(Qt.TextSelectableByMouse)

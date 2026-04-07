@@ -266,21 +266,21 @@ class ProductWidget(QWidget):
                 roi_multiple_text = ""
                 if current_roi > 0 and net_break_even_roi > 0:
                     roi_multiple = current_roi / net_break_even_roi
-                    roi_multiple_text = f"投产:{current_roi:.1f} 投产倍数:{roi_multiple:.2f}倍"
+                    roi_multiple_text = f"投产:{current_roi:.2f} 投产倍数:{roi_multiple:.2f}倍"
                 elif current_roi > 0:
-                    roi_multiple_text = f"投产:{current_roi:.1f} 投产倍数:--"
+                    roi_multiple_text = f"投产:{current_roi:.2f} 投产倍数:--"
                 else:
                     roi_multiple_text = ""
                 self.roi_label.setText(roi_multiple_text)
-                if final_net_margin_pct >= 10:
+                if final_net_margin_pct > 5:
                     self.net_profit_label.setStyleSheet("color: #006400; font-weight: bold; font-size: 13px;")
-                elif final_net_margin_pct >= 5:
+                elif final_net_margin_pct > 1:
                     self.net_profit_label.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 13px;")
-                elif final_net_margin_pct >= -5:
+                elif final_net_margin_pct >= -2:
                     self.net_profit_label.setStyleSheet("color: #daa520; font-weight: bold; font-size: 13px;")
-                elif final_net_margin_pct >= -10:
+                elif final_net_margin_pct >= -5:
                     self.net_profit_label.setStyleSheet("color: #ff8c00; font-weight: bold; font-size: 13px;")
-                elif final_net_margin_pct >= -20:
+                elif final_net_margin_pct >= -8:
                     self.net_profit_label.setStyleSheet("color: #dc143c; font-weight: bold; font-size: 13px;")
                 else:
                     self.net_profit_label.setStyleSheet("color: #8b0000; font-weight: bold; font-size: 13px;")
@@ -300,18 +300,18 @@ class ProductWidget(QWidget):
             self.roi_label.setText("")
 
     def _get_net_profit_status(self, net_margin_pct):
-        if net_margin_pct >= 10:
-            return "💰 血赚"
-        elif net_margin_pct >= 5:
-            return "✓ 微盈利"
+        if net_margin_pct > 5:
+            return "盈利"
+        elif net_margin_pct > 1:
+            return "微盈利"
+        elif net_margin_pct >= -2:
+            return "保本"
         elif net_margin_pct >= -5:
-            return "● 保本"
-        elif net_margin_pct >= -10:
-            return "△ 微亏"
-        elif net_margin_pct >= -20:
-            return "⚠ 一般亏"
+            return "微亏"
+        elif net_margin_pct >= -8:
+            return "一般亏"
         else:
-            return "💀 血亏"
+            return "巨亏"
 
     def update_roi_display(self, margin_rate=None):
         try:
@@ -498,9 +498,27 @@ class StoreWidget(QWidget):
             self.margin_label = QLabel("   综合毛利: --")
             self.margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
 
+        net_margin = self.calculate_store_net_margin()
+        if net_margin is not None:
+            self.net_margin_label = QLabel(f"净利率: {net_margin:.1f}%")
+            self.net_margin_label.setStyleSheet("background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: #3498db; font-weight: bold;")
+        else:
+            self.net_margin_label = QLabel("净利率: --")
+            self.net_margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+
+        avg_price = self.calculate_store_avg_price()
+        if avg_price is not None:
+            self.avg_price_label = QLabel(f"客单价: ¥{avg_price:.1f}")
+            self.avg_price_label.setStyleSheet("background-color: #e8f8f5; padding: 3px 8px; font-size: 12px; color: #27ae60; font-weight: bold;")
+        else:
+            self.avg_price_label = QLabel("客单价: --")
+            self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+
         label_layout.addWidget(top_row_widget)
         label_layout.addWidget(self.memo_label)
         label_layout.addWidget(self.margin_label)
+        label_layout.addWidget(self.net_margin_label)
+        label_layout.addWidget(self.avg_price_label)
 
         btn_widget = QWidget()
         btn_layout = QVBoxLayout(btn_widget)
@@ -571,6 +589,103 @@ class StoreWidget(QWidget):
             return None
         except Exception as e:
             print(f"计算店铺毛利失败: {e}")
+            return None
+
+    def calculate_store_net_margin(self):
+        try:
+            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,))
+            if not products:
+                return None
+            total_weight = 0
+            total_weighted_net_margin = 0
+            for prod_id, store_weight in products:
+                if not store_weight or store_weight <= 0:
+                    continue
+                specs = self.db.safe_fetchall(
+                    "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                    (prod_id,)
+                )
+                if not specs:
+                    continue
+                product_rows = self.db.safe_fetchall(
+                    "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
+                    (prod_id,)
+                )
+                coupon = (product_rows[0][0] or 0) if product_rows else 0
+                new_customer = (product_rows[0][1] or 0) if product_rows else 0
+                max_discount = max(coupon, new_customer)
+                current_roi = (product_rows[0][2] or 0) if product_rows else 0
+                return_rate = (product_rows[0][3] or 0) if product_rows else 0
+                total_spec_weight = 0
+                total_weighted_margin_prod = 0
+                for spec_code, sale_price, weight in specs:
+                    if not sale_price or sale_price <= 0:
+                        continue
+                    weight = weight or 0
+                    cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
+                    cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
+                    final_price = sale_price - max_discount
+                    if final_price > 0 and cost > 0:
+                        margin = (final_price - cost) / final_price
+                        total_weighted_margin_prod += margin * weight
+                        total_spec_weight += weight
+                if total_spec_weight > 0:
+                    spec_margin = total_weighted_margin_prod / total_spec_weight
+                    final_net_margin_pct = -100
+                    if current_roi > 0 and return_rate >= 0:
+                        margin_rate_decimal = spec_margin
+                        final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+                    total_weighted_net_margin += final_net_margin_pct * store_weight
+                    total_weight += store_weight
+            if total_weight > 0:
+                return total_weighted_net_margin / total_weight
+            return None
+        except Exception as e:
+            print(f"计算店铺净利率失败: {e}")
+            return None
+
+    def calculate_store_avg_price(self):
+        try:
+            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,))
+            if not products:
+                return None
+            total_weight = 0
+            total_weighted_price = 0
+            for prod_id, store_weight in products:
+                if not store_weight or store_weight <= 0:
+                    continue
+                specs = self.db.safe_fetchall(
+                    "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                    (prod_id,)
+                )
+                if not specs:
+                    continue
+                product_rows = self.db.safe_fetchall(
+                    "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?",
+                    (prod_id,)
+                )
+                coupon = (product_rows[0][0] or 0) if product_rows else 0
+                new_customer = (product_rows[0][1] or 0) if product_rows else 0
+                max_discount = max(coupon, new_customer)
+                total_spec_weight = 0
+                total_weighted_price_prod = 0
+                for spec_code, sale_price, weight in specs:
+                    if sale_price is None or weight is None or sale_price <= 0:
+                        continue
+                    weight = weight or 0
+                    final_price = sale_price - max_discount
+                    if final_price > 0:
+                        total_weighted_price_prod += final_price * weight
+                        total_spec_weight += weight
+                if total_spec_weight > 0:
+                    spec_avg_price = total_weighted_price_prod / total_spec_weight
+                    total_weighted_price += spec_avg_price * store_weight
+                    total_weight += store_weight
+            if total_weight > 0:
+                return total_weighted_price / total_weight
+            return None
+        except Exception as e:
+            print(f"计算店铺客单价失败: {e}")
             return None
 
     def delete_store(self):
