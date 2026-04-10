@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QApplication
 )
 from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer
-from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator
+from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator, QFont
 from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
 from PyQt5.QtGui import QClipboard
 
@@ -18,6 +18,240 @@ try:
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
+
+
+class LargeMarginDataDialog(QDialog):
+    """放大版毛利数据表格窗口"""
+    FORMULAS = {
+        "日期": None,
+        "实发订单": None,
+        "实发金额": None,
+        "毛利润": None,
+        "毛利率": "毛利润 / 实发金额 × 100%",
+        "退款金额": None,
+        "金额退款率": "退款金额 / 实发金额 × 100%",
+        "退款订单": None,
+        "订单退款率": "退款订单 / 实发订单 × 100%",
+        "件单价": "实发金额 / 实发订单",
+        "推广费": None,
+        "推广占比": "推广费 / 实发金额 × 100%",
+        "技术服务费": "实发金额 × 0.6%",
+        "扣款": None,
+        "其他服务": None,
+        "其他": None,
+        "净利润": "毛利润 - 退款金额 - 推广费 - 扣款 - 其他服务 + 其他 - 技术服务费",
+        "净利率": "净利润 / 实发金额 × 100%",
+        "单笔利润": "净利润 / 实发订单",
+        "日盈亏": "净利润 / 天数",
+    }
+
+    def load_all_data(self):
+        """从数据库加载所有历史数据"""
+        try:
+            records = self.db.safe_fetchall("""
+                SELECT start_date, end_date, actual_orders, actual_amount, gross_profit,
+                       refund_amount, refund_orders, promotion_fee, deduction, other_service, other,
+                       gross_margin_rate, refund_rate_by_amount, refund_rate_by_orders,
+                       unit_price, promotion_ratio, tech_fee,
+                       net_profit, net_margin_rate, profit_per_order
+                FROM manual_margin_data WHERE store_id=? ORDER BY start_date ASC, end_date ASC
+            """, (self.store_id,))
+            return records
+        except Exception as e:
+            print(f"加载历史数据失败: {e}")
+            return []
+
+    def __init__(self, store_name, store_id, db, parent=None):
+        super().__init__(parent)
+        self.store_id = store_id
+        self.db = db
+        self.setWindowTitle(f"📊 {store_name} - 毛利数据明细（放大版）")
+        self.setStyleSheet("background-color: #f5f5f5;")
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        header_label = QLabel("📈 毛利数据明细 - 放大查看模式（点击右上角关闭按钮退出）")
+        header_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        main_layout.addWidget(header_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(20)
+        self.table.setHorizontalHeaderLabels([
+            "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
+            "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
+            "技术服务费", "扣款", "其他服务", "其他", "净利润",
+            "净利率", "单笔利润", "日盈亏"
+        ])
+
+        records = self.load_all_data()
+        self.table.setRowCount(len(records))
+
+        for i, record in enumerate(records):
+            start_date = record[0] if record[0] else ""
+            end_date = record[1] if record[1] else ""
+            start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
+            end_display = end_date[5:10] if end_date and len(end_date) >= 10 else end_date
+            date_str = f"{start_display}\n{end_display}"
+
+            days = 1
+            if start_date and end_date:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    days = max(1, (end_dt - start_dt).days + 1)
+                except:
+                    pass
+
+            net_profit = record[17] if record[17] else 0
+            daily_profit = net_profit / days if days > 0 else 0
+
+            values = [
+                date_str,
+                str(int(record[2])) if record[2] else "0",
+                f"¥{record[3]:.2f}" if record[3] else "¥0.00",
+                f"¥{record[4]:.2f}" if record[4] else "¥0.00",
+                f"{record[11]:.2f}%" if record[11] else "0.00%",
+                f"¥{record[5]:.2f}" if record[5] else "¥0.00",
+                f"{record[12]:.2f}%" if record[12] else "0.00%",
+                str(int(record[6])) if record[6] else "0",
+                f"{record[13]:.2f}%" if record[13] else "0.00%",
+                f"¥{record[14]:.2f}" if record[14] else "¥0.00",
+                f"¥{record[7]:.2f}" if record[7] else "¥0.00",
+                f"{record[15]:.2f}%" if record[15] else "0.00%",
+                f"¥{record[16]:.2f}" if record[16] else "¥0.00",
+                f"¥{record[8]:.2f}" if record[8] else "¥0.00",
+                f"¥{record[9]:.2f}" if record[9] else "¥0.00",
+                f"¥{record[10]:.2f}" if record[10] else "¥0.00",
+                f"¥{record[17]:.2f}" if record[17] else "¥0.00",
+                f"{record[18]:.2f}%" if record[18] else "0.00%",
+                f"¥{record[19]:.2f}" if record[19] else "¥0.00",
+                f"¥{daily_profit:.2f}",
+            ]
+
+            for j, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if j == 0:
+                    item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                if j == 0:
+                    pass
+                elif j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
+                    item.setBackground(QColor("#c8e6c9"))
+                    item.setForeground(QColor("#1b5e20"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                else:
+                    item.setBackground(QColor("#bbdefb"))
+                    item.setForeground(QColor("#0d47a1"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.table.setItem(i, j, item)
+            self.table.setRowHeight(i, 60)
+
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(True)
+        self.table.setGridStyle(Qt.SolidLine)
+        self.table.setAlternatingRowColors(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        table_font = QFont()
+        table_font.setPointSize(16)
+        self.table.setFont(table_font)
+
+        self.table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #cccccc;
+                font-size: 16px;
+                border: 2px solid #cccccc;
+                border-radius: 6px;
+                background-color: white;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                text-align: center;
+                border: 1px solid #cccccc;
+                font-size: 16px;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d7;
+                color: white;
+            }
+            QHeaderView {
+                border: none;
+            }
+            QHeaderView::section {
+                background-color: #e0e0e0;
+                padding: 1px;
+                margin: 0px;
+                border: none;
+                border-left: 1px solid #cccccc;
+                border-bottom: 1px solid #cccccc;
+                border-right: 1px solid #cccccc;
+                font-size: 16px;
+                font-weight: bold;
+                min-height: 50px;
+            }
+        """)
+
+        self.header = self.table.horizontalHeader()
+        self.header.setSectionResizeMode(QHeaderView.Interactive)
+        self.header.setMinimumSectionSize(80)
+        self.header.setStretchLastSection(True)
+        self.header.setMouseTracking(True)
+        self.header.viewport().setMouseTracking(True)
+        self.header.viewport().installEventFilter(self)
+
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, 70)
+
+        main_layout.addWidget(self.table)
+
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(40)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 20px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        main_layout.addWidget(close_btn)
+
+        self.table.resizeRowsToContents()
+        for col in range(self.table.columnCount()):
+            self.header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        QApplication.processEvents()
+        total_width = self.table.horizontalHeader().length() + self.table.verticalHeader().width() + 50
+        screen = QApplication.desktop().screenGeometry()
+        window_width = min(max(total_width, 1200), screen.width() - 100)
+        window_height = min(max(200 + self.table.rowCount() * 75, 600), screen.height() - 100)
+        self.resize(window_width, window_height)
+
+    def eventFilter(self, obj, event):
+        if obj == self.header.viewport() and event.type() == QEvent.MouseMove:
+            col = self.header.logicalIndexAt(event.pos())
+            if 0 <= col < len(self.FORMULAS):
+                col_names = list(self.FORMULAS.keys())
+                formula = self.FORMULAS[col_names[col]]
+                if formula:
+                    self.header.setToolTip(formula)
+                else:
+                    self.header.setToolTip("")
+            return super().eventFilter(obj, event)
+        return super().eventFilter(obj, event)
 
 
 class StoreMarginDialog(QDialog):
@@ -31,9 +265,12 @@ class StoreMarginDialog(QDialog):
         self.product_weights = {}
         self.is_balancing = False
         self.save_callback = save_callback
+        self.is_reading_mode = False
+        self.reading_scale_factor = 1.0
+        self.large_dialog = None
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
-        self.resize(1300, 800)
+        self.resize(1400, 800)
 
         self.toast_label = QLabel(self)
         self.toast_label.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
@@ -61,6 +298,68 @@ class StoreMarginDialog(QDialog):
         self.init_ui()
         self.load_products()
         self.refresh_manual_data_display()
+
+        # 安装事件过滤器用于Ctrl+滚轮缩放
+        self.wheel_event_received = False
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        """事件过滤器：处理Ctrl+滚轮缩放"""
+        if event.type() == QEvent.Wheel and event.modifiers() == Qt.ControlModifier:
+            if self.is_reading_mode:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.reading_scale_factor = min(2.0, self.reading_scale_factor + 0.1)
+                else:
+                    self.reading_scale_factor = max(0.5, self.reading_scale_factor - 0.1)
+                self.apply_reading_scale()
+                return True
+        return super().eventFilter(obj, event)
+
+    def toggle_reading_mode(self):
+        """切换阅览模式 - 弹出放大版数据表格窗口"""
+        self.is_reading_mode = not self.is_reading_mode
+        if self.is_reading_mode:
+            self.btn_reading_mode.setText("📖 退出阅览")
+            self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #e74c3c; color: white; border-radius: 3px;")
+            self.show_toast("已打开放大版数据窗口")
+            if self.large_dialog is None or not self.large_dialog.isVisible():
+                self.large_dialog = LargeMarginDataDialog(self.store_name, self.store_id, self.db, self)
+                self.large_dialog.exec_()
+            self.is_reading_mode = False
+            self.btn_reading_mode.setText("🔍 阅览模式")
+            self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
+        else:
+            self.btn_reading_mode.setText("🔍 阅览模式")
+            self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
+            self.show_toast("已退出阅览模式")
+            self.is_reading_mode = False
+
+    def apply_reading_scale(self):
+        """应用阅览模式缩放"""
+        if self.is_reading_mode:
+            # 获取当前字体并放大
+            current_font = self.margin_data_table.font()
+            scaled_font = QFont(current_font.family(), int(14 * self.reading_scale_factor))
+            self.margin_data_table.setFont(scaled_font)
+            # 调整行高
+            base_height = int(60 * self.reading_scale_factor)
+            for row in range(self.margin_data_table.rowCount()):
+                self.margin_data_table.setRowHeight(row, base_height)
+            # 调整表头高度
+            header_height = int(45 * self.reading_scale_factor)
+            self.margin_data_table.horizontalHeader().setMinimumHeight(header_height)
+            # 缩放表格本身
+            self.margin_data_table.setMaximumHeight(int(600 * self.reading_scale_factor))
+        else:
+            # 恢复默认
+            default_font = QFont()
+            default_font.setPointSize(14)
+            self.margin_data_table.setFont(default_font)
+            for row in range(self.margin_data_table.rowCount()):
+                self.margin_data_table.setRowHeight(row, 60)
+            self.margin_data_table.horizontalHeader().setMinimumHeight(45)
+            self.margin_data_table.setMaximumHeight(600)
 
     def show_toast(self, message):
         """显示气泡提示（淡入淡出0.5秒，不透明度50%）"""
@@ -230,16 +529,9 @@ class StoreMarginDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        self._debug_smd_label = QLabel("【板块:店铺毛利对话框主容器】")
-        self._debug_smd_label.setStyleSheet("background-color: #FFB6C1; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
-        self._debug_smd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_smd_label)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         # ====== 板块1: 顶部标题区域 ======
-        self._debug_header = QLabel("【板块1:顶部标题区域】标题+综合毛利+总订单+总销售额")
-        self._debug_header.setStyleSheet("background-color: #87CEEB; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
-        self._debug_header.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_header)
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(10, 15, 10, 15)
@@ -261,10 +553,6 @@ class StoreMarginDialog(QDialog):
         layout.addWidget(header_widget)
 
         # ====== 板块2: 过往数据分析板块 ======
-        self._debug_historical = QLabel("【板块2:过往数据分析板块】日期选择+数据展示+录入数据+清空")
-        self._debug_historical.setStyleSheet("background-color: #98FB98; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
-        self._debug_historical.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_historical)
         historical_widget = QWidget()
         historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px;")
         historical_layout = QVBoxLayout(historical_widget)
@@ -276,10 +564,6 @@ class StoreMarginDialog(QDialog):
         historical_layout.addWidget(historical_title)
 
         # 日期选择行
-        self._debug_date_row = QLabel("【子板块A:日期选择行】年份+开始日期~结束日期+近七天+录入数据")
-        self._debug_date_row.setStyleSheet("background-color: #DDA0DD; color: #000; padding: 2px; font-size: 11px;")
-        self._debug_date_row.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        historical_layout.addWidget(self._debug_date_row)
         date_row = QWidget()
         date_layout = QHBoxLayout(date_row)
         date_layout.setContentsMargins(0, 0, 0, 0)
@@ -319,34 +603,42 @@ class StoreMarginDialog(QDialog):
         self.btn_input_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #27ae60; color: white; border-radius: 3px;")
         self.btn_input_data.clicked.connect(self.open_input_data_dialog)
 
+        self.btn_import_data = QPushButton("📂 导入数据")
+        self.btn_import_data.setFixedWidth(80)
+        self.btn_import_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #9b59b6; color: white; border-radius: 3px;")
+        self.btn_import_data.clicked.connect(self.import_data)
+
+        self.btn_reading_mode = QPushButton("🔍 阅览模式")
+        self.btn_reading_mode.setFixedWidth(80)
+        self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
+        self.btn_reading_mode.clicked.connect(self.toggle_reading_mode)
+
         date_layout.addWidget(date_label)
         date_layout.addWidget(self.date_start_input)
         date_layout.addWidget(self.date_separator)
         date_layout.addWidget(self.date_end_input)
         date_layout.addWidget(self.btn_last_week)
         date_layout.addWidget(self.btn_input_data)
+        date_layout.addWidget(self.btn_import_data)
+        date_layout.addWidget(self.btn_reading_mode)
         date_layout.addStretch()
 
         historical_layout.addWidget(date_row)
 
         # 子板块C: 手动录入数据表格
-        self._debug_data_table = QLabel("【子板块C:手动录入数据表格】日期+18个指标+操作")
-        self._debug_data_table.setStyleSheet("background-color: #FFA500; color: #000; font-weight: bold; padding: 6px 2px; font-size: 11px;")
-        self._debug_data_table.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        historical_layout.addWidget(self._debug_data_table)
-        
         self.margin_data_table = QTableWidget()
-        self.margin_data_table.setColumnCount(19)  # 日期 + 18个指标
+        self.margin_data_table.setColumnCount(20)  # 日期 + 19个指标
         # 设置表头
         self.margin_data_table.setHorizontalHeaderLabels([
             "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
             "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
             "技术服务费", "扣款", "其他服务", "其他", "净利润",
-            "净利率", "单笔利润"
+            "净利率", "单笔利润", "日盈亏"
         ])
         self.margin_data_table.verticalHeader().setVisible(False)
         self.margin_data_table.setShowGrid(True)
         self.margin_data_table.setGridStyle(Qt.SolidLine)
+        self.margin_data_table.setAlternatingRowColors(False)
         # Excel风格标准表格
         self.margin_data_table.setStyleSheet("""
             QTableWidget {
@@ -355,12 +647,17 @@ class StoreMarginDialog(QDialog):
                 border: 1px solid #cccccc;
                 border-radius: 4px;
                 margin: 0px;
+                background-color: white;
             }
             QTableWidget::item {
                 padding: 0px;
                 text-align: center;
                 border: 1px solid #cccccc;
                 font-size: 14px;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d7;
+                color: white;
             }
             QHeaderView {
                 border: none;
@@ -392,27 +689,57 @@ class StoreMarginDialog(QDialog):
         table_font = QFont()
         table_font.setPointSize(14)
         self.margin_data_table.setFont(table_font)
-        
-        # 设置列宽自适应且拉伸填充整个表格宽度
+
         header = self.margin_data_table.horizontalHeader()
-        for col in range(self.margin_data_table.columnCount()):
-            header.setSectionResizeMode(col, QHeaderView.Stretch)
-        self.margin_data_table.setMinimumHeight(150)
-        self.margin_data_table.setMaximumHeight(600)
-        # 启用右键菜单
-        self.margin_data_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.margin_data_table.customContextMenuRequested.connect(self.show_margin_data_context_menu)
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setMinimumSectionSize(50)
+        self.margin_data_table._initial_width = None
+        self.margin_data_table.setMinimumHeight(60)
+        self.margin_data_table.setMaximumHeight(100)
+        self.margin_data_table.verticalHeader().setVisible(False)
+        self.margin_data_table.setShowGrid(True)
+        self.margin_data_table.setGridStyle(Qt.SolidLine)
         
         historical_layout.addWidget(self.margin_data_table)
 
-        layout.addWidget(historical_widget)
+        # 周环比对比表格
+        self.week_table = QTableWidget()
+        self.week_table.setColumnCount(20)
+        self.week_table.setRowCount(1)
+        self.week_table.verticalHeader().setVisible(False)
+        self.week_table.horizontalHeader().setVisible(False)
+        self.week_table.setShowGrid(True)
+        self.week_table.setGridStyle(Qt.SolidLine)
+        self.week_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #cccccc;
+                font-size: 14px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                background-color: #f0f8ff;
+            }
+            QTableWidget::item {
+                padding: 0px;
+                text-align: center;
+                border: 1px solid #cccccc;
+                font-size: 14px;
+            }
+            QHeaderView::section {
+                background-color: #d0d0d0;
+                padding: 0px;
+                border: 1px solid #cccccc;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 30px;
+            }
+        """)
+        week_header = self.week_table.horizontalHeader()
+        week_header.setSectionResizeMode(QHeaderView.Stretch)
+        self.week_table.setMaximumHeight(40)
+        
+        historical_layout.addWidget(self.week_table)
 
         # ====== 板块3: 毛利明细表格 ======
-        self._debug_table = QLabel("【板块3:毛利明细表格】图片+商品ID+商品标题+综合成本+客单价+毛利+权重+单量+销售额+主卖规格+操作")
-        self._debug_table.setStyleSheet("background-color: #FFD700; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
-        self._debug_table.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_table)
-        
         self.table = QTableWidget()
         self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels(["图片", "商品ID", "商品标题", "综合成本", "客单价", "毛利", "权重(%)", "单量", "销售额", "主卖规格", "操作"])
@@ -424,7 +751,7 @@ class StoreMarginDialog(QDialog):
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
         for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 60, 80, 100, 80]):
             self.table.setColumnWidth(i, w)
-        layout.addWidget(self.table)
+        historical_layout.addWidget(self.table)
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)
         self.btn_auto_balance = QPushButton("⚖️ 自动均分权重")
@@ -462,13 +789,14 @@ class StoreMarginDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_close)
-        layout.addWidget(btn_widget)
+        historical_layout.addWidget(btn_widget)
 
-        # ====== 板块4: 底部按钮区域 ======
-        self._debug_buttons = QLabel("【板块4:底部按钮区域】自动均分权重+计算利润+导入订单+同步订单权重+保存+关闭")
-        self._debug_buttons.setStyleSheet("background-color: #ADD8E6; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
-        self._debug_buttons.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_buttons)
+        layout.addWidget(historical_widget)
+
+    def resizeEvent(self, event):
+        """窗口大小改变时同步两表列宽"""
+        super().resizeEvent(event)
+        self.sync_table_widths()
 
     def load_products(self):
         self.table.cellChanged.disconnect()
@@ -642,76 +970,317 @@ class StoreMarginDialog(QDialog):
                 self.table.item(row, 8).setText("-")
 
     def refresh_manual_data_display(self):
-        """刷新手动录入数据展示"""
+        """刷新手动录入数据展示（只显示最近一次数据）"""
         try:
             records = self.load_manual_data()
-            self.margin_data_table.setRowCount(len(records))
             
-            # 存储所有记录用于计算对比
-            all_records = []
-            
-            for i, record in enumerate(records):
-                all_records.append(record)
+            # 只取最后一条记录（最近一次）
+            if not records:
+                self.margin_data_table.setRowCount(0)
+                return
                 
-                # 显示日期范围：开始日期 和 结束日期 分两行显示
-                start_date = record[0] if record[0] else ""
-                end_date = record[1] if record[1] else ""
-                # 安全地截取月日部分
-                start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
-                end_display = end_date[5:10] if end_date and len(end_date) >= 10 else end_date
-                date_str = f"{start_display}\n{end_display}"
+            record = records[-1]  # 取最后一条
 
-                # 手动输入的9个指标（新顺序，包含毛利率）
-                values = [
-                    date_str,  # 0: 日期
-                    str(int(record[2])),  # 1: 实发订单
-                    f"¥{record[3]:.2f}",  # 2: 实发金额
-                    f"¥{record[4]:.2f}",  # 3: 毛利润
-                    f"{record[11]:.2f}%",  # 4: 毛利率
-                    f"¥{record[5]:.2f}",  # 5: 退款金额
-                    f"{record[12]:.2f}%",  # 6: 金额退款率
-                    str(int(record[6])),  # 7: 退款订单
-                    f"{record[13]:.2f}%",  # 8: 订单退款率
-                    f"¥{record[14]:.2f}",  # 9: 件单价
-                    f"¥{record[7]:.2f}",  # 10: 推广费
-                    f"{record[15]:.2f}%",  # 11: 推广占比
-                    f"¥{record[16]:.2f}",  # 12: 技术服务费
-                    f"¥{record[8]:.2f}",  # 13: 扣款
-                    f"¥{record[9]:.2f}",  # 14: 其他服务
-                    f"¥{record[10]:.2f}",  # 15: 其他
-                    f"¥{record[17]:.2f}",  # 16: 净利润
-                    f"{record[18]:.2f}%",  # 17: 净利率
-                    f"¥{record[19]:.2f}",  # 18: 单笔利润
-                ]
-
-                for j, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    item.setTextAlignment(Qt.AlignCenter)
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-
-                    # 日期列允许换行
-                    if j == 0:
-                        item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-
-                    # 设置颜色区分手动/自动指标
-                    # 手动输入指标（1-3, 5, 7, 10, 13-15）：浅绿色
-                    # 自动计算指标（4, 6, 8, 9, 11, 12, 16-18）：浅蓝色
-                    if j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
-                        item.setBackground(QColor("#e8f5e9"))  # 浅绿色
-                    elif j in [4, 6, 8, 9, 11, 12, 16, 17, 18]:
-                        item.setBackground(QColor("#e3f2fd"))  # 浅蓝色
-
-                    self.margin_data_table.setItem(i, j, item)
+            self.margin_data_table.setRowCount(1)
             
-            # 设置所有行的行高以支持日期换行
-            if records:
-                for row_idx in range(len(records)):
-                    self.margin_data_table.setRowHeight(row_idx, 60)
+            # 显示日期范围：开始日期 和 结束日期 分两行显示
+            start_date = record[0] if record[0] else ""
+            end_date = record[1] if record[1] else ""
+            start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
+            end_display = end_date[5:10] if end_date and len(end_date) >= 10 else end_date
+            date_str = f"{start_display}\n{end_display}"
+
+            # 计算天数
+            days = 1
+            if start_date and end_date:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    days = max(1, (end_dt - start_dt).days + 1)
+                except:
+                    pass
+            
+            # 计算日盈亏
+            net_profit = record[17] if record[17] else 0
+            daily_profit = net_profit / days if days > 0 else 0
+            
+            values = [
+                date_str,  # 0: 日期
+                str(int(record[2])),  # 1: 实发订单
+                f"¥{record[3]:.2f}",  # 2: 实发金额
+                f"¥{record[4]:.2f}",  # 3: 毛利润
+                f"{record[11]:.2f}%",  # 4: 毛利率
+                f"¥{record[5]:.2f}",  # 5: 退款金额
+                f"{record[12]:.2f}%",  # 6: 金额退款率
+                str(int(record[6])),  # 7: 退款订单
+                f"{record[13]:.2f}%",  # 8: 订单退款率
+                f"¥{record[14]:.2f}",  # 9: 件单价
+                f"¥{record[7]:.2f}",  # 10: 推广费
+                f"{record[15]:.2f}%",  # 11: 推广占比
+                f"¥{record[16]:.2f}",  # 12: 技术服务费
+                f"¥{record[8]:.2f}",  # 13: 扣款
+                f"¥{record[9]:.2f}",  # 14: 其他服务
+                f"¥{record[10]:.2f}",  # 15: 其他
+                f"¥{record[17]:.2f}",  # 16: 净利润
+                f"{record[18]:.2f}%",  # 17: 净利率
+                f"¥{record[19]:.2f}",  # 18: 单笔利润
+                f"¥{daily_profit:.2f}",  # 19: 日盈亏
+            ]
+
+            for j, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+                if j == 0:
+                    item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+
+                if j == 0:
+                    pass
+                elif j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
+                    item.setBackground(QColor("#c8e6c9"))
+                    item.setForeground(QColor("#1b5e20"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                else:
+                    item.setBackground(QColor("#bbdefb"))
+                    item.setForeground(QColor("#0d47a1"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+
+                self.margin_data_table.setItem(0, j, item)
+
+            self.margin_data_table.setRowHeight(0, 60)
+
+            # 计算周环比变化
+            self.calculate_week_comparison(records)
+            
+            # 同步两表列宽
+            self.sync_table_widths()
 
         except Exception as e:
             print(f"刷新手动数据展示失败: {e}")
             import traceback
             traceback.print_exc()
+
+    def sync_table_widths(self):
+        """同步两个表格的列宽，确保完全对齐"""
+        try:
+            for col in range(20):
+                width = self.margin_data_table.columnWidth(col)
+                self.week_table.setColumnWidth(col, width)
+        except Exception as e:
+            print(f"同步列宽失败: {e}")
+
+    def calculate_week_comparison(self, records):
+        """计算并显示周环比变化"""
+        if len(records) < 2:
+            for col in range(20):
+                item = QTableWidgetItem("暂无上周数据")
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setBackground(QColor("#f5f5f5"))
+                self.week_table.setItem(0, col, item)
+            return
+
+        current = records[-1]
+        previous = records[-2]
+
+        current_net_profit = current[17] if current[17] else 0
+        previous_net_profit = previous[17] if previous[17] else 0
+        current_net_margin = current[18] if current[18] else 0
+        previous_net_margin = previous[18] if previous[18] else 0
+
+        current_daily = 0
+        if current[0] and current[1]:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(current[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(current[1], "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+                current_daily = current_net_profit / days if days > 0 else 0
+            except:
+                pass
+
+        previous_daily = 0
+        if previous[0] and previous[1]:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(previous[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(previous[1], "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+                previous_daily = previous_net_profit / days if days > 0 else 0
+            except:
+                pass
+
+        GREEN = QColor("#27ae60")
+        RED = QColor("#e74c3c")
+        GRAY = QColor("#999999")
+
+        for col in range(20):
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+            if col == 0:
+                item.setText("较上周")
+                item.setBackground(QColor("#e8e8e8"))
+            elif col == 1:
+                if previous[2] and previous[2] != 0:
+                    change = ((current[2] or 0) - (previous[2] or 0)) / abs(previous[2]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 2:
+                if (previous[3] or 0) != 0:
+                    change = ((current[3] or 0) - (previous[3] or 0)) / abs(previous[3]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 3:
+                if (previous[4] or 0) != 0:
+                    change = ((current[4] or 0) - (previous[4] or 0)) / abs(previous[4]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 4:
+                change = (current[11] or 0) - (previous[11] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+            elif col == 5:
+                if (previous[5] or 0) != 0:
+                    change = ((current[5] or 0) - (previous[5] or 0)) / abs(previous[5]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 6:
+                change = (current[12] or 0) - (previous[12] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 7:
+                if previous[6] and previous[6] != 0:
+                    change = ((current[6] or 0) - (previous[6] or 0)) / abs(previous[6]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 8:
+                change = (current[13] or 0) - (previous[13] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 9:
+                if (previous[14] or 0) != 0:
+                    change = ((current[14] or 0) - (previous[14] or 0)) / abs(previous[14]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 10:
+                if (previous[7] or 0) != 0:
+                    change = ((current[7] or 0) - (previous[7] or 0)) / abs(previous[7]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 11:
+                change = (current[15] or 0) - (previous[15] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 12:
+                if (previous[16] or 0) != 0:
+                    change = ((current[16] or 0) - (previous[16] or 0)) / abs(previous[16]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 13:
+                if (previous[8] or 0) != 0:
+                    change = ((current[8] or 0) - (previous[8] or 0)) / abs(previous[8]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 14:
+                if (previous[9] or 0) != 0:
+                    change = ((current[9] or 0) - (previous[9] or 0)) / abs(previous[9]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 15:
+                if (previous[10] or 0) != 0:
+                    change = ((current[10] or 0) - (previous[10] or 0)) / abs(previous[10]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 16:
+                if previous_net_profit != 0:
+                    change = (current_net_profit - previous_net_profit) / abs(previous_net_profit) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 17:
+                change = current_net_margin - previous_net_margin
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+            elif col == 18:
+                if (previous[19] or 0) != 0:
+                    change = ((current[19] or 0) - (previous[19] or 0)) / abs(previous[19]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 19:
+                if previous_daily != 0:
+                    change = (current_daily - previous_daily) / abs(previous_daily) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+
+            self.week_table.setItem(0, col, item)
 
     def load_manual_data(self):
         """从数据库加载手动录入数据"""
@@ -759,6 +1328,262 @@ class StoreMarginDialog(QDialog):
             self.save_manual_data(data)
             self.refresh_manual_data_display()
 
+    def import_data(self):
+        """导入Excel/CSV数据"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择导入文件", "",
+            "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*.*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            import os
+            ext = os.path.splitext(file_path)[1].lower()
+
+            if ext in ['.xlsx', '.xls']:
+                import openpyxl
+                from datetime import datetime as dt
+                wb = openpyxl.load_workbook(file_path)
+                ws = wb.active
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    row_data = []
+                    for cell in row:
+                        if isinstance(cell, (dt,)) and cell is not None:
+                            row_data.append(cell.strftime("%Y-%m-%d"))
+                        else:
+                            row_data.append(cell)
+                    rows.append(row_data)
+            else:
+                import csv
+                with open(file_path, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.reader(f)
+                    rows = list(reader)
+
+            if len(rows) < 2:
+                QMessageBox.warning(self, "错误", "文件数据少于2行，无法导入")
+                return
+
+            header = [str(h).strip() if h else "" for h in rows[0]]
+
+            # 自动识别列
+            col_map = {}
+            for i, h in enumerate(header):
+                h_str = str(h).strip()
+                h_lower = h_str.lower()
+                if "日期" in h_str or "date" in h_lower:
+                    col_map["start_date"] = i
+                elif "实发订单" in h_str:
+                    col_map["actual_orders"] = i
+                elif "实发金额" in h_str:
+                    col_map["actual_amount"] = i
+                elif "毛利润" in h_str and "净" not in h_str:
+                    col_map["gross_profit"] = i
+                elif "退款金额" in h_str:
+                    col_map["refund_amount"] = i
+                elif "退款订单" in h_str:
+                    col_map["refund_orders"] = i
+                elif "推广费" in h_str:
+                    col_map["promotion_fee"] = i
+                elif "扣款" in h_str:
+                    col_map["deduction"] = i
+                elif "其他服务" in h_str:
+                    col_map["other_service"] = i
+                elif h_str.strip() == "其他" or (h_str.strip().startswith("其他") and "服务" not in h_str):
+                    col_map["other"] = i
+
+            # 总是弹出列映射对话框，自动识别到的帮用户选上
+            dialog = QDialog(self)
+            dialog.setWindowTitle("选择列映射")
+            dialog.resize(500, 400)
+            layout = QVBoxLayout(dialog)
+
+            recognized_count = len(col_map)
+            layout.addWidget(QLabel(f"已自动识别 {recognized_count} 个字段，其他字段请手动选择："))
+
+            fields = [
+                ("start_date", "日期（必填）"),
+                ("actual_orders", "实发订单"),
+                ("actual_amount", "实发金额"),
+                ("gross_profit", "毛利润"),
+                ("refund_amount", "退款金额"),
+                ("refund_orders", "退款订单"),
+                ("promotion_fee", "推广费"),
+                ("deduction", "扣款"),
+                ("other_service", "其他服务"),
+                ("other", "其他"),
+            ]
+
+            combos = {}
+            for field_key, field_name in fields:
+                row_layout = QHBoxLayout()
+                row_layout.addWidget(QLabel(field_name))
+                combo = QComboBox()
+                combo.addItem("（不导入）", -1)
+                for idx, h in enumerate(header):
+                    combo.addItem(f"{idx}: {h}", idx)
+                # 自动设置已识别的列
+                if field_key in col_map:
+                    combo.setCurrentIndex(col_map[field_key] + 1)  # +1 因为第一个是"（不导入）"
+                row_layout.addWidget(combo)
+                layout.addLayout(row_layout)
+                combos[field_key] = combo
+
+            btn_layout = QHBoxLayout()
+            ok_btn = QPushButton("确定")
+            cancel_btn = QPushButton("取消")
+            btn_layout.addWidget(ok_btn)
+            btn_layout.addWidget(cancel_btn)
+            layout.addLayout(btn_layout)
+
+            def on_ok():
+                new_col_map = {}
+                for field_key, combo in combos.items():
+                    idx = combo.currentData()
+                    if idx != -1:
+                        new_col_map[field_key] = idx
+                dialog.col_map = new_col_map
+                dialog.accept()
+
+            ok_btn.clicked.connect(on_ok)
+            cancel_btn.clicked.connect(dialog.reject)
+
+            if dialog.exec_() != QDialog.Accepted:
+                return
+
+            col_map = dialog.col_map
+
+            if "start_date" not in col_map:
+                QMessageBox.warning(self, "错误", "请至少选择日期列")
+                return
+
+            imported_count = 0
+            for row_idx in range(1, len(rows)):
+                row = rows[row_idx]
+                if not row or all(str(cell).strip() == "" for cell in row):
+                    continue
+
+                # 解析日期
+                date_str = str(row[col_map["start_date"]]).strip()
+                try:
+                    from datetime import datetime
+                    import re
+                    start_date = None
+                    end_date = None
+
+                    dash_match = re.match(r'(\d{1,2})\.(\d{1,2})-(\d{1,2})\.(\d{1,2})', date_str)
+                    if dash_match:
+                        current_year = datetime.now().year
+                        start_date = datetime(current_year, int(dash_match.group(1)), int(dash_match.group(2)))
+                        end_date = datetime(current_year, int(dash_match.group(3)), int(dash_match.group(4)))
+                    else:
+                        date_str_clean = date_str.replace("/", "-").replace("~", "-")
+                        parts = date_str_clean.split("-")
+                        if len(parts) == 3:
+                            if len(parts[0]) == 4:
+                                start_date = end_date = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                            else:
+                                current_year = datetime.now().year
+                                start_date = end_date = datetime(current_year, int(parts[0]), int(parts[1]))
+                        elif len(parts) == 2:
+                            current_year = datetime.now().year
+                            start_date = end_date = datetime(current_year, int(parts[0]), int(parts[1]))
+                        elif len(parts) == 1 and parts[0]:
+                            if "." in parts[0]:
+                                sub_parts = parts[0].split(".")
+                            elif "/" in parts[0]:
+                                sub_parts = parts[0].split("/")
+                            else:
+                                sub_parts = None
+                            if sub_parts and len(sub_parts) == 2:
+                                current_year = datetime.now().year
+                                start_date = end_date = datetime(current_year, int(sub_parts[0]), int(sub_parts[1]))
+
+                    if start_date is None:
+                        continue
+                    start_date_str = start_date.strftime("%Y-%m-%d")
+                    end_date_str = end_date.strftime("%Y-%m-%d")
+                except:
+                    continue
+
+                # 解析数值
+                def get_float(val, default=0.0):
+                    try:
+                        s = str(val).replace("¥", "").replace(",", "").replace("%", "").strip()
+                        return float(s) if s else default
+                    except:
+                        return default
+
+                def get_int(val, default=0):
+                    try:
+                        s = str(val).replace(",", "").strip()
+                        return int(float(s)) if s else default
+                    except:
+                        return default
+
+                data = {
+                    "start_date": start_date_str,
+                    "end_date": end_date_str,
+                    "actual_orders": get_int(row[col_map.get("actual_orders", -1)]),
+                    "actual_amount": get_float(row[col_map.get("actual_amount", -1)]),
+                    "gross_profit": get_float(row[col_map.get("gross_profit", -1)]),
+                    "refund_amount": get_float(row[col_map.get("refund_amount", -1)]),
+                    "refund_orders": get_int(row[col_map.get("refund_orders", -1)]),
+                    "promotion_fee": get_float(row[col_map.get("promotion_fee", -1)]),
+                    "deduction": get_float(row[col_map.get("deduction", -1)]),
+                    "other_service": get_float(row[col_map.get("other_service", -1)]),
+                    "other": get_float(row[col_map.get("other", -1)]),
+                }
+
+                # 计算自动指标
+                if data["actual_amount"] > 0:
+                    data["gross_margin_rate"] = (data["gross_profit"] / data["actual_amount"]) * 100
+                    data["refund_rate_by_amount"] = (data["refund_amount"] / data["actual_amount"]) * 100
+                    data["promotion_ratio"] = (data["promotion_fee"] / data["actual_amount"]) * 100
+                    data["unit_price"] = data["actual_amount"] / data["actual_orders"] if data["actual_orders"] > 0 else 0
+                else:
+                    data["gross_margin_rate"] = 0
+                    data["refund_rate_by_amount"] = 0
+                    data["promotion_ratio"] = 0
+                    data["unit_price"] = 0
+
+                if data["actual_orders"] > 0:
+                    data["refund_rate_by_orders"] = (data["refund_orders"] / data["actual_orders"]) * 100
+                else:
+                    data["refund_rate_by_orders"] = 0
+
+                data["tech_fee"] = data["actual_amount"] * 0.006
+
+                data["net_profit"] = (
+                    data["gross_profit"]
+                    - data["refund_amount"]
+                    - data["promotion_fee"]
+                    - data["deduction"]
+                    - data["other_service"]
+                    + data["other"]
+                    - data["tech_fee"]
+                )
+
+                if data["actual_amount"] > 0:
+                    data["net_margin_rate"] = (data["net_profit"] / data["actual_amount"]) * 100
+                else:
+                    data["net_margin_rate"] = 0
+
+                if data["actual_orders"] > 0:
+                    data["profit_per_order"] = data["net_profit"] / data["actual_orders"]
+                else:
+                    data["profit_per_order"] = 0
+
+                if self.save_manual_data(data):
+                    imported_count += 1
+
+            self.refresh_manual_data_display()
+            self.show_toast(f"✅ 已导入 {imported_count} 条数据")
+
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"导入失败: {e}")
+
     def save_manual_data(self, data):
         """保存手动录入数据"""
         try:
@@ -768,17 +1593,34 @@ class StoreMarginDialog(QDialog):
 
             # 检查是否有相同日期的记录
             existing = self.db.safe_fetchall("""
-                SELECT id FROM manual_margin_data
+                SELECT actual_orders, actual_amount, gross_profit, refund_amount,
+                       refund_orders, promotion_fee, deduction, other_service, other
+                FROM manual_margin_data
                 WHERE store_id=? AND start_date=? AND end_date=?
             """, (self.store_id, start_date, end_date))
 
             if existing:
+                old_record = existing[0]
+                new_values = (
+                    data.get("actual_orders", 0),
+                    data.get("actual_amount", 0),
+                    data.get("gross_profit", 0),
+                    data.get("refund_amount", 0),
+                    data.get("refund_orders", 0),
+                    data.get("promotion_fee", 0),
+                    data.get("deduction", 0),
+                    data.get("other_service", 0),
+                    data.get("other", 0),
+                )
+                if old_record == new_values:
+                    return False  # 数据相同，跳过
+
                 reply = QMessageBox.question(
                     self, "确认覆盖",
                     f"该日期范围 ({start_date} ~ {end_date}) 已存在数据，是否覆盖？"
                 )
                 if reply != QMessageBox.Yes:
-                    return
+                    return False
 
             created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -819,8 +1661,10 @@ class StoreMarginDialog(QDialog):
                 created_time
             ))
             self.show_toast("✅ 数据已保存")
+            return True
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存失败: {e}")
+            return False
 
     def save_historical_data(self):
         """保存当前导入订单数据到历史记录"""
@@ -1231,18 +2075,20 @@ class StoreMarginDialog(QDialog):
             return
             
         date_text = date_item.text()
-        if "~" in date_text:
+        # 日期格式可能是 "04-01\n04-07" 或 "04-01~04-07"
+        if "\n" in date_text:
+            parts = date_text.split("\n")
+        elif "~" in date_text:
             parts = date_text.split("~")
-            if len(parts) >= 2 and parts[0].strip():
-                start_date_short = parts[0].strip()
-                # 补全年份，格式：04-01
-                current_year = datetime.now().year
-                start_date_full = f"{current_year}-{start_date_short}"
-            else:
-                # start_date为空，尝试用end_date
-                QMessageBox.warning(self, "错误", "该数据的开始日期为空，无法删除")
-                return
         else:
+            return
+
+        if len(parts) >= 2 and parts[0].strip():
+            start_date_short = parts[0].strip()
+            current_year = datetime.now().year
+            start_date_full = f"{current_year}-{start_date_short}"
+        else:
+            QMessageBox.warning(self, "错误", "该数据的开始日期为空，无法删除")
             return
             
         menu = QMenu(self)

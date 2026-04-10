@@ -133,7 +133,7 @@ class InputDataDialog(QDialog):
             unit_price = actual_amount / actual_orders
             promotion_ratio = (promotion_fee / actual_amount * 100) if actual_amount > 0 else 0
             tech_fee = actual_amount * 0.006
-            net_profit = gross_profit - refund_amount - promotion_fee - deduction - other_service - other - tech_fee
+            net_profit = gross_profit - refund_amount - promotion_fee - deduction - other_service + other - tech_fee
             net_margin_rate = (net_profit / actual_amount * 100) if actual_amount > 0 else 0
             profit_per_order = net_profit / actual_orders if actual_orders > 0 else 0
 
