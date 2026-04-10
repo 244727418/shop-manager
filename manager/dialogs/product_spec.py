@@ -277,12 +277,65 @@ class ProductSpecDialog(QDialog):
         roi_grid = QGridLayout()
         
         roi_grid.addWidget(QLabel("当前投产 (ROI):"), 0, 0)
+        
+        # 创建水平布局容器用于当前投产输入框和按钮
+        current_roi_container = QWidget()
+        current_roi_layout = QHBoxLayout(current_roi_container)
+        current_roi_layout.setContentsMargins(0, 0, 0, 0)
+        current_roi_layout.setSpacing(5)
+        
         self.current_roi_input = QLineEdit()
         self.current_roi_input.setPlaceholderText("输入当前投产...")
         self.current_roi_input.setFixedWidth(120)
         self.current_roi_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 3px;")
         self.current_roi_input.textChanged.connect(self.on_current_roi_changed)
-        roi_grid.addWidget(self.current_roi_input, 0, 1)
+        current_roi_layout.addWidget(self.current_roi_input)
+        
+        # 添加涨5%按钮
+        self.btn_increase_5 = QPushButton("涨5%")
+        self.btn_increase_5.setFixedWidth(60)
+        self.btn_increase_5.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+                border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
+        self.btn_increase_5.clicked.connect(self.increase_roi_5_percent)
+        current_roi_layout.addWidget(self.btn_increase_5)
+        
+        # 添加降5%按钮
+        self.btn_decrease_5 = QPushButton("降5%")
+        self.btn_decrease_5.setFixedWidth(60)
+        self.btn_decrease_5.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+                border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:pressed {
+                background-color: #a93226;
+            }
+        """)
+        self.btn_decrease_5.clicked.connect(self.decrease_roi_5_percent)
+        current_roi_layout.addWidget(self.btn_decrease_5)
+        
+        roi_grid.addWidget(current_roi_container, 0, 1)
         
         roi_grid.addWidget(QLabel("退货率 (%):"), 0, 2)
         self.return_rate_input = QLineEdit()
@@ -2559,3 +2612,43 @@ class ProductSpecDialog(QDialog):
                     QMessageBox.warning(self, "提示", "数据库表结构不支持修改商品标题，请联系管理员")
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"更新失败: {e}")
+    
+    def increase_roi_5_percent(self):
+        """涨5%投产按钮点击事件"""
+        try:
+            current_text = self.current_roi_input.text().strip()
+            if not current_text:
+                # 如果没有输入，默认从1开始
+                new_roi = 1.0
+            else:
+                current_roi = float(current_text)
+                # 计算涨5%后的值，使用更精确的舍入
+                new_roi = round(current_roi * 1.05, 2)
+            
+            # 更新输入框
+            self.current_roi_input.setText(f"{new_roi:.2f}")
+            # 触发计算
+            self.on_current_roi_changed()
+            
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的投产数值")
+    
+    def decrease_roi_5_percent(self):
+        """降5%投产按钮点击事件"""
+        try:
+            current_text = self.current_roi_input.text().strip()
+            if not current_text:
+                # 如果没有输入，默认从1开始
+                new_roi = 1.0
+            else:
+                current_roi = float(current_text)
+                # 计算降5%后的值，确保不低于0.01，使用更精确的舍入
+                new_roi = max(0.01, round(current_roi * 0.95, 2))
+            
+            # 更新输入框
+            self.current_roi_input.setText(f"{new_roi:.2f}")
+            # 触发计算
+            self.on_current_roi_changed()
+            
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的投产数值")

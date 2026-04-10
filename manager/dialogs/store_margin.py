@@ -5,7 +5,8 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
-    QAbstractItemView, QFileDialog, QComboBox, QScrollArea
+    QAbstractItemView, QFileDialog, QComboBox, QScrollArea, QHeaderView,
+    QApplication
 )
 from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator
@@ -32,7 +33,7 @@ class StoreMarginDialog(QDialog):
         self.save_callback = save_callback
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
-        self.resize(1200, 800)
+        self.resize(1300, 800)
 
         self.toast_label = QLabel(self)
         self.toast_label.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
@@ -51,7 +52,7 @@ class StoreMarginDialog(QDialog):
         self.toast_label.setGraphicsEffect(self.toast_opacity_effect)
 
         self.toast_fade_out_animation = QPropertyAnimation(self.toast_opacity_effect, b"opacity")
-        self.toast_fade_out_animation.setDuration(1000)
+        self.toast_fade_out_animation.setDuration(500)
         self.toast_fade_out_animation.setStartValue(0.5)
         self.toast_fade_out_animation.setEndValue(0.0)
         self.toast_fade_out_animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -59,9 +60,10 @@ class StoreMarginDialog(QDialog):
 
         self.init_ui()
         self.load_products()
+        self.refresh_manual_data_display()
 
     def show_toast(self, message):
-        """显示气泡提示（淡入淡出1秒，不透明度50%）"""
+        """显示气泡提示（淡入淡出0.5秒，不透明度50%）"""
         self.toast_fade_out_animation.stop()
         self.toast_opacity_effect.setOpacity(0.5)
         self.toast_label.setText(message)
@@ -71,7 +73,7 @@ class StoreMarginDialog(QDialog):
         y = parent_pos.y() - 80
         self.toast_label.move(x, y)
         self.toast_label.show()
-        QTimer.singleShot(1000, self.fade_out_toast)
+        QTimer.singleShot(500, self.fade_out_toast)
 
     def fade_out_toast(self):
         """淡出气泡提示"""
@@ -228,10 +230,16 @@ class StoreMarginDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        self._debug_smd_label = QLabel("【板块:店铺毛利对话框\n文件:store_margin.py】毛利明细表格/权重设置/操作按钮")
-        self._debug_smd_label.setStyleSheet("background-color: #87CEEB; color: #000; font-weight: bold; padding: 1px;")
+        self._debug_smd_label = QLabel("【板块:店铺毛利对话框主容器】")
+        self._debug_smd_label.setStyleSheet("background-color: #FFB6C1; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
         self._debug_smd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._debug_smd_label)
+
+        # ====== 板块1: 顶部标题区域 ======
+        self._debug_header = QLabel("【板块1:顶部标题区域】标题+综合毛利+总订单+总销售额")
+        self._debug_header.setStyleSheet("background-color: #87CEEB; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
+        self._debug_header.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._debug_header)
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(10, 15, 10, 15)
@@ -251,107 +259,159 @@ class StoreMarginDialog(QDialog):
         self.lbl_total_amount.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
         header_layout.addWidget(self.lbl_total_amount)
         layout.addWidget(header_widget)
-        
-        # 过往数据分析板块
+
+        # ====== 板块2: 过往数据分析板块 ======
+        self._debug_historical = QLabel("【板块2:过往数据分析板块】日期选择+数据展示+录入数据+清空")
+        self._debug_historical.setStyleSheet("background-color: #98FB98; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
+        self._debug_historical.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._debug_historical)
         historical_widget = QWidget()
-        historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 10px;")
+        historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px;")
         historical_layout = QVBoxLayout(historical_widget)
-        historical_layout.setContentsMargins(10, 10, 10, 10)
-        
+        historical_layout.setContentsMargins(0, 0, 0, 0)
+
         # 板块标题
         historical_title = QLabel("📈 过往数据分析（基于导入订单）")
-        historical_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        historical_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
         historical_layout.addWidget(historical_title)
-        
+
         # 日期选择行
+        self._debug_date_row = QLabel("【子板块A:日期选择行】年份+开始日期~结束日期+近七天+录入数据")
+        self._debug_date_row.setStyleSheet("background-color: #DDA0DD; color: #000; padding: 2px; font-size: 11px;")
+        self._debug_date_row.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        historical_layout.addWidget(self._debug_date_row)
         date_row = QWidget()
         date_layout = QHBoxLayout(date_row)
         date_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         date_label = QLabel("数据周期:")
         date_label.setStyleSheet("font-size: 12px; color: #666; padding: 0 5px;")
-        
+
         # 使用日期选择器
         from PyQt5.QtWidgets import QDateEdit
         from PyQt5.QtCore import QDate
-        
+
         self.date_start_input = QDateEdit()
         self.date_start_input.setCalendarPopup(True)
         self.date_start_input.setDate(QDate.currentDate().addDays(-7))  # 默认一周前
         self.date_start_input.setDisplayFormat("yyyy-MM-dd")
         self.date_start_input.setFixedWidth(100)
         self.date_start_input.setStyleSheet("font-size: 11px; padding: 2px;")
-        
-        date_separator = QLabel("~")
-        date_separator.setStyleSheet("font-size: 12px; color: #666; padding: 0 5px;")
-        
+
+        self.date_separator = QLabel("~")
+        self.date_separator.setStyleSheet("font-size: 12px; color: #666; padding: 0 5px;")
+
         self.date_end_input = QDateEdit()
         self.date_end_input.setCalendarPopup(True)
         self.date_end_input.setDate(QDate.currentDate())  # 默认今天
         self.date_end_input.setDisplayFormat("yyyy-MM-dd")
         self.date_end_input.setFixedWidth(100)
         self.date_end_input.setStyleSheet("font-size: 11px; padding: 2px;")
-        
+
         # 快捷按钮
         self.btn_last_week = QPushButton("📅 近七天")
         self.btn_last_week.setFixedWidth(60)
-        self.btn_last_week.setStyleSheet("font-size: 10px; padding: 3px 5px; background-color: #95a5a6; color: white; border-radius: 3px;")
+        self.btn_last_week.setStyleSheet("font-size: 15px; padding: 1px 5px; background-color: #95a5a6; color: white; border-radius: 3px;")
         self.btn_last_week.clicked.connect(self.set_last_week)
-        
-        self.btn_save_data = QPushButton("💾 保存数据")
-        self.btn_save_data.setFixedWidth(80)
-        self.btn_save_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #27ae60; color: white; border-radius: 3px;")
-        self.btn_save_data.clicked.connect(self.save_historical_data)
-        
-        self.btn_view_history = QPushButton("📊 查看历史")
-        self.btn_view_history.setFixedWidth(80)
-        self.btn_view_history.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
-        self.btn_view_history.clicked.connect(self.view_historical_data)
-        
+
+        self.btn_input_data = QPushButton("📝 录入数据")
+        self.btn_input_data.setFixedWidth(80)
+        self.btn_input_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #27ae60; color: white; border-radius: 3px;")
+        self.btn_input_data.clicked.connect(self.open_input_data_dialog)
+
         date_layout.addWidget(date_label)
         date_layout.addWidget(self.date_start_input)
-        date_layout.addWidget(date_separator)
+        date_layout.addWidget(self.date_separator)
         date_layout.addWidget(self.date_end_input)
         date_layout.addWidget(self.btn_last_week)
-        date_layout.addWidget(self.btn_save_data)
-        date_layout.addWidget(self.btn_view_history)
+        date_layout.addWidget(self.btn_input_data)
         date_layout.addStretch()
-        
+
         historical_layout.addWidget(date_row)
+
+        # 子板块C: 手动录入数据表格
+        self._debug_data_table = QLabel("【子板块C:手动录入数据表格】日期+18个指标+操作")
+        self._debug_data_table.setStyleSheet("background-color: #FFA500; color: #000; font-weight: bold; padding: 6px 2px; font-size: 11px;")
+        self._debug_data_table.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        historical_layout.addWidget(self._debug_data_table)
         
-        # 数据展示行
-        data_row = QWidget()
-        data_layout = QHBoxLayout(data_row)
-        data_layout.setContentsMargins(0, 10, 0, 0)
+        self.margin_data_table = QTableWidget()
+        self.margin_data_table.setColumnCount(19)  # 日期 + 18个指标
+        # 设置表头
+        self.margin_data_table.setHorizontalHeaderLabels([
+            "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
+            "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
+            "技术服务费", "扣款", "其他服务", "其他", "净利润",
+            "净利率", "单笔利润"
+        ])
+        self.margin_data_table.verticalHeader().setVisible(False)
+        self.margin_data_table.setShowGrid(True)
+        self.margin_data_table.setGridStyle(Qt.SolidLine)
+        # Excel风格标准表格
+        self.margin_data_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #cccccc;
+                font-size: 14px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                margin: 0px;
+            }
+            QTableWidget::item {
+                padding: 0px;
+                text-align: center;
+                border: 1px solid #cccccc;
+                font-size: 14px;
+            }
+            QHeaderView {
+                border: none;
+                margin: 0px;
+            }
+            QHeaderView::section {
+                background-color: #e0e0e0;
+                padding: 0px;
+                margin: 0px;
+                border: none;
+                border-left: 1px solid #cccccc;
+                border-bottom: 1px solid #cccccc;
+                border-right: 1px solid #cccccc;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 45px;
+            }
+            QHeaderView::section:first {
+                border-left: 1px solid #cccccc;
+                border-top-left-radius: 4px;
+            }
+            QHeaderView::section:last {
+                border-right: 1px solid #cccccc;
+                border-top-right-radius: 4px;
+            }
+        """)
+        # 设置表格字体大小
+        from PyQt5.QtGui import QFont
+        table_font = QFont()
+        table_font.setPointSize(14)
+        self.margin_data_table.setFont(table_font)
         
-        # 过往客单价
-        self.lbl_historical_avg_price = QLabel("过往客单价: --")
-        self.lbl_historical_avg_price.setStyleSheet("font-size: 12px; color: #27ae60; font-weight: bold; padding: 5px;")
+        # 设置列宽自适应且拉伸填充整个表格宽度
+        header = self.margin_data_table.horizontalHeader()
+        for col in range(self.margin_data_table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.Stretch)
+        self.margin_data_table.setMinimumHeight(150)
+        self.margin_data_table.setMaximumHeight(600)
+        # 启用右键菜单
+        self.margin_data_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.margin_data_table.customContextMenuRequested.connect(self.show_margin_data_context_menu)
         
-        # 过往销售总额
-        self.lbl_historical_total_amount = QLabel("过往销售总额: --")
-        self.lbl_historical_total_amount.setStyleSheet("font-size: 12px; color: #e74c3c; font-weight: bold; padding: 5px;")
-        
-        # 过往总订单数
-        self.lbl_historical_total_orders = QLabel("过往总订单: --")
-        self.lbl_historical_total_orders.setStyleSheet("font-size: 12px; color: #3498db; font-weight: bold; padding: 5px;")
-        
-        # 日销售金额
-        self.lbl_daily_amount = QLabel("日销售金额: --")
-        self.lbl_daily_amount.setStyleSheet("font-size: 12px; color: #9b59b6; font-weight: bold; padding: 5px;")
-        
-        # 日单量
-        self.lbl_daily_orders = QLabel("日单量: --")
-        self.lbl_daily_orders.setStyleSheet("font-size: 12px; color: #f39c12; font-weight: bold; padding: 5px;")
-        
-        data_layout.addWidget(self.lbl_historical_avg_price)
-        data_layout.addWidget(self.lbl_historical_total_amount)
-        data_layout.addWidget(self.lbl_historical_total_orders)
-        data_layout.addWidget(self.lbl_daily_amount)
-        data_layout.addWidget(self.lbl_daily_orders)
-        
-        historical_layout.addWidget(data_row)
+        historical_layout.addWidget(self.margin_data_table)
+
         layout.addWidget(historical_widget)
+
+        # ====== 板块3: 毛利明细表格 ======
+        self._debug_table = QLabel("【板块3:毛利明细表格】图片+商品ID+商品标题+综合成本+客单价+毛利+权重+单量+销售额+主卖规格+操作")
+        self._debug_table.setStyleSheet("background-color: #FFD700; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
+        self._debug_table.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._debug_table)
         
         self.table = QTableWidget()
         self.table.setColumnCount(11)
@@ -403,6 +463,12 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_close)
         layout.addWidget(btn_widget)
+
+        # ====== 板块4: 底部按钮区域 ======
+        self._debug_buttons = QLabel("【板块4:底部按钮区域】自动均分权重+计算利润+导入订单+同步订单权重+保存+关闭")
+        self._debug_buttons.setStyleSheet("background-color: #ADD8E6; color: #000; font-weight: bold; padding: 2px; font-size: 12px;")
+        self._debug_buttons.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._debug_buttons)
 
     def load_products(self):
         self.table.cellChanged.disconnect()
@@ -542,7 +608,6 @@ class StoreMarginDialog(QDialog):
         self.calculate_total_margin()
         self.update_total_orders_label()
         self.update_product_avg_price()
-        self.calculate_historical_data()
 
     def update_product_avg_price(self):
         """更新所有商品的客单价和销售额列"""
@@ -576,55 +641,186 @@ class StoreMarginDialog(QDialog):
                 self.table.item(row, 4).setText("-")
                 self.table.item(row, 8).setText("-")
 
-    def calculate_historical_data(self):
-        """计算过往数据分析"""
+    def refresh_manual_data_display(self):
+        """刷新手动录入数据展示"""
         try:
-            # 获取店铺的所有导入订单数据
-            orders = self.db.safe_fetchall(
-                "SELECT actual_amount, order_count FROM imported_orders WHERE store_id=?",
-                (self.store_id,)
-            )
+            records = self.load_manual_data()
+            self.margin_data_table.setRowCount(len(records))
             
-            if not orders:
-                self.lbl_historical_avg_price.setText("过往客单价: --")
-                self.lbl_historical_total_amount.setText("过往销售总额: --")
-                self.lbl_historical_total_orders.setText("过往总订单: --")
-                self.lbl_daily_amount.setText("日销售金额: --")
-                self.lbl_daily_orders.setText("日单量: --")
-                return
+            # 存储所有记录用于计算对比
+            all_records = []
             
-            # 计算总数据
-            total_amount = 0.0
-            total_orders = 0
+            for i, record in enumerate(records):
+                all_records.append(record)
+                
+                # 显示日期范围：开始日期 和 结束日期 分两行显示
+                start_date = record[0] if record[0] else ""
+                end_date = record[1] if record[1] else ""
+                # 安全地截取月日部分
+                start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
+                end_display = end_date[5:10] if end_date and len(end_date) >= 10 else end_date
+                date_str = f"{start_display}\n{end_display}"
+
+                # 手动输入的9个指标（新顺序，包含毛利率）
+                values = [
+                    date_str,  # 0: 日期
+                    str(int(record[2])),  # 1: 实发订单
+                    f"¥{record[3]:.2f}",  # 2: 实发金额
+                    f"¥{record[4]:.2f}",  # 3: 毛利润
+                    f"{record[11]:.2f}%",  # 4: 毛利率
+                    f"¥{record[5]:.2f}",  # 5: 退款金额
+                    f"{record[12]:.2f}%",  # 6: 金额退款率
+                    str(int(record[6])),  # 7: 退款订单
+                    f"{record[13]:.2f}%",  # 8: 订单退款率
+                    f"¥{record[14]:.2f}",  # 9: 件单价
+                    f"¥{record[7]:.2f}",  # 10: 推广费
+                    f"{record[15]:.2f}%",  # 11: 推广占比
+                    f"¥{record[16]:.2f}",  # 12: 技术服务费
+                    f"¥{record[8]:.2f}",  # 13: 扣款
+                    f"¥{record[9]:.2f}",  # 14: 其他服务
+                    f"¥{record[10]:.2f}",  # 15: 其他
+                    f"¥{record[17]:.2f}",  # 16: 净利润
+                    f"{record[18]:.2f}%",  # 17: 净利率
+                    f"¥{record[19]:.2f}",  # 18: 单笔利润
+                ]
+
+                for j, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+                    # 日期列允许换行
+                    if j == 0:
+                        item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+
+                    # 设置颜色区分手动/自动指标
+                    # 手动输入指标（1-3, 5, 7, 10, 13-15）：浅绿色
+                    # 自动计算指标（4, 6, 8, 9, 11, 12, 16-18）：浅蓝色
+                    if j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
+                        item.setBackground(QColor("#e8f5e9"))  # 浅绿色
+                    elif j in [4, 6, 8, 9, 11, 12, 16, 17, 18]:
+                        item.setBackground(QColor("#e3f2fd"))  # 浅蓝色
+
+                    self.margin_data_table.setItem(i, j, item)
             
-            for actual_amount, order_count in orders:
-                if actual_amount:
-                    total_amount += actual_amount
-                if order_count:
-                    total_orders += order_count
-            
-            # 计算客单价
-            if total_orders > 0:
-                avg_price = total_amount / total_orders
-                self.lbl_historical_avg_price.setText(f"过往客单价: ¥{avg_price:.2f}")
-            else:
-                self.lbl_historical_avg_price.setText("过往客单价: --")
-            
-            # 显示销售总额和总订单
-            self.lbl_historical_total_amount.setText(f"过往销售总额: ¥{total_amount:.2f}")
-            self.lbl_historical_total_orders.setText(f"过往总订单: {total_orders}单")
-            
-            # 日销售金额和日单量（需要用户输入日期范围后计算）
-            self.lbl_daily_amount.setText("日销售金额: 请设置日期范围")
-            self.lbl_daily_orders.setText("日单量: 请设置日期范围")
-            
+            # 设置所有行的行高以支持日期换行
+            if records:
+                for row_idx in range(len(records)):
+                    self.margin_data_table.setRowHeight(row_idx, 60)
+
         except Exception as e:
-            print(f"计算过往数据失败: {e}")
-            self.lbl_historical_avg_price.setText("过往客单价: 错误")
-            self.lbl_historical_total_amount.setText("过往销售总额: 错误")
-            self.lbl_historical_total_orders.setText("过往总订单: 错误")
-            self.lbl_daily_amount.setText("日销售金额: 错误")
-            self.lbl_daily_orders.setText("日单量: 错误")
+            print(f"刷新手动数据展示失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def load_manual_data(self):
+        """从数据库加载手动录入数据"""
+        try:
+            records = self.db.safe_fetchall("""
+                SELECT start_date, end_date, actual_orders, actual_amount, gross_profit,
+                       refund_amount, refund_orders, promotion_fee, deduction, other_service, other,
+                       gross_margin_rate, refund_rate_by_amount, refund_rate_by_orders,
+                       unit_price, promotion_ratio, tech_fee, net_profit, net_margin_rate, profit_per_order
+                FROM manual_margin_data WHERE store_id=? ORDER BY start_date ASC, end_date ASC
+            """, (self.store_id,))
+            return records
+        except Exception as e:
+            print(f"加载手动数据失败: {e}")
+            return []
+
+    def delete_manual_data(self, start_date):
+        """删除手动录入数据"""
+        reply = QMessageBox.question(self, "确认删除", "确定删除这条数据吗？")
+        if reply == QMessageBox.Yes:
+            try:
+                self.db.safe_execute(
+                    "DELETE FROM manual_margin_data WHERE store_id=? AND start_date=?",
+                    (self.store_id, start_date)
+                )
+                # 先清空表格，等待UI更新后再刷新数据
+                self.margin_data_table.setRowCount(0)
+                QApplication.processEvents()
+                self.refresh_manual_data_display()
+                self.show_toast("✅ 已删除数据")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"删除失败: {e}")
+
+    def open_input_data_dialog(self):
+        """打开录入数据对话框"""
+        from .input_data_dialog import InputDataDialog
+        dialog = InputDataDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            data = dialog.get_data()
+            # 添加日期信息
+            start_date = self.date_start_input.date().toString("yyyy-MM-dd")
+            end_date = self.date_end_input.date().toString("yyyy-MM-dd")
+            data["start_date"] = start_date
+            data["end_date"] = end_date
+            self.save_manual_data(data)
+            self.refresh_manual_data_display()
+
+    def save_manual_data(self, data):
+        """保存手动录入数据"""
+        try:
+            from datetime import datetime
+            start_date = data.get("start_date", "")
+            end_date = data.get("end_date", "")
+
+            # 检查是否有相同日期的记录
+            existing = self.db.safe_fetchall("""
+                SELECT id FROM manual_margin_data
+                WHERE store_id=? AND start_date=? AND end_date=?
+            """, (self.store_id, start_date, end_date))
+
+            if existing:
+                reply = QMessageBox.question(
+                    self, "确认覆盖",
+                    f"该日期范围 ({start_date} ~ {end_date}) 已存在数据，是否覆盖？"
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+            created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # 使用REPLACE自动覆盖已存在的记录
+            self.db.safe_execute("""
+                INSERT OR REPLACE INTO manual_margin_data (
+                    store_id, start_date, end_date,
+                    actual_orders, actual_amount, gross_profit,
+                    refund_amount, refund_orders, promotion_fee,
+                    deduction, other_service, other,
+                    gross_margin_rate, refund_rate_by_amount, refund_rate_by_orders,
+                    unit_price, promotion_ratio, tech_fee,
+                    net_profit, net_margin_rate, profit_per_order,
+                    created_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                self.store_id,
+                data.get("start_date", ""),
+                data.get("end_date", ""),
+                data.get("actual_orders", 0),
+                data.get("actual_amount", 0),
+                data.get("gross_profit", 0),
+                data.get("refund_amount", 0),
+                data.get("refund_orders", 0),
+                data.get("promotion_fee", 0),
+                data.get("deduction", 0),
+                data.get("other_service", 0),
+                data.get("other", 0),
+                data.get("gross_margin_rate", 0),
+                data.get("refund_rate_by_amount", 0),
+                data.get("refund_rate_by_orders", 0),
+                data.get("unit_price", 0),
+                data.get("promotion_ratio", 0),
+                data.get("tech_fee", 0),
+                data.get("net_profit", 0),
+                data.get("net_margin_rate", 0),
+                data.get("profit_per_order", 0),
+                created_time
+            ))
+            self.show_toast("✅ 数据已保存")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"保存失败: {e}")
 
     def save_historical_data(self):
         """保存当前导入订单数据到历史记录"""
@@ -1021,6 +1217,124 @@ class StoreMarginDialog(QDialog):
                 action_lock.triggered.connect(lambda: self.toggle_lock(row, prod_id))
                 menu.addAction(action_lock)
         menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def show_margin_data_context_menu(self, pos):
+        """显示财务数据表格的右键菜单"""
+        item = self.margin_data_table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        
+        # 获取该行的日期数据
+        date_item = self.margin_data_table.item(row, 0)
+        if not date_item:
+            return
+            
+        date_text = date_item.text()
+        if "~" in date_text:
+            parts = date_text.split("~")
+            if len(parts) >= 2 and parts[0].strip():
+                start_date_short = parts[0].strip()
+                # 补全年份，格式：04-01
+                current_year = datetime.now().year
+                start_date_full = f"{current_year}-{start_date_short}"
+            else:
+                # start_date为空，尝试用end_date
+                QMessageBox.warning(self, "错误", "该数据的开始日期为空，无法删除")
+                return
+        else:
+            return
+            
+        menu = QMenu(self)
+        action_delete = QAction("🗑️ 删除此行数据", self)
+        action_delete.triggered.connect(lambda: self.delete_manual_data(start_date_full))
+        menu.addAction(action_delete)
+        
+        menu.exec_(self.margin_data_table.viewport().mapToGlobal(pos))
+
+    def show_week_comparison(self):
+        """显示周环比对比结果"""
+        current_index = self.combo_current.currentIndex()
+        previous_index = self.combo_previous.currentIndex()
+        
+        if current_index < 0 or previous_index < 0:
+            self.comparison_result.setText("请选择当前周和对比周")
+            return
+            
+        current_data = self.combo_current.itemData(current_index)
+        previous_data = self.combo_previous.itemData(previous_index)
+        
+        if not current_data or not previous_data:
+            self.comparison_result.setText("数据加载失败，请重试")
+            return
+            
+        # 解析数据
+        current_values = current_data
+        previous_values = previous_data
+        
+        # 计算关键指标变化
+        result_text = "📈 周环比对比结果:\n\n"
+        
+        # 实发订单变化
+        current_orders = current_values[2]  # actual_orders
+        previous_orders = previous_values[2]
+        order_change = current_orders - previous_orders
+        order_change_pct = (order_change / previous_orders * 100) if previous_orders > 0 else 0
+        order_icon = "📈" if order_change > 0 else "📉" if order_change < 0 else "➡️"
+        result_text += f"{order_icon} 实发订单: {current_orders}单 (上周: {previous_orders}单) "
+        if order_change != 0:
+            result_text += f"变化: {order_change:+d}单 ({order_change_pct:+.1f}%)\n"
+        else:
+            result_text += "持平\n"
+        
+        # 实发金额变化
+        current_amount = current_values[3]  # actual_amount
+        previous_amount = previous_values[3]
+        amount_change = current_amount - previous_amount
+        amount_change_pct = (amount_change / previous_amount * 100) if previous_amount > 0 else 0
+        amount_icon = "📈" if amount_change > 0 else "📉" if amount_change < 0 else "➡️"
+        result_text += f"{amount_icon} 实发金额: ¥{current_amount:.2f} (上周: ¥{previous_amount:.2f}) "
+        if amount_change != 0:
+            result_text += f"变化: ¥{amount_change:+.2f} ({amount_change_pct:+.1f}%)\n"
+        else:
+            result_text += "持平\n"
+        
+        # 净利润变化
+        current_profit = current_values[17]  # net_profit
+        previous_profit = previous_values[17]
+        profit_change = current_profit - previous_profit
+        profit_change_pct = (profit_change / previous_profit * 100) if previous_profit > 0 else 0
+        profit_icon = "📈" if profit_change > 0 else "📉" if profit_change < 0 else "➡️"
+        result_text += f"{profit_icon} 净利润: ¥{current_profit:.2f} (上周: ¥{previous_profit:.2f}) "
+        if profit_change != 0:
+            result_text += f"变化: ¥{profit_change:+.2f} ({profit_change_pct:+.1f}%)\n"
+        else:
+            result_text += "持平\n"
+        
+        # 净利率变化
+        current_margin = current_values[18]  # net_margin_rate
+        previous_margin = previous_values[18]
+        margin_change = current_margin - previous_margin
+        margin_icon = "📈" if margin_change > 0 else "📉" if margin_change < 0 else "➡️"
+        result_text += f"{margin_icon} 净利率: {current_margin:.2f}% (上周: {previous_margin:.2f}%) "
+        if margin_change != 0:
+            result_text += f"变化: {margin_change:+.2f}%\n"
+        else:
+            result_text += "持平\n"
+        
+        # 单笔利润变化
+        current_ppo = current_values[19]  # profit_per_order
+        previous_ppo = previous_values[19]
+        ppo_change = current_ppo - previous_ppo
+        ppo_change_pct = (ppo_change / previous_ppo * 100) if previous_ppo > 0 else 0
+        ppo_icon = "📈" if ppo_change > 0 else "📉" if ppo_change < 0 else "➡️"
+        result_text += f"{ppo_icon} 单笔利润: ¥{current_ppo:.2f} (上周: ¥{previous_ppo:.2f}) "
+        if ppo_change != 0:
+            result_text += f"变化: ¥{ppo_change:+.2f} ({ppo_change_pct:+.1f}%)\n"
+        else:
+            result_text += "持平\n"
+        
+        self.comparison_result.setText(result_text)
 
     def open_spec_dialog_by_id(self, user_id):
         for sys_id, uid in self.sys_id_to_user_id.items():

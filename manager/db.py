@@ -367,6 +367,34 @@ class SafeDatabaseManager:
             )''')
             print("✅ 历史数据表已创建")
 
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS manual_margin_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                actual_orders INTEGER DEFAULT 0,
+                actual_amount REAL DEFAULT 0,
+                gross_profit REAL DEFAULT 0,
+                refund_amount REAL DEFAULT 0,
+                refund_orders INTEGER DEFAULT 0,
+                promotion_fee REAL DEFAULT 0,
+                deduction REAL DEFAULT 0,
+                other_service REAL DEFAULT 0,
+                other REAL DEFAULT 0,
+                gross_margin_rate REAL DEFAULT 0,
+                refund_rate_by_amount REAL DEFAULT 0,
+                refund_rate_by_orders REAL DEFAULT 0,
+                unit_price REAL DEFAULT 0,
+                promotion_ratio REAL DEFAULT 0,
+                tech_fee REAL DEFAULT 0,
+                net_profit REAL DEFAULT 0,
+                net_margin_rate REAL DEFAULT 0,
+                profit_per_order REAL DEFAULT 0,
+                created_time TEXT NOT NULL,
+                UNIQUE(store_id, start_date, end_date)
+            )''')
+            print("✅ 手动毛利数据表已创建")
+
         except Exception as e:
             print(f"数据库表创建失败：{e}")
 
