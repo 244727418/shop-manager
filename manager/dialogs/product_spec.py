@@ -36,7 +36,7 @@ class ProductSpecDialog(QDialog):
         self.main_app = parent
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
-        self.resize(980, 900)
+        self.resize(1380, 900)
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -397,36 +397,22 @@ class ProductSpecDialog(QDialog):
         
         # 2. 规格表格
         self.table = QTableWidget()
-        # 【关键修改】改为 10 列：AI按钮 + 规格名称 + 关联编码 + 自动成本 + 手动售价 + 券后价 + 单规格毛利 + 权重% + 单量 + 操作
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "单量", "操作"
+            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比", "单量", "单量对比", "操作"
         ])
         
-        # 设置列宽策略 - 规格名称、权重和操作固定，AI按钮和自动拉伸
+        # 设置列宽策略 - AI列固定较小宽度，其他列自适应拉伸
         header = self.table.horizontalHeader()
-        
-        for i in range(10):
-            if i == 1 or i == 7 or i == 8 or i == 9:  # 规格名称(1)、权重(7)、单量(8)和操作(9)保持固定宽度
-                header.setSectionResizeMode(i, QHeaderView.Fixed)
-                if i == 1:
-                    saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(300))
-                elif i == 7:
-                    saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(60))  # 权重
-                elif i == 8:
-                    saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(50))  # 单量
-                else:
-                    saved_width = self.db.get_setting(f"spec_table_col_{i}_width", str(50))
-                try:
-                    self.table.setColumnWidth(i, int(saved_width))
-                except:
-                    self.table.setColumnWidth(i, 300 if i == 1 else (60 if i == 7 else (50 if i == 8 else 50)))
-            else:  # AI按钮(0)和其他列自动拉伸
-                header.setSectionResizeMode(i, QHeaderView.Stretch)
-        
-        # 列宽改变时保存
-        header.sectionResized.connect(self._on_spec_table_col_resized)
-        
+
+        # AI按钮列(索引0)固定宽度
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 50)
+
+        # 其他列自适应拉伸
+        for i in range(1, 12):
+            header.setSectionResizeMode(i, QHeaderView.Stretch)
+
         self.table.setAlternatingRowColors(True)
         
         # 设置默认行高，确保输入框显示完整
@@ -490,6 +476,21 @@ class ProductSpecDialog(QDialog):
         """)
         self.btn_sync_weight.clicked.connect(self.sync_order_weight)
 
+        self.btn_history = QPushButton("📜 全部记录")
+        self.btn_history.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        self.btn_history.clicked.connect(self.show_import_history)
+
         btn_save = QPushButton("💾 保存数据")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px 20px;")
         btn_save.clicked.connect(self.save_data)
@@ -501,6 +502,7 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_avg)
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_sync_weight)
+        btn_layout.addWidget(self.btn_history)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
@@ -701,23 +703,43 @@ class ProductSpecDialog(QDialog):
                     weight_item.setToolTip(f"订单数: {order_count}单")
                 self.table.setItem(row_idx, 7, weight_item)
                 
-                # 第 8 列添加单量
+                # 第 8 列添加权重对比
+                weight_compare_widget = QWidget()
+                weight_compare_layout = QHBoxLayout(weight_compare_widget)
+                weight_compare_layout.setContentsMargins(0, 0, 0, 0)
+                weight_compare_layout.setAlignment(Qt.AlignCenter)
+                weight_compare_label = QLabel("-")
+                weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_compare_layout.addWidget(weight_compare_label)
+                self.table.setCellWidget(row_idx, 8, weight_compare_widget)
+
+                # 第 9 列添加单量
                 order_count_item = QTableWidgetItem(f"{order_count}单")
                 order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row_idx, 8, order_count_item)
-                
-                # 第 9 列添加删除按钮
+                self.table.setItem(row_idx, 9, order_count_item)
+
+                # 第 10 列添加单量对比
+                order_compare_widget = QWidget()
+                order_compare_layout = QHBoxLayout(order_compare_widget)
+                order_compare_layout.setContentsMargins(0, 0, 0, 0)
+                order_compare_layout.setAlignment(Qt.AlignCenter)
+                order_compare_label = QLabel("-")
+                order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                order_compare_layout.addWidget(order_compare_label)
+                self.table.setCellWidget(row_idx, 10, order_compare_widget)
+
+                # 第 11 列添加删除按钮
                 btn_delete = QPushButton("🗑️")
                 btn_delete.setToolTip("删除此规格")
                 btn_delete.setStyleSheet("""
-                    QPushButton { 
+                    QPushButton {
                         background-color: #ff4d4f; color: white; border-radius: 4px; font-weight: bold; font-size: 12px;
                     }
                     QPushButton:hover { background-color: #ff7875; }
                     QPushButton:pressed { background-color: #d9363e; }
                 """)
                 btn_delete.clicked.connect(lambda checked, r=row_idx: self.delete_spec_row(r))
-                self.table.setCellWidget(row_idx, 9, btn_delete)
+                self.table.setCellWidget(row_idx, 11, btn_delete)
                 
                 # 🔑【关键修复】强制更新表格
                 self.table.update()
@@ -726,6 +748,7 @@ class ProductSpecDialog(QDialog):
             self.calculate_total_margin()
             self.update_remaining_weight_label()
             self.update_total_orders_label()
+            self.update_compare_columns()
 
             # 🔑【关键修复】恢复之前选中的行
             if self._saved_current_row > 0 and self._saved_current_row < self.table.rowCount():
@@ -1159,6 +1182,45 @@ class ProductSpecDialog(QDialog):
         
         # 第7列：权重
         self.table.setItem(idx, 7, QTableWidgetItem("0"))
+
+        # 第8列：权重对比
+        weight_compare_widget = QWidget()
+        weight_compare_layout = QHBoxLayout(weight_compare_widget)
+        weight_compare_layout.setContentsMargins(0, 0, 0, 0)
+        weight_compare_layout.setAlignment(Qt.AlignCenter)
+        weight_compare_label = QLabel("-")
+        weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        weight_compare_layout.addWidget(weight_compare_label)
+        self.table.setCellWidget(idx, 8, weight_compare_widget)
+
+        # 第9列：单量
+        order_count_item = QTableWidgetItem("0单")
+        order_count_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(idx, 9, order_count_item)
+
+        # 第10列：单量对比
+        order_compare_widget = QWidget()
+        order_compare_layout = QHBoxLayout(order_compare_widget)
+        order_compare_layout.setContentsMargins(0, 0, 0, 0)
+        order_compare_layout.setAlignment(Qt.AlignCenter)
+        order_compare_label = QLabel("-")
+        order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        order_compare_layout.addWidget(order_compare_label)
+        self.table.setCellWidget(idx, 10, order_compare_widget)
+
+        # 第11列：删除按钮
+        btn_delete = QPushButton("🗑️")
+        btn_delete.setToolTip("删除此规格")
+        btn_delete.setStyleSheet("""
+            QPushButton {
+                background-color: #ff4d4f; color: white; border-radius: 4px; font-weight: bold; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #ff7875; }
+            QPushButton:pressed { background-color: #d9363e; }
+        """)
+        btn_delete.clicked.connect(lambda checked, r=idx: self.delete_spec_row(r))
+        self.table.setCellWidget(idx, 11, btn_delete)
+
         self.table.scrollToBottom()
 
     def on_cell_change(self, row, col):
@@ -2008,11 +2070,27 @@ class ProductSpecDialog(QDialog):
         if not imported_data:
             QMessageBox.information(self, "提示", "没有找到该商品的已导入订单数据\n请先在店铺毛利管理中导入订单")
             return
+
         spec_order_counts = {str(row[0]): row[1] for row in imported_data}
         total_orders = sum(spec_order_counts.values())
         print(f"[DEBUG product_spec] spec_order_counts: {spec_order_counts}, total_orders: {total_orders}")
         if total_orders == 0:
             return
+
+        last_snapshot = self._get_last_snapshot()
+        last_spec_counts = {}
+        if last_snapshot:
+            for key, data in last_snapshot.items():
+                parts = key.split("_")
+                if len(parts) >= 2:
+                    prod_id_part = parts[0]
+                    spec_code_part = "_".join(parts[1:])
+                    try:
+                        if int(prod_id_part) == self.product_id:
+                            last_spec_counts[spec_code_part] = data.get("count", 0)
+                    except:
+                        pass
+
         for row in range(self.table.rowCount()):
             spec_code_item = self.table.item(row, 2)
             if not spec_code_item:
@@ -2039,7 +2117,10 @@ class ProductSpecDialog(QDialog):
                 self.table.setItem(row, 7, weight_item)
                 order_count_item = QTableWidgetItem(f"{count}单")
                 order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 8, order_count_item)
+                self.table.setItem(row, 9, order_count_item)
+
+                last_count = last_spec_counts.get(spec_code, None)
+                self._update_spec_compare_labels(row, count, last_count, total_orders)
             else:
                 self.db.safe_execute(
                     "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
@@ -2055,9 +2136,98 @@ class ProductSpecDialog(QDialog):
                     weight_item.setToolTip("")
                 order_count_item = QTableWidgetItem("0单")
                 order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 8, order_count_item)
+                self.table.setItem(row, 9, order_count_item)
+
+                self._update_spec_compare_labels(row, 0, None, total_orders)
         self.update_total_orders_label()
         self.main_app.show_toast("✅ 订单权重已同步")
+
+    def _get_last_snapshot(self):
+        """获取上一次导入的历史快照数据"""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            if not store_rows or not store_rows[0][0]:
+                return None
+            store_id = store_rows[0][0]
+
+            last_history = self.db.safe_fetchall("""
+                SELECT snapshot_data
+                FROM import_history
+                WHERE store_id=?
+                ORDER BY import_time DESC
+                LIMIT 2
+            """, (store_id,))
+
+            if len(last_history) < 2:
+                return None
+
+            last_snapshot = json.loads(last_history[1][0])
+            return last_snapshot.get("orders", {})
+        except:
+            return None
+
+    def _update_spec_compare_labels(self, row, current_count, last_count, current_total):
+        """更新指定行的对比列标签"""
+        weight_compare_widget = self.table.cellWidget(row, 8)
+        order_compare_widget = self.table.cellWidget(row, 10)
+
+        if not weight_compare_widget or not order_compare_widget:
+            return
+
+        weight_compare_label = weight_compare_widget.layout().itemAt(0).widget()
+        order_compare_label = order_compare_widget.layout().itemAt(0).widget()
+
+        if last_count is None:
+            weight_compare_label.setText("无")
+            weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            order_compare_label.setText("无")
+            order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            return
+
+        current_weight = (current_count / current_total * 100) if current_total > 0 else 0
+        last_total = sum(self._get_last_snapshot_values().values()) if self._get_last_snapshot_values() else 0
+        last_weight = (last_count / last_total * 100) if last_total > 0 else 0
+
+        weight_change = current_weight - last_weight
+        order_change = current_count - last_count
+
+        if weight_change > 0:
+            weight_compare_label.setText(f"🟢 ↑{weight_change:.2f}%")
+            weight_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+        elif weight_change < 0:
+            weight_compare_label.setText(f"🔴 ↓{abs(weight_change):.2f}%")
+            weight_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+        else:
+            weight_compare_label.setText("⚪ 0.00%")
+            weight_compare_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+
+        if order_change > 0:
+            order_compare_label.setText(f"🟢 ↑{order_change}")
+            order_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+        elif order_change < 0:
+            order_compare_label.setText(f"🔴 ↓{abs(order_change)}")
+            order_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+        else:
+            order_compare_label.setText("⚪ 0")
+            order_compare_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+
+    def _get_last_snapshot_values(self):
+        """获取上一次快照中当前商品的所有规格订单数"""
+        snapshot = self._get_last_snapshot()
+        if not snapshot:
+            return {}
+        result = {}
+        for key, data in snapshot.items():
+            parts = key.split("_")
+            if len(parts) >= 2:
+                prod_id_part = parts[0]
+                spec_code_part = "_".join(parts[1:])
+                try:
+                    if int(prod_id_part) == self.product_id:
+                        result[spec_code_part] = data.get("count", 0)
+                except:
+                    pass
+        return result
 
     def update_total_orders_label(self):
         """更新总订单标签"""
@@ -2084,6 +2254,54 @@ class ProductSpecDialog(QDialog):
             self.lbl_sales_info.setText(f"销售额: ¥{total_amount:.2f} | 客单价: ¥{avg_price:.2f}")
         else:
             self.lbl_sales_info.setText("销售额: - | 客单价: -")
+
+    def update_compare_columns(self):
+        """更新所有规格的对比列数据"""
+        imported_data = self.db.safe_fetchall(
+            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            (self.product_id,)
+        )
+
+        last_snapshot = self._get_last_snapshot()
+        last_spec_counts = {}
+        if last_snapshot:
+            for key, data in last_snapshot.items():
+                parts = key.split("_")
+                if len(parts) >= 2:
+                    prod_id_part = parts[0]
+                    spec_code_part = "_".join(parts[1:])
+                    try:
+                        if int(prod_id_part) == self.product_id:
+                            last_spec_counts[spec_code_part] = data.get("count", 0)
+                    except:
+                        pass
+
+        current_spec_counts = {str(row[0]): row[1] for row in imported_data} if imported_data else {}
+        current_total = sum(current_spec_counts.values())
+
+        if not last_snapshot or not last_spec_counts:
+            for row in range(self.table.rowCount()):
+                weight_compare_widget = self.table.cellWidget(row, 8)
+                order_compare_widget = self.table.cellWidget(row, 10)
+                if weight_compare_widget:
+                    label = weight_compare_widget.layout().itemAt(0).widget()
+                    label.setText("无")
+                    label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                if order_compare_widget:
+                    label = order_compare_widget.layout().itemAt(0).widget()
+                    label.setText("无")
+                    label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            return
+
+        for row in range(self.table.rowCount()):
+            spec_code_item = self.table.item(row, 2)
+            if not spec_code_item:
+                continue
+            spec_code = str(spec_code_item.text()).strip()
+            current_count = current_spec_counts.get(spec_code, 0)
+            last_count = last_spec_counts.get(spec_code, None)
+
+            self._update_spec_compare_labels(row, current_count, last_count, current_total)
 
     def calculate_weighted_avg_price(self):
         """根据权重计算加权平均客单价"""
@@ -2632,23 +2850,149 @@ class ProductSpecDialog(QDialog):
             
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的投产数值")
-    
+
+    def show_import_history(self):
+        """显示当前商品的历史导入记录"""
+        dialog = SpecImportHistoryDialog(self.product_id, self.product_name, self.db, self)
+        dialog.exec_()
+
     def decrease_roi_5_percent(self):
         """降5%投产按钮点击事件"""
         try:
             current_text = self.current_roi_input.text().strip()
             if not current_text:
-                # 如果没有输入，默认从1开始
                 new_roi = 1.0
             else:
                 current_roi = float(current_text)
-                # 计算降5%后的值，确保不低于0.01，使用更精确的舍入
                 new_roi = max(0.01, round(current_roi * 0.95, 2))
-            
-            # 更新输入框
+
             self.current_roi_input.setText(f"{new_roi:.2f}")
-            # 触发计算
             self.on_current_roi_changed()
-            
+
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的投产数值")
+
+
+class SpecImportHistoryDialog(QDialog):
+    """商品规格历史导入记录对话框"""
+    def __init__(self, product_id, product_name, db, parent=None):
+        super().__init__(parent)
+        self.product_id = product_id
+        self.product_name = product_name
+        self.db = db
+        self.setWindowTitle(f"📜 {product_name} - 历史导入记录")
+        self.resize(900, 600)
+        self.setStyleSheet("background-color: #f5f5f5;")
+        self.init_ui()
+        self.load_history()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        title_label = QLabel(f"📊 {self.product_name} - 规格订单历史记录")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        layout.addWidget(title_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels([
+            "导入时间", "规格编码", "单量", "权重%"
+        ])
+        header = self.table.horizontalHeader()
+        for i in range(4):
+            header.setSectionResizeMode(i, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        layout.addWidget(self.table)
+
+        btn_layout = QHBoxLayout()
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+        """)
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+    def load_history(self):
+        """加载历史记录，按时间分组显示"""
+        records = self.db.safe_fetchall("""
+            SELECT id, import_time, snapshot_data
+            FROM import_history
+            WHERE store_id = (SELECT store_id FROM products WHERE id = ?)
+            ORDER BY import_time DESC
+        """, (self.product_id,))
+
+        grouped_data = {}
+
+        for hist_id, import_time, snapshot_data in records:
+            if not snapshot_data:
+                continue
+            try:
+                snapshot = json.loads(snapshot_data)
+                orders = snapshot.get("orders", {})
+                for key, data in orders.items():
+                    parts = key.split("_")
+                    if len(parts) >= 2:
+                        prod_id_part = parts[0]
+                        spec_code_part = "_".join(parts[1:])
+                        try:
+                            if int(prod_id_part) == self.product_id:
+                                if import_time not in grouped_data:
+                                    grouped_data[import_time] = []
+                                count = data.get("count", 0)
+                                grouped_data[import_time].append({
+                                    "spec_code": spec_code_part,
+                                    "count": count
+                                })
+                        except:
+                            pass
+            except:
+                continue
+
+        time_list = sorted(grouped_data.keys(), reverse=True)
+        row_index = 0
+        self.table.setRowCount(sum(len(grouped_data[t]) for t in time_list))
+
+        for import_time in time_list:
+            specs = grouped_data[import_time]
+            spec_count = len(specs)
+            total_count = sum(s["count"] for s in specs)
+
+            time_item = QTableWidgetItem(import_time)
+            time_item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row_index, 0, time_item)
+            if spec_count > 1:
+                self.table.setSpan(row_index, 0, spec_count, 1)
+
+            for i, spec in enumerate(specs):
+                spec_item = QTableWidgetItem(spec["spec_code"])
+                spec_item.setFlags(Qt.ItemIsEnabled)
+                self.table.setItem(row_index, 1, spec_item)
+
+                count_item = QTableWidgetItem(f"{spec['count']}单")
+                count_item.setFlags(Qt.ItemIsEnabled)
+                count_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row_index, 2, count_item)
+
+                if total_count > 0:
+                    weight = (spec["count"] / total_count) * 100
+                    weight_text = f"{weight:.2f}%"
+                else:
+                    weight_text = "0.00%"
+                weight_item = QTableWidgetItem(weight_text)
+                weight_item.setFlags(Qt.ItemIsEnabled)
+                weight_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row_index, 3, weight_item)
+
+                row_index += 1
