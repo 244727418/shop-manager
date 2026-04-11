@@ -1683,6 +1683,7 @@ class StoreMarginDialog(QDialog):
         self.calculate_total_margin()
         self.update_total_orders_label()
         self.update_current_history_label()
+        self.update_compare_columns()
 
     def update_product_avg_price(self):
         """更新所有商品的客单价和销售额列"""
