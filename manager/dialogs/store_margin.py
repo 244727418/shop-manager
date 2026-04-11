@@ -250,6 +250,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText("→ 0.0%")
                     item.setForeground(GRAY)
 
+            item.setFont(QFont("", -1, QFont.Bold))
             self.table.setItem(row, col, item)
         self.table.setRowHeight(row, 22)
 
@@ -413,23 +414,58 @@ class LargeMarginDataDialog(QDialog):
 
         main_layout.addWidget(self.table)
 
-        close_btn = QPushButton("关闭")
-        close_btn.setFixedHeight(40)
-        close_btn.setStyleSheet("""
+        # 底部按钮行
+        bottom_btn_widget = QWidget()
+        bottom_btn_layout = QHBoxLayout(bottom_btn_widget)
+        bottom_btn_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.btn_calculate_total = QPushButton("🧮 计算总和")
+        self.btn_calculate_total.setFixedHeight(45)
+        self.btn_calculate_total.setStyleSheet("""
             QPushButton {
-                background-color: #3498db;
+                background-color: #27ae60;
                 color: white;
+                border: none;
+                border-radius: 4px;
                 font-size: 14px;
                 font-weight: bold;
                 padding: 8px 20px;
-                border-radius: 5px;
             }
             QPushButton:hover {
-                background-color: #2980b9;
+                background-color: #219a52;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
+        self.btn_calculate_total.clicked.connect(self.calculate_total)
+        bottom_btn_layout.addWidget(self.btn_calculate_total)
+        
+        bottom_btn_layout.addStretch()
+        
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(45)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:pressed {
+                background-color: #a93226;
             }
         """)
         close_btn.clicked.connect(self.accept)
-        main_layout.addWidget(close_btn)
+        bottom_btn_layout.addWidget(close_btn)
+        
+        main_layout.addWidget(bottom_btn_widget)
 
         for col in range(self.table.columnCount()):
             self.header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
@@ -442,6 +478,303 @@ class LargeMarginDataDialog(QDialog):
         comparison_rows = self.table.rowCount() - data_rows
         window_height = min(max(200 + data_rows * 60 + comparison_rows * 12, 600), screen.height() - 100)
         self.resize(window_width, window_height)
+
+    def calculate_total(self):
+        """计算选中行或所有行的总和并弹出窗口显示"""
+        records = self.load_all_data()
+        if not records:
+            QMessageBox.information(self, "提示", "无数据可计算")
+            return
+
+        # 判断是否为数据行的函数：行 0 或奇数行是数据行
+        def is_data_row(row):
+            return row == 0 or row % 2 == 1
+
+        # 获取选中的行
+        selected_rows = self.table.selectionModel().selectedRows()
+        
+        if selected_rows:
+            # 用户选择了行，只计算选中的数据行
+            rows_to_calculate = [row.row() for row in selected_rows if is_data_row(row.row())]
+        else:
+            # 没有选择，计算所有数据行
+            rows_to_calculate = [row for row in range(self.table.rowCount()) if is_data_row(row)]
+
+        if not rows_to_calculate:
+            QMessageBox.information(self, "提示", "没有可计算的数据行")
+            return
+
+        # 初始化总和
+        total_orders = 0  # 实发订单
+        total_amount = 0  # 实发金额
+        total_gross_profit = 0  # 毛利润
+        total_refund_amount = 0  # 退款金额
+        total_refund_orders = 0  # 退款订单
+        total_promotion_fee = 0  # 推广费
+        total_deduction = 0  # 扣款
+        total_other_service = 0  # 其他服务
+        total_other = 0  # 其他
+        total_days = 0  # 总天数
+
+        for row in rows_to_calculate:
+            if row >= self.table.rowCount():
+                continue
+            
+            # 获取日期单元格并计算天数
+            date_item = self.table.item(row, 0)
+            if date_item:
+                date_text = date_item.text()
+                if '\n' in date_text:
+                    parts = date_text.split('\n')
+                    if len(parts) >= 2:
+                        start_date_str = parts[0].strip()
+                        end_date_str = parts[1].strip()
+                        try:
+                            from datetime import datetime
+                            # 假设年份为当前年份
+                            current_year = datetime.now().year
+                            start_dt = datetime.strptime(f"{current_year}-{start_date_str}", "%Y-%m-%d")
+                            end_dt = datetime.strptime(f"{current_year}-{end_date_str}", "%Y-%m-%d")
+                            days = max(1, (end_dt - start_dt).days + 1)
+                            total_days += days
+                        except:
+                            total_days += 1
+                    else:
+                        total_days += 1
+                else:
+                    total_days += 1
+            else:
+                total_days += 1
+            
+            # 获取单元格数据
+            orders_item = self.table.item(row, 1)
+            amount_item = self.table.item(row, 2)
+            gross_profit_item = self.table.item(row, 3)
+            refund_amount_item = self.table.item(row, 5)
+            refund_orders_item = self.table.item(row, 7)
+            promotion_fee_item = self.table.item(row, 10)
+            deduction_item = self.table.item(row, 13)
+            other_service_item = self.table.item(row, 14)
+            other_item = self.table.item(row, 15)
+
+            # 累加
+            if orders_item:
+                try:
+                    total_orders += int(orders_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if amount_item:
+                try:
+                    total_amount += float(amount_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if gross_profit_item:
+                try:
+                    total_gross_profit += float(gross_profit_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if refund_amount_item:
+                try:
+                    total_refund_amount += float(refund_amount_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if refund_orders_item:
+                try:
+                    total_refund_orders += int(refund_orders_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if promotion_fee_item:
+                try:
+                    total_promotion_fee += float(promotion_fee_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if deduction_item:
+                try:
+                    total_deduction += float(deduction_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if other_service_item:
+                try:
+                    total_other_service += float(other_service_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+            if other_item:
+                try:
+                    total_other += float(other_item.text().replace('¥', '').replace(',', ''))
+                except:
+                    pass
+
+        # 计算派生值
+        tech_fee = total_amount * 0.006  # 技术服务费
+        net_profit = total_gross_profit - total_refund_amount - total_promotion_fee - total_deduction - total_other_service + total_other - tech_fee
+        
+        # 计算百分比
+        gross_margin_rate = (total_gross_profit / total_amount * 100) if total_amount > 0 else 0
+        refund_rate_by_amount = (total_refund_amount / total_amount * 100) if total_amount > 0 else 0
+        refund_rate_by_orders = (total_refund_orders / total_orders * 100) if total_orders > 0 else 0
+        unit_price = (total_amount / total_orders) if total_orders > 0 else 0
+        promotion_ratio = (total_promotion_fee / total_amount * 100) if total_amount > 0 else 0
+        net_margin_rate = (net_profit / total_amount * 100) if total_amount > 0 else 0
+        profit_per_order = (net_profit / total_orders) if total_orders > 0 else 0
+        daily_profit = (net_profit / total_days) if total_days > 0 else 0
+
+        # 弹出总和窗口
+        total_dialog = QDialog(self)
+        total_dialog.setWindowTitle("📊 数据总和")
+        total_dialog.setStyleSheet("background-color: #f5f5f5;")
+        total_layout = QVBoxLayout(total_dialog)
+        total_layout.setContentsMargins(10, 10, 10, 10)
+        
+        title_label = QLabel(f"📈 数据总和（共{len(rows_to_calculate)}行，总计{total_days}天）")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        total_layout.addWidget(title_label)
+        
+        # 创建表格显示总和
+        total_table = QTableWidget()
+        total_table.setColumnCount(20)
+        total_table.setHorizontalHeaderLabels([
+            "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
+            "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
+            "技术服务费", "扣款", "其他服务", "其他", "净利润",
+            "净利率", "单笔利润", "日盈亏"
+        ])
+        
+        total_table.setRowCount(1)
+        
+        # 填充数据
+        values = [
+            f"总计\n({len(rows_to_calculate)}行\n{total_days}天)",
+            str(int(total_orders)),
+            f"¥{total_amount:.2f}",
+            f"¥{total_gross_profit:.2f}",
+            f"{gross_margin_rate:.2f}%",
+            f"¥{total_refund_amount:.2f}",
+            f"{refund_rate_by_amount:.2f}%",
+            str(int(total_refund_orders)),
+            f"{refund_rate_by_orders:.2f}%",
+            f"¥{unit_price:.2f}",
+            f"¥{total_promotion_fee:.2f}",
+            f"{promotion_ratio:.2f}%",
+            f"¥{tech_fee:.2f}",
+            f"¥{total_deduction:.2f}",
+            f"¥{total_other_service:.2f}",
+            f"¥{total_other:.2f}",
+            f"¥{net_profit:.2f}",
+            f"{net_margin_rate:.2f}%",
+            f"¥{profit_per_order:.2f}",
+            f"¥{daily_profit:.2f}"
+        ]
+        
+        for j, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            if j == 0:
+                item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                item.setBackground(QColor("#e8e8e8"))
+            elif j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
+                item.setBackground(QColor("#c8e6c9"))
+                item.setForeground(QColor("#1b5e20"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            else:
+                item.setBackground(QColor("#bbdefb"))
+                item.setForeground(QColor("#0d47a1"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            total_table.setItem(0, j, item)
+        
+        total_table.setRowHeight(0, 60)
+        total_table.verticalHeader().setVisible(False)
+        total_table.setShowGrid(True)
+        total_table.setGridStyle(Qt.SolidLine)
+        total_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        table_font = QFont()
+        table_font.setPointSize(16)
+        total_table.setFont(table_font)
+        
+        total_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #cccccc;
+                font-size: 16px;
+                border: 2px solid #cccccc;
+                border-radius: 6px;
+                background-color: white;
+            }
+            QTableWidget::item {
+                padding: 1px;
+                text-align: center;
+                border: 1px solid #cccccc;
+                font-size: 16px;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d7;
+                color: white;
+            }
+            QHeaderView {
+                border: none;
+            }
+            QHeaderView::section {
+                background-color: #e0e0e0;
+                padding: 1px;
+                margin: 0px;
+                border: none;
+                border-left: 1px solid #cccccc;
+                border-bottom: 1px solid #cccccc;
+                border-right: 1px solid #cccccc;
+                font-size: 16px;
+                font-weight: bold;
+                min-height: 50px;
+            }
+        """)
+        
+        header = total_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setMinimumSectionSize(80)
+        header.setStretchLastSection(True)
+        
+        total_layout.addWidget(total_table)
+        
+        # 调整列宽以适应内容
+        for col in range(total_table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        total_table.horizontalHeader().setStretchLastSection(True)
+        QApplication.processEvents()
+        
+        # 设置窗口大小
+        total_width = header.length() + total_table.verticalHeader().width() + 50
+        screen = QApplication.desktop().screenGeometry()
+        window_width = min(max(total_width, 1200), screen.width() - 100)
+        window_height = min(300, screen.height() - 100)
+        total_dialog.resize(window_width, window_height)
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(45)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:pressed {
+                background-color: #a93226;
+            }
+        """)
+        close_btn.clicked.connect(total_dialog.accept)
+        total_layout.addWidget(close_btn)
+        
+        total_dialog.exec_()
 
     def eventFilter(self, obj, event):
         if obj == self.header.viewport() and event.type() == QEvent.MouseMove:
@@ -797,23 +1130,87 @@ class StoreMarginDialog(QDialog):
 
         # 快捷按钮
         self.btn_last_week = QPushButton("📅 近七天")
-        self.btn_last_week.setFixedWidth(60)
-        self.btn_last_week.setStyleSheet("font-size: 15px; padding: 1px 5px; background-color: #95a5a6; color: white; border-radius: 3px;")
+        self.btn_last_week.setFixedWidth(80)
+        self.btn_last_week.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+            QPushButton:pressed {
+                background-color: #6c7a7d;
+            }
+        """)
         self.btn_last_week.clicked.connect(self.set_last_week)
 
         self.btn_input_data = QPushButton("📝 录入数据")
-        self.btn_input_data.setFixedWidth(80)
-        self.btn_input_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #27ae60; color: white; border-radius: 3px;")
+        self.btn_input_data.setFixedWidth(90)
+        self.btn_input_data.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         self.btn_input_data.clicked.connect(self.open_input_data_dialog)
 
         self.btn_import_data = QPushButton("📂 导入数据")
-        self.btn_import_data.setFixedWidth(80)
-        self.btn_import_data.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #9b59b6; color: white; border-radius: 3px;")
+        self.btn_import_data.setFixedWidth(90)
+        self.btn_import_data.setStyleSheet("""
+            QPushButton {
+                background-color: #9b59b6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #8e44ad;
+            }
+            QPushButton:pressed {
+                background-color: #7d3c98;
+            }
+        """)
         self.btn_import_data.clicked.connect(self.import_data)
 
         self.btn_reading_mode = QPushButton("🔍 阅览模式")
-        self.btn_reading_mode.setFixedWidth(80)
-        self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
+        self.btn_reading_mode.setFixedWidth(90)
+        self.btn_reading_mode.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #2471a3;
+            }
+        """)
         self.btn_reading_mode.clicked.connect(self.toggle_reading_mode)
 
         date_layout.addWidget(date_label)
@@ -958,32 +1355,118 @@ class StoreMarginDialog(QDialog):
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)
         self.btn_auto_balance = QPushButton("⚖️ 自动均分权重")
+        self.btn_auto_balance.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #2c3e50;
+            }
+            QPushButton:pressed {
+                background-color: #1a252f;
+            }
+        """)
         self.btn_auto_balance.clicked.connect(self.auto_balance_weights)
         self.btn_profit_calc = QPushButton("🧮 计算利润")
-        self.btn_profit_calc.setStyleSheet(
-            "QPushButton { background-color: #9b59b6; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
-            " QPushButton:hover { background-color: #8e44ad; }"
-        )
+        self.btn_profit_calc.setStyleSheet("""
+            QPushButton {
+                background-color: #9b59b6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #8e44ad;
+            }
+            QPushButton:pressed {
+                background-color: #7d3c98;
+            }
+        """)
         self.btn_profit_calc.clicked.connect(self.open_profit_calculator)
         self.btn_import_orders = QPushButton("📥 导入订单")
-        self.btn_import_orders.setStyleSheet(
-            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
-            " QPushButton:hover { background-color: #219a52; }"
-        )
+        self.btn_import_orders.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         self.btn_import_orders.clicked.connect(self.import_orders)
         self.btn_sync_weight = QPushButton("🔄 同步订单权重")
-        self.btn_sync_weight.setStyleSheet(
-            "QPushButton { background-color: #e67e22; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
-            " QPushButton:hover { background-color: #d35400; }"
-        )
+        self.btn_sync_weight.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #d35400;
+            }
+            QPushButton:pressed {
+                background-color: #ba4a00;
+            }
+        """)
         self.btn_sync_weight.clicked.connect(self.sync_order_weight)
         self.btn_save = QPushButton("💾 保存")
-        self.btn_save.setStyleSheet(
-            "QPushButton { background-color: #007bff; color: white; font-weight: bold; padding: 5px 15px; border-radius: 3px; }"
-            " QPushButton:hover { background-color: #0056b3; }"
-        )
+        self.btn_save.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+            QPushButton:pressed {
+                background-color: #004085;
+            }
+        """)
         self.btn_save.clicked.connect(self.save_weights)
         self.btn_close = QPushButton("关闭")
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:pressed {
+                background-color: #a93226;
+            }
+        """)
         self.btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(self.btn_auto_balance)
         btn_layout.addWidget(self.btn_profit_calc)
