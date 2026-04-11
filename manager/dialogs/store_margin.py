@@ -270,7 +270,7 @@ class StoreMarginDialog(QDialog):
         self.large_dialog = None
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
-        self.resize(1400, 800)
+        self.resize(1700, 800)
 
         self.toast_label = QLabel(self)
         self.toast_label.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
