@@ -61,6 +61,198 @@ class LargeMarginDataDialog(QDialog):
             print(f"加载历史数据失败: {e}")
             return []
 
+    def _add_week_comparison_row(self, row, current, previous, GREEN, RED, GRAY):
+        """添加较上周对比数据行"""
+        current_net_profit = current[17] if current[17] else 0
+        previous_net_profit = previous[17] if previous[17] else 0
+        current_net_margin = current[18] if current[18] else 0
+        previous_net_margin = previous[18] if previous[18] else 0
+
+        current_daily = 0
+        if current[0] and current[1]:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(current[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(current[1], "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+                current_daily = current_net_profit / days if days > 0 else 0
+            except:
+                pass
+
+        previous_daily = 0
+        if previous[0] and previous[1]:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(previous[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(previous[1], "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+                previous_daily = previous_net_profit / days if days > 0 else 0
+            except:
+                pass
+
+        for col in range(20):
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+            if col == 0:
+                item.setText("较上周")
+                item.setBackground(QColor("#e8e8e8"))
+            elif col == 1:
+                if previous[2] and previous[2] != 0:
+                    change = ((current[2] or 0) - (previous[2] or 0)) / abs(previous[2]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 2:
+                if (previous[3] or 0) != 0:
+                    change = ((current[3] or 0) - (previous[3] or 0)) / abs(previous[3]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 3:
+                if (previous[4] or 0) != 0:
+                    change = ((current[4] or 0) - (previous[4] or 0)) / abs(previous[4]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 4:
+                change = (current[11] or 0) - (previous[11] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+            elif col == 5:
+                if (previous[5] or 0) != 0:
+                    change = ((current[5] or 0) - (previous[5] or 0)) / abs(previous[5]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 6:
+                change = (current[12] or 0) - (previous[12] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 7:
+                if previous[6] and previous[6] != 0:
+                    change = ((current[6] or 0) - (previous[6] or 0)) / abs(previous[6]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 8:
+                change = (current[13] or 0) - (previous[13] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 9:
+                if (previous[14] or 0) != 0:
+                    change = ((current[14] or 0) - (previous[14] or 0)) / abs(previous[14]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 10:
+                if (previous[7] or 0) != 0:
+                    change = ((current[7] or 0) - (previous[7] or 0)) / abs(previous[7]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 11:
+                change = (current[15] or 0) - (previous[15] or 0)
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+            elif col == 12:
+                if (previous[16] or 0) != 0:
+                    change = ((current[16] or 0) - (previous[16] or 0)) / abs(previous[16]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 13:
+                if (previous[8] or 0) != 0:
+                    change = ((current[8] or 0) - (previous[8] or 0)) / abs(previous[8]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 14:
+                if (previous[9] or 0) != 0:
+                    change = ((current[9] or 0) - (previous[9] or 0)) / abs(previous[9]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 15:
+                if (previous[10] or 0) != 0:
+                    change = ((current[10] or 0) - (previous[10] or 0)) / abs(previous[10]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 16:
+                if previous_net_profit != 0:
+                    change = (current_net_profit - previous_net_profit) / abs(previous_net_profit) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 17:
+                change = current_net_margin - previous_net_margin
+                icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                item.setText(f"{icon} {abs(change):.1f}%")
+                item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+            elif col == 18:
+                if (previous[19] or 0) != 0:
+                    change = ((current[19] or 0) - (previous[19] or 0)) / abs(previous[19]) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+            elif col == 19:
+                if previous_daily != 0:
+                    change = (current_daily - previous_daily) / abs(previous_daily) * 100
+                    icon = "↑" if change > 0 else "↓" if change < 0 else "→"
+                    item.setText(f"{icon} {abs(change):.1f}%")
+                    item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
+                else:
+                    item.setText("→ 0.0%")
+                    item.setForeground(GRAY)
+
+            self.table.setItem(row, col, item)
+        self.table.setRowHeight(row, 22)
+
     def __init__(self, store_name, store_id, db, parent=None):
         super().__init__(parent)
         self.store_id = store_id
@@ -85,9 +277,16 @@ class LargeMarginDataDialog(QDialog):
         ])
 
         records = self.load_all_data()
-        self.table.setRowCount(len(records))
+        total_rows = 2 * len(records) - 1
+        self.table.setRowCount(total_rows)
 
+        GREEN = QColor("#27ae60")
+        RED = QColor("#e74c3c")
+        GRAY = QColor("#999999")
+
+        current_table_row = 0
         for i, record in enumerate(records):
+            table_row = current_table_row
             start_date = record[0] if record[0] else ""
             end_date = record[1] if record[1] else ""
             start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
@@ -150,8 +349,14 @@ class LargeMarginDataDialog(QDialog):
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
-                self.table.setItem(i, j, item)
-            self.table.setRowHeight(i, 60)
+                self.table.setItem(table_row, j, item)
+            self.table.setRowHeight(table_row, 60)
+
+            if i > 0:
+                self._add_week_comparison_row(table_row + 1, record, records[i - 1], GREEN, RED, GRAY)
+                current_table_row += 2
+            else:
+                current_table_row += 1
 
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
@@ -172,7 +377,7 @@ class LargeMarginDataDialog(QDialog):
                 background-color: white;
             }
             QTableWidget::item {
-                padding: 8px;
+                padding: 1px;
                 text-align: center;
                 border: 1px solid #cccccc;
                 font-size: 16px;
@@ -206,9 +411,6 @@ class LargeMarginDataDialog(QDialog):
         self.header.viewport().setMouseTracking(True)
         self.header.viewport().installEventFilter(self)
 
-        for row in range(self.table.rowCount()):
-            self.table.setRowHeight(row, 70)
-
         main_layout.addWidget(self.table)
 
         close_btn = QPushButton("关闭")
@@ -229,7 +431,6 @@ class LargeMarginDataDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         main_layout.addWidget(close_btn)
 
-        self.table.resizeRowsToContents()
         for col in range(self.table.columnCount()):
             self.header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -237,7 +438,9 @@ class LargeMarginDataDialog(QDialog):
         total_width = self.table.horizontalHeader().length() + self.table.verticalHeader().width() + 50
         screen = QApplication.desktop().screenGeometry()
         window_width = min(max(total_width, 1200), screen.width() - 100)
-        window_height = min(max(200 + self.table.rowCount() * 75, 600), screen.height() - 100)
+        data_rows = (self.table.rowCount() + 1) // 2
+        comparison_rows = self.table.rowCount() - data_rows
+        window_height = min(max(200 + data_rows * 60 + comparison_rows * 12, 600), screen.height() - 100)
         self.resize(window_width, window_height)
 
     def eventFilter(self, obj, event):
