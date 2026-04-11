@@ -305,6 +305,21 @@ class SafeDatabaseManager:
                 order_date TEXT,
                 actual_amount REAL DEFAULT 0,
                 UNIQUE(store_id, product_id, spec_code))''')
+            
+            # 创建订单导入历史记录表
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS import_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                import_time TEXT NOT NULL,
+                file_name TEXT,
+                total_products INTEGER DEFAULT 0,
+                total_specs INTEGER DEFAULT 0,
+                total_orders INTEGER DEFAULT 0,
+                total_amount REAL DEFAULT 0,
+                snapshot_data TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )''')
+            print("✅ 订单导入历史记录表已创建")
 
             self.cursor.execute("PRAGMA table_info(imported_orders)")
             imported_columns = [col[1] for col in self.cursor.fetchall()]
