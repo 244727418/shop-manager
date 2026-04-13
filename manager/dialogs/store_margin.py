@@ -3411,13 +3411,60 @@ class StoreMarginDialog(QDialog):
         if latest_records:
             latest_record = latest_records[0]
             import_time, file_name, total_products, total_orders = latest_record
-            # 格式化时间
+            
+            # 获取订单日期范围（从 imported_orders 表的 order_date 字段，格式为 M/D 如 4/10）
+            # 需要收集所有日期，找出最早和最晚，组成单一范围
+            all_dates = self.db.safe_fetchall("""
+                SELECT order_date FROM imported_orders WHERE store_id=? AND order_date IS NOT NULL
+            """, (self.store_id,))
+            
+            order_range_str = "无日期"
+            if all_dates:
+                parsed_dates = []
+                for (date_val,) in all_dates:
+                    if date_val:
+                        # order_date 格式为 "M/D" 如 "4/10"
+                        try:
+                            if '~' in date_val:
+                                # 如果是范围如 "4/10~4/13"，拆开取两端
+                                parts = date_val.split('~')
+                                for p in parts:
+                                    if '/' in p:
+                                        m, d = p.split('/')
+                                        parsed_dates.append((int(m), int(d)))
+                            elif '/' in date_val:
+                                m, d = date_val.split('/')
+                                parsed_dates.append((int(m), int(d)))
+                        except:
+                            pass
+                
+                if parsed_dates:
+                    parsed_dates.sort()
+                    min_date = parsed_dates[0]
+                    max_date = parsed_dates[-1]
+                    if min_date != max_date:
+                        order_range_str = f"{min_date[0]}/{min_date[1]}-{max_date[0]}/{max_date[1]}"
+                    else:
+                        order_range_str = f"{min_date[0]}/{min_date[1]}"
+            
+            # 格式化导入时间：只保留几月几号（去除年份和具体时间）
             if import_time:
-                date_str = import_time.split()[0] if ' ' in import_time else import_time
-                time_str = import_time.split()[1] if ' ' in import_time else ''
+                import_date_str = import_time.split()[0] if ' ' in import_time else import_time
+                try:
+                    if '-' in import_date_str:
+                        parts = import_date_str.split('-')
+                        if len(parts) >= 2:
+                            month = int(parts[1])
+                            day = int(parts[2])
+                            import_date_formatted = f"{month}月{day}号"
+                        else:
+                            import_date_formatted = import_date_str
+                    else:
+                        import_date_formatted = import_date_str
+                except:
+                    import_date_formatted = import_date_str
             else:
-                date_str = "未知"
-                time_str = ""
+                import_date_formatted = "未知"
             
             # 获取当前实际订单数
             current_orders = self.db.safe_fetchall("""
@@ -3426,9 +3473,9 @@ class StoreMarginDialog(QDialog):
             
             current_total = current_orders[0][0] if current_orders and current_orders[0] and current_orders[0][0] else 0
             
-            # 更新标签
+            # 更新标签：显示订单时间范围 + 导入时间 + 单量
             self.lbl_current_history.setText(
-                f"📍 当前: {date_str} {time_str} ({current_total}单)"
+                f"📍 订单: {order_range_str} | 导入: {import_date_formatted} | {current_total}单"
             )
             self.lbl_current_history.setStyleSheet("""
                 QLabel {
@@ -3675,9 +3722,9 @@ class ImportHistoryDialog(QDialog):
         
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
-            "导入时间", "文件名", "商品数", "总单量", "操作"
+            "导入时间", "文件名", "订单时间范围", "商品数", "总单量", "操作"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -3708,39 +3755,71 @@ class ImportHistoryDialog(QDialog):
     def load_history(self):
         """加载历史记录"""
         records = self.db.safe_fetchall("""
-            SELECT id, import_time, file_name, total_products, total_specs, total_orders, total_amount
-            FROM import_history 
-            WHERE store_id=? 
+            SELECT id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data
+            FROM import_history
+            WHERE store_id=?
             ORDER BY import_time DESC
         """, (self.store_id,))
-        
+
         self.table.setRowCount(len(records))
-        
+
         for row, record in enumerate(records):
-            hist_id, import_time, file_name, total_products, total_specs, total_orders, total_amount = record
-            
+            hist_id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data = record
+
             # 导入时间
             time_item = QTableWidgetItem(import_time)
             time_item.setFlags(Qt.ItemIsEnabled)
             self.table.setItem(row, 0, time_item)
-            
+
             # 文件名
             file_item = QTableWidgetItem(file_name if file_name else "未知")
             file_item.setFlags(Qt.ItemIsEnabled)
             self.table.setItem(row, 1, file_item)
-            
+
+            # 订单时间范围（从snapshot_data中提取所有日期计算范围）
+            order_range_str = "无日期"
+            if snapshot_data:
+                try:
+                    snapshot = json.loads(snapshot_data)
+                    if snapshot and "orders" in snapshot:
+                        all_dates = []
+                        for key, data in snapshot["orders"].items():
+                            if isinstance(data, dict) and "dates" in data:
+                                for date_val in data.get("dates", []):
+                                    if date_val and '/' in date_val:
+                                        try:
+                                            m, d = date_val.split('/')
+                                            all_dates.append((int(m), int(d)))
+                                        except:
+                                            pass
+                        if all_dates:
+                            all_dates.sort()
+                            min_date = all_dates[0]
+                            max_date = all_dates[-1]
+                            if min_date != max_date:
+                                order_range_str = f"{min_date[0]}/{min_date[1]}-{max_date[0]}/{max_date[1]}"
+                            else:
+                                order_range_str = f"{min_date[0]}/{min_date[1]}"
+                except:
+                    order_range_str = "解析失败"
+
+            range_item = QTableWidgetItem(order_range_str)
+            range_item.setFlags(Qt.ItemIsEnabled)
+            range_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 2, range_item)
+
             # 商品数
             prod_item = QTableWidgetItem(str(total_products))
             prod_item.setFlags(Qt.ItemIsEnabled)
             prod_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 2, prod_item)
-            
+            self.table.setItem(row, 3, prod_item)
+
             # 总单量
             orders_item = QTableWidgetItem(str(total_orders))
             orders_item.setFlags(Qt.ItemIsEnabled)
             orders_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 3, orders_item)
-            
+            self.table.setItem(row, 4, orders_item)
+
             # 操作按钮（应用和删除）
             btn_widget = QWidget()
             btn_layout = QHBoxLayout(btn_widget)
@@ -3785,7 +3864,7 @@ class ImportHistoryDialog(QDialog):
             btn_delete.clicked.connect(lambda checked, hid=hist_id: self.delete_single_history(hid))
             btn_layout.addWidget(btn_delete)
             
-            self.table.setCellWidget(row, 4, btn_widget)
+            self.table.setCellWidget(row, 5, btn_widget)
     
     def delete_single_history(self, history_id):
         """删除单条历史记录"""

@@ -520,6 +520,12 @@ class ProductSpecDialog(QDialog):
         self.lbl_total_orders.setAlignment(Qt.AlignRight)
         layout.addWidget(self.lbl_total_orders)
 
+        # 4.1.1 订单时间范围和导入时间标签
+        self.lbl_order_date_range = QLabel("订单: 无日期 | 导入: 未知")
+        self.lbl_order_date_range.setStyleSheet("font-size: 14px; color: #8e44ad; padding: 5px 10px; font-weight: bold;")
+        self.lbl_order_date_range.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.lbl_order_date_range)
+
         # 4.2 销售金额和客单价标签
         self.lbl_sales_info = QLabel("销售额: - | 客单价: -")
         self.lbl_sales_info.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
@@ -2254,6 +2260,63 @@ class ProductSpecDialog(QDialog):
             self.lbl_sales_info.setText(f"销售额: ¥{total_amount:.2f} | 客单价: ¥{avg_price:.2f}")
         else:
             self.lbl_sales_info.setText("销售额: - | 客单价: -")
+        self.update_order_date_range_label()
+
+    def update_order_date_range_label(self):
+        """更新订单时间范围和导入时间标签"""
+        if not hasattr(self, 'lbl_order_date_range'):
+            return
+
+        all_dates = self.db.safe_fetchall("""
+            SELECT order_date FROM imported_orders WHERE product_id=? AND order_date IS NOT NULL
+        """, (self.product_id,))
+
+        order_range_str = "无日期"
+        if all_dates:
+            parsed_dates = []
+            for (date_val,) in all_dates:
+                if date_val:
+                    try:
+                        if '~' in date_val:
+                            parts = date_val.split('~')
+                            for p in parts:
+                                if '/' in p:
+                                    m, d = p.split('/')
+                                    parsed_dates.append((int(m), int(d)))
+                        elif '/' in date_val:
+                            m, d = date_val.split('/')
+                            parsed_dates.append((int(m), int(d)))
+                    except:
+                        pass
+
+            if parsed_dates:
+                parsed_dates.sort()
+                min_date = parsed_dates[0]
+                max_date = parsed_dates[-1]
+                if min_date != max_date:
+                    order_range_str = f"{min_date[0]}/{min_date[1]}-{max_date[0]}/{max_date[1]}"
+                else:
+                    order_range_str = f"{min_date[0]}/{min_date[1]}"
+
+        latest_import = self.db.safe_fetchall("""
+            SELECT import_time FROM imported_orders WHERE product_id=? ORDER BY import_time DESC LIMIT 1
+        """, (self.product_id,))
+
+        import_date_str = "未知"
+        if latest_import and latest_import[0][0]:
+            import_time = latest_import[0][0]
+            import_date_str = import_time.split()[0] if ' ' in import_time else import_time
+            try:
+                if '-' in import_date_str:
+                    parts = import_date_str.split('-')
+                    if len(parts) >= 2:
+                        month = int(parts[1])
+                        day = int(parts[2])
+                        import_date_str = f"{month}月{day}号"
+            except:
+                pass
+
+        self.lbl_order_date_range.setText(f"订单: {order_range_str} | 导入: {import_date_str}")
 
     def update_compare_columns(self):
         """更新所有规格的对比列数据"""
@@ -2904,6 +2967,9 @@ class SpecImportHistoryDialog(QDialog):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.setStyleSheet("""
+            QTableWidget::item { text-align: center; }
+        """)
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
@@ -2949,12 +3015,25 @@ class SpecImportHistoryDialog(QDialog):
                         try:
                             if int(prod_id_part) == self.product_id:
                                 if import_time not in grouped_data:
-                                    grouped_data[import_time] = []
+                                    grouped_data[import_time] = {"specs": [], "dates": []}
                                 count = data.get("count", 0)
-                                grouped_data[import_time].append({
+                                grouped_data[import_time]["specs"].append({
                                     "spec_code": spec_code_part,
                                     "count": count
                                 })
+                                for date_val in data.get("dates", []):
+                                    if date_val and '/' in date_val:
+                                        try:
+                                            if '~' in date_val:
+                                                for p in date_val.split('~'):
+                                                    if '/' in p:
+                                                        m, d = p.split('/')
+                                                        grouped_data[import_time]["dates"].append((int(m), int(d)))
+                                            else:
+                                                m, d = date_val.split('/')
+                                                grouped_data[import_time]["dates"].append((int(m), int(d)))
+                                        except:
+                                            pass
                         except:
                             pass
             except:
@@ -2962,15 +3041,29 @@ class SpecImportHistoryDialog(QDialog):
 
         time_list = sorted(grouped_data.keys(), reverse=True)
         row_index = 0
-        self.table.setRowCount(sum(len(grouped_data[t]) for t in time_list))
+        self.table.setRowCount(sum(len(grouped_data[t]["specs"]) for t in time_list))
 
         for import_time in time_list:
-            specs = grouped_data[import_time]
+            data_info = grouped_data[import_time]
+            specs = data_info["specs"]
+            all_dates = data_info["dates"]
             spec_count = len(specs)
             total_count = sum(s["count"] for s in specs)
 
-            time_item = QTableWidgetItem(import_time)
+            order_range_str = "无日期"
+            if all_dates:
+                all_dates.sort()
+                min_date = all_dates[0]
+                max_date = all_dates[-1]
+                if min_date != max_date:
+                    order_range_str = f"{min_date[0]}/{min_date[1]}-{max_date[0]}/{max_date[1]}"
+                else:
+                    order_range_str = f"{min_date[0]}/{min_date[1]}"
+
+            cell_text = f"{import_time}\n{order_range_str}"
+            time_item = QTableWidgetItem(cell_text)
             time_item.setFlags(Qt.ItemIsEnabled)
+            time_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row_index, 0, time_item)
             if spec_count > 1:
                 self.table.setSpan(row_index, 0, spec_count, 1)
@@ -2978,6 +3071,7 @@ class SpecImportHistoryDialog(QDialog):
             for i, spec in enumerate(specs):
                 spec_item = QTableWidgetItem(spec["spec_code"])
                 spec_item.setFlags(Qt.ItemIsEnabled)
+                spec_item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, 1, spec_item)
 
                 count_item = QTableWidgetItem(f"{spec['count']}单")
