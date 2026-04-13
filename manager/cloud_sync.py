@@ -820,21 +820,23 @@ class CloudSyncDialog(QDialog):
         info_group = QGroupBox("📊 当前账号信息")
         info_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+        info_layout.setContentsMargins(5, 5, 5, 5)
 
         self.lbl_current_account = QLabel("未登录")
-        self.lbl_current_account.setStyleSheet("font-size: 14px; color: #666; padding: 5px;")
+        self.lbl_current_account.setStyleSheet("font-size: 14px; color: #666; padding: 2px;")
         info_layout.addWidget(self.lbl_current_account)
 
         self.lbl_last_upload = QLabel("最后上传：从未")
-        self.lbl_last_upload.setStyleSheet("font-size: 12px; color: #888; padding: 5px;")
+        self.lbl_last_upload.setStyleSheet("font-size: 12px; color: #888; padding: 2px;")
         info_layout.addWidget(self.lbl_last_upload)
 
         self.lbl_last_download = QLabel("最后下载：从未")
-        self.lbl_last_download.setStyleSheet("font-size: 12px; color: #888; padding: 5px;")
+        self.lbl_last_download.setStyleSheet("font-size: 12px; color: #888; padding: 2px;")
         info_layout.addWidget(self.lbl_last_download)
 
         self.lbl_local_path = QLabel("本地路径：未设置")
-        self.lbl_local_path.setStyleSheet("font-size: 11px; color: #888; padding: 5px;")
+        self.lbl_local_path.setStyleSheet("font-size: 11px; color: #888; padding: 2px;")
         self.lbl_local_path.setWordWrap(True)
         info_layout.addWidget(self.lbl_local_path)
 
@@ -875,7 +877,7 @@ class CloudSyncDialog(QDialog):
         info_layout.addLayout(path_btn_layout)
 
         self.lbl_sync_status = QLabel("")
-        self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #27ae60; padding: 5px;")
+        self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #27ae60; padding: 2px;")
         info_layout.addWidget(self.lbl_sync_status)
 
         self.progress_bar = QProgressBar()
