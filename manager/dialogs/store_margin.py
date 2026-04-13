@@ -95,7 +95,7 @@ class LargeMarginDataDialog(QDialog):
         for col in range(20):
             item = QTableWidgetItem()
             item.setTextAlignment(Qt.AlignCenter)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable & ~Qt.ItemIsSelectable)
 
             if col == 0:
                 item.setText("较上周")
@@ -107,7 +107,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 2:
                 if (previous[3] or 0) != 0:
@@ -116,7 +116,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 3:
                 if (previous[4] or 0) != 0:
@@ -125,7 +125,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 4:
                 change = (current[11] or 0) - (previous[11] or 0)
@@ -139,7 +139,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 6:
                 change = (current[12] or 0) - (previous[12] or 0)
@@ -153,7 +153,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 8:
                 change = (current[13] or 0) - (previous[13] or 0)
@@ -167,7 +167,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 10:
                 if (previous[7] or 0) != 0:
@@ -176,7 +176,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 11:
                 change = (current[15] or 0) - (previous[15] or 0)
@@ -190,7 +190,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 13:
                 if (previous[8] or 0) != 0:
@@ -199,7 +199,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 14:
                 if (previous[9] or 0) != 0:
@@ -208,7 +208,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 15:
                 if (previous[10] or 0) != 0:
@@ -217,7 +217,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 16:
                 if previous_net_profit != 0:
@@ -226,7 +226,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 17:
                 change = current_net_margin - previous_net_margin
@@ -240,7 +240,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
             elif col == 19:
                 if previous_daily != 0:
@@ -249,7 +249,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("→ 0.0%")
+                    item.setText("-")
                     item.setForeground(GRAY)
 
             item.setFont(QFont("", -1, QFont.Bold))
@@ -260,6 +260,7 @@ class LargeMarginDataDialog(QDialog):
         super().__init__(parent)
         self.store_id = store_id
         self.db = db
+        self.parent_dialog = parent
         self.setWindowTitle(f"📊 {store_name} - 毛利数据明细（放大版）")
         self.setStyleSheet("background-color: #f5f5f5;")
 
@@ -271,12 +272,12 @@ class LargeMarginDataDialog(QDialog):
         main_layout.addWidget(header_label)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(20)
+        self.table.setColumnCount(21)
         self.table.setHorizontalHeaderLabels([
             "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
             "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
             "技术服务费", "扣款", "其他服务", "其他", "净利润",
-            "净利率", "单笔利润", "日盈亏"
+            "净利率", "单笔利润", "日盈亏", "操作"
         ])
 
         records = self.load_all_data()
@@ -353,6 +354,24 @@ class LargeMarginDataDialog(QDialog):
                     font.setBold(True)
                     item.setFont(font)
                 self.table.setItem(table_row, j, item)
+
+            delete_btn = QPushButton("🗑️")
+            delete_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    padding: 5px 10px;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """)
+            delete_btn.clicked.connect(lambda checked, r=table_row, idx=i: self.delete_data_row_with_comparison(r, idx))
+            self.table.setCellWidget(table_row, 20, delete_btn)
             self.table.setRowHeight(table_row, 60)
 
             if i > 0:
@@ -366,6 +385,8 @@ class LargeMarginDataDialog(QDialog):
         self.table.setGridStyle(Qt.SolidLine)
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
 
         table_font = QFont()
         table_font.setPointSize(16)
@@ -469,6 +490,8 @@ class LargeMarginDataDialog(QDialog):
         
         main_layout.addWidget(bottom_btn_widget)
 
+        self.records = records
+
         for col in range(self.table.columnCount()):
             self.header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -481,6 +504,188 @@ class LargeMarginDataDialog(QDialog):
         window_height = min(max(200 + data_rows * 60 + comparison_rows * 12, 600), screen.height() - 100)
         self.resize(window_width, window_height)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.reload_data()
+
+    def reload_data(self):
+        records = self.load_all_data()
+        self.table.setRowCount(0)
+        self.table.clearContents()
+
+        if not records:
+            self.records = []
+            return
+
+        total_rows = 2 * len(records) - 1
+        self.table.setRowCount(total_rows)
+
+        GREEN = QColor("#27ae60")
+        RED = QColor("#e74c3c")
+        GRAY = QColor("#999999")
+
+        current_table_row = 0
+        for i, record in enumerate(records):
+            table_row = current_table_row
+            start_date = record[0] if record[0] else ""
+            end_date = record[1] if record[1] else ""
+            start_display = start_date[5:10] if start_date and len(start_date) >= 10 else start_date
+            end_display = end_date[5:10] if end_date and len(end_date) >= 10 else end_date
+            date_str = f"{start_display}\n{end_display}"
+
+            days = 1
+            if start_date and end_date:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    days = max(1, (end_dt - start_dt).days + 1)
+                except:
+                    pass
+
+            net_profit = record[17] if record[17] else 0
+            daily_profit = net_profit / days if days > 0 else 0
+
+            values = [
+                date_str,
+                str(int(record[2])) if record[2] else "0",
+                f"¥{record[3]:.2f}" if record[3] else "¥0.00",
+                f"¥{record[4]:.2f}" if record[4] else "¥0.00",
+                f"{record[11]:.2f}%" if record[11] else "0.00%",
+                f"¥{record[5]:.2f}" if record[5] else "¥0.00",
+                f"{record[12]:.2f}%" if record[12] else "0.00%",
+                str(int(record[6])) if record[6] else "0",
+                f"{record[13]:.2f}%" if record[13] else "0.00%",
+                f"¥{record[14]:.2f}" if record[14] else "¥0.00",
+                f"¥{record[7]:.2f}" if record[7] else "¥0.00",
+                f"{record[15]:.2f}%" if record[15] else "0.00%",
+                f"¥{record[16]:.2f}" if record[16] else "¥0.00",
+                f"¥{record[8]:.2f}" if record[8] else "¥0.00",
+                f"¥{record[9]:.2f}" if record[9] else "¥0.00",
+                f"¥{record[10]:.2f}" if record[10] else "¥0.00",
+                f"¥{record[17]:.2f}" if record[17] else "¥0.00",
+                f"{record[18]:.2f}%" if record[18] else "0.00%",
+                f"¥{record[19]:.2f}" if record[19] else "¥0.00",
+                f"¥{daily_profit:.2f}",
+            ]
+
+            for j, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if j == 0:
+                    item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                if j == 0:
+                    pass
+                elif j in [1, 2, 3, 5, 7, 10, 13, 14, 15]:
+                    item.setBackground(QColor("#c8e6c9"))
+                    item.setForeground(QColor("#1b5e20"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                else:
+                    item.setBackground(QColor("#bbdefb"))
+                    item.setForeground(QColor("#0d47a1"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.table.setItem(table_row, j, item)
+
+            delete_btn = QPushButton("🗑️")
+            delete_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    padding: 5px 10px;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """)
+            delete_btn.clicked.connect(lambda checked, r=table_row, idx=i: self.delete_data_row_with_comparison(r, idx))
+            self.table.setCellWidget(table_row, 20, delete_btn)
+            self.table.setRowHeight(table_row, 60)
+
+            if i > 0:
+                self._add_week_comparison_row(table_row + 1, record, records[i - 1], GREEN, RED, GRAY)
+                current_table_row += 2
+            else:
+                current_table_row += 1
+
+        self.records = records
+
+    def show_context_menu(self, pos):
+        menu = QMenu()
+        hint_action = QAction("ℹ️ 对比行不可操作", self.table)
+        hint_action.setEnabled(False)
+        menu.addAction(hint_action)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def delete_data_row_with_comparison(self, row, record_index):
+        date_item = self.table.item(row, 0)
+        date_text = date_item.text().split('\n')[0] if date_item else ""
+
+        reply = QMessageBox.question(self, "确认删除", f"确定要删除 {date_text} 这行数据及其对比行吗？",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.No:
+            return
+
+        if record_index < len(self.records):
+            record = self.records[record_index]
+            self.db.safe_execute("""
+                DELETE FROM manual_margin_data WHERE store_id=? AND start_date=? AND end_date=?
+            """, (self.store_id, record[0], record[1]))
+
+        if self.parent_dialog and hasattr(self.parent_dialog, 'update_current_history_label'):
+            self.parent_dialog.update_current_history_label()
+        if self.parent_dialog and hasattr(self.parent_dialog, 'refresh_manual_data_display'):
+            self.parent_dialog.refresh_manual_data_display()
+
+        self.reload_data()
+        QApplication.processEvents()
+
+        self.show_toast("✅ 已删除")
+
+    def show_toast(self, message):
+        """显示气泡提示（淡入淡出0.5秒）"""
+        if not hasattr(self, 'toast_label'):
+            self.toast_label = QLabel(self)
+            self.toast_label.setStyleSheet("""
+                background-color: rgba(0, 0, 0, 180);
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+            """)
+            self.toast_label.setAttribute(Qt.WA_TranslucentBackground)
+            self.toast_label.setWindowFlags(Qt.FramelessWindowHint)
+            self.toast_opacity = QGraphicsOpacityEffect()
+            self.toast_label.setGraphicsEffect(self.toast_opacity)
+            self.toast_opacity.setOpacity(0)
+
+        self.toast_label.setText(message)
+        self.toast_label.adjustSize()
+        parent_pos = self.mapToGlobal(self.rect().bottomLeft())
+        x = parent_pos.x() + (self.width() - self.toast_label.width()) // 2
+        y = parent_pos.y() - self.toast_label.height() - 10
+        self.toast_label.move(x, y)
+        self.toast_label.show()
+        self.toast_label.repaint()
+
+        self.toast_opacity.setOpacity(1)
+        QApplication.processEvents()
+
+        QTimer.singleShot(1000, self.fade_out_toast)
+
+    def fade_out_toast(self):
+        if hasattr(self, 'toast_opacity'):
+            self.toast_opacity.setOpacity(0)
+            QTimer.singleShot(1000, self.toast_label.hide if hasattr(self, 'toast_label') else lambda: None)
+
     def calculate_total(self):
         """计算选中行或所有行的总和并弹出窗口显示"""
         records = self.load_all_data()
@@ -488,18 +693,14 @@ class LargeMarginDataDialog(QDialog):
             QMessageBox.information(self, "提示", "无数据可计算")
             return
 
-        # 判断是否为数据行的函数：行 0 或奇数行是数据行
         def is_data_row(row):
             return row == 0 or row % 2 == 1
 
-        # 获取选中的行
         selected_rows = self.table.selectionModel().selectedRows()
-        
+
         if selected_rows:
-            # 用户选择了行，只计算选中的数据行
             rows_to_calculate = [row.row() for row in selected_rows if is_data_row(row.row())]
         else:
-            # 没有选择，计算所有数据行
             rows_to_calculate = [row for row in range(self.table.rowCount()) if is_data_row(row)]
 
         if not rows_to_calculate:
@@ -861,13 +1062,20 @@ class StoreMarginDialog(QDialog):
             self.btn_reading_mode.setText("📖 退出阅览")
             self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #e74c3c; color: white; border-radius: 3px;")
             self.show_toast("已打开放大版数据窗口")
-            if self.large_dialog is None or not self.large_dialog.isVisible():
+            if self.large_dialog is None:
                 self.large_dialog = LargeMarginDataDialog(self.store_name, self.store_id, self.db, self)
-                self.large_dialog.exec_()
+                self.large_dialog.setAttribute(Qt.WA_QuitOnClose, False)
+                self.large_dialog.show()
+            else:
+                self.large_dialog.reload_data()
+                self.large_dialog.show()
+                self.large_dialog.activateWindow()
             self.is_reading_mode = False
             self.btn_reading_mode.setText("🔍 阅览模式")
             self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
         else:
+            if self.large_dialog and self.large_dialog.isVisible():
+                self.large_dialog.close()
             self.btn_reading_mode.setText("🔍 阅览模式")
             self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
             self.show_toast("已退出阅览模式")
@@ -910,7 +1118,7 @@ class StoreMarginDialog(QDialog):
         y = parent_pos.y() - 80
         self.toast_label.move(x, y)
         self.toast_label.show()
-        QTimer.singleShot(500, self.fade_out_toast)
+        QTimer.singleShot(1000, self.fade_out_toast)
 
     def fade_out_toast(self):
         """淡出气泡提示"""
@@ -1082,12 +1290,6 @@ class StoreMarginDialog(QDialog):
         header_layout.addWidget(self.lbl_title)
         header_layout.addStretch()
         header_layout.addWidget(self.lbl_total_margin)
-        self.lbl_total_orders = QLabel("总订单: 0")
-        self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
-        header_layout.addWidget(self.lbl_total_orders)
-        self.lbl_total_amount = QLabel("总销售额: ¥0.00")
-        self.lbl_total_amount.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
-        header_layout.addWidget(self.lbl_total_amount)
         layout.addWidget(header_widget)
 
         # ====== 板块2: 过往数据分析板块 ======
@@ -1097,7 +1299,7 @@ class StoreMarginDialog(QDialog):
         historical_layout.setContentsMargins(0, 0, 0, 0)
 
         # 板块标题
-        historical_title = QLabel("📈 过往数据分析（基于导入订单）")
+        historical_title = QLabel("📈 过往数据分析（基于ERP数据计算）")
         historical_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
         historical_layout.addWidget(historical_title)
 
@@ -1681,7 +1883,6 @@ class StoreMarginDialog(QDialog):
             self._update_order_label_for_row(row, weight_input, order_label, sys_id)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.calculate_total_margin()
-        self.update_total_orders_label()
         self.update_current_history_label()
         self.update_compare_columns()
 
@@ -2207,6 +2408,7 @@ class StoreMarginDialog(QDialog):
                 return
 
             imported_count = 0
+            overwritten_count = 0
             for row_idx in range(1, len(rows)):
                 row = rows[row_idx]
                 if not row or all(str(cell).strip() == "" for cell in row):
@@ -2323,11 +2525,18 @@ class StoreMarginDialog(QDialog):
                 else:
                     data["profit_per_order"] = 0
 
-                if self.save_manual_data(data):
+                result = self.save_manual_data(data)
+                if result == "new":
                     imported_count += 1
+                elif result == "overwrite":
+                    imported_count += 1
+                    overwritten_count += 1
 
             self.refresh_manual_data_display()
-            self.show_toast(f"✅ 已导入 {imported_count} 条数据")
+            if overwritten_count > 0:
+                self.show_toast(f"✅ 导入成功：新增 {imported_count - overwritten_count} 条，覆盖 {overwritten_count} 条")
+            else:
+                self.show_toast(f"✅ 已导入 {imported_count} 条数据")
 
         except Exception as e:
             QMessageBox.warning(self, "错误", f"导入失败: {e}")
@@ -2369,6 +2578,9 @@ class StoreMarginDialog(QDialog):
                 )
                 if reply != QMessageBox.Yes:
                     return False
+                is_overwrite = True
+            else:
+                is_overwrite = False
 
             created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2408,8 +2620,7 @@ class StoreMarginDialog(QDialog):
                 data.get("profit_per_order", 0),
                 created_time
             ))
-            self.show_toast("✅ 数据已保存")
-            return True
+            return "overwrite" if is_overwrite else "new"
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存失败: {e}")
             return False
@@ -3350,7 +3561,6 @@ class StoreMarginDialog(QDialog):
                     main_spec_label.setStyleSheet("color: black; font-size: 12px;")
             if weight_input and total_prod_orders > 0:
                 weight_input.setToolTip(f"订单数: {total_prod_orders}单")
-        self.update_total_orders_label()
         self.calculate_total_margin()
         self.db.safe_execute("UPDATE stores SET weight_synced=1 WHERE id=?", (self.store_id,))
         # 更新对比列
@@ -3360,122 +3570,45 @@ class StoreMarginDialog(QDialog):
         self.main_app.show_toast("✅ 订单权重已同步")
         self.main_app.refresh_store_weight_sync_flag(self.store_id)
 
-    def update_total_orders_label(self):
-        """更新总订单和综合客单价标签"""
-        imported_data = self.db.safe_fetchall(
-            "SELECT SUM(order_count) FROM imported_orders WHERE store_id=?",
-            (self.store_id,)
-        )
-        total = imported_data[0][0] if imported_data and imported_data[0][0] else 0
-        total_amount = 0.0
-        for row in range(self.table.rowCount()):
-            prod_id_item = self.table.item(row, 1)
-            if not prod_id_item:
-                continue
-            user_id = prod_id_item.data(Qt.UserRole)
-            if not user_id:
-                continue
-            sys_id = self.get_sys_id_by_user_id(user_id)
-            if not sys_id:
-                continue
-            spec_sales = self.db.safe_fetchall(
-                "SELECT ps.sale_price, io.order_count FROM product_specs ps "
-                "LEFT JOIN imported_orders io ON io.product_id = ps.product_id AND io.spec_code = ps.spec_code "
-                "WHERE ps.product_id = ?",
-                (sys_id,)
-            )
-            for sale_price, order_count in spec_sales:
-                if sale_price and order_count:
-                    total_amount += sale_price * order_count
-        if total > 0:
-            avg_price = total_amount / total
-            self.lbl_total_orders.setText(f"总订单: {total} | 综合客单价: ¥{avg_price:.2f}")
-        else:
-            self.lbl_total_orders.setText(f"总订单: 0")
-        self.lbl_total_amount.setText(f"总销售额: ¥{total_amount:.2f}")
-
     def update_current_history_label(self):
         """更新当前使用数据标签"""
         if not hasattr(self, 'lbl_current_history'):
             return
-        
-        # 获取最新的导入记录
-        latest_records = self.db.safe_fetchall("""
-            SELECT import_time, file_name, total_products, total_orders
-            FROM import_history
-            WHERE store_id=?
-            ORDER BY import_time DESC
-            LIMIT 1
+
+        latest_record = self.db.safe_fetchall("""
+            SELECT start_date, end_date, actual_orders, actual_amount, gross_profit,
+                   refund_amount, refund_orders, promotion_fee, deduction, other_service, other,
+                   gross_margin_rate, refund_rate_by_amount, refund_rate_by_orders,
+                   unit_price, promotion_ratio, tech_fee,
+                   net_profit, net_margin_rate, profit_per_order
+            FROM manual_margin_data WHERE store_id=? ORDER BY start_date DESC, end_date DESC LIMIT 1
         """, (self.store_id,))
-        
-        if latest_records:
-            latest_record = latest_records[0]
-            import_time, file_name, total_products, total_orders = latest_record
-            
-            # 获取订单日期范围（从 imported_orders 表的 order_date 字段，格式为 M/D 如 4/10）
-            # 需要收集所有日期，找出最早和最晚，组成单一范围
-            all_dates = self.db.safe_fetchall("""
-                SELECT order_date FROM imported_orders WHERE store_id=? AND order_date IS NOT NULL
-            """, (self.store_id,))
-            
-            order_range_str = "无日期"
-            if all_dates:
-                parsed_dates = []
-                for (date_val,) in all_dates:
-                    if date_val:
-                        # order_date 格式为 "M/D" 如 "4/10"
-                        try:
-                            if '~' in date_val:
-                                # 如果是范围如 "4/10~4/13"，拆开取两端
-                                parts = date_val.split('~')
-                                for p in parts:
-                                    if '/' in p:
-                                        m, d = p.split('/')
-                                        parsed_dates.append((int(m), int(d)))
-                            elif '/' in date_val:
-                                m, d = date_val.split('/')
-                                parsed_dates.append((int(m), int(d)))
-                        except:
-                            pass
-                
-                if parsed_dates:
-                    parsed_dates.sort()
-                    min_date = parsed_dates[0]
-                    max_date = parsed_dates[-1]
-                    if min_date != max_date:
-                        order_range_str = f"{min_date[0]}/{min_date[1]}-{max_date[0]}/{max_date[1]}"
-                    else:
-                        order_range_str = f"{min_date[0]}/{min_date[1]}"
-            
-            # 格式化导入时间：只保留几月几号（去除年份和具体时间）
-            if import_time:
-                import_date_str = import_time.split()[0] if ' ' in import_time else import_time
-                try:
-                    if '-' in import_date_str:
-                        parts = import_date_str.split('-')
-                        if len(parts) >= 2:
-                            month = int(parts[1])
-                            day = int(parts[2])
-                            import_date_formatted = f"{month}月{day}号"
-                        else:
-                            import_date_formatted = import_date_str
-                    else:
-                        import_date_formatted = import_date_str
-                except:
-                    import_date_formatted = import_date_str
+
+        if latest_record:
+            record = latest_record[0]
+            start_date = record[0] if record[0] else ""
+            end_date = record[1] if record[1] else ""
+
+            if start_date and len(start_date) >= 10:
+                start_display = start_date[5:10]
             else:
-                import_date_formatted = "未知"
-            
-            # 获取当前实际订单数
-            current_orders = self.db.safe_fetchall("""
-                SELECT SUM(order_count) FROM imported_orders WHERE store_id=?
-            """, (self.store_id,))
-            
-            current_total = current_orders[0][0] if current_orders and current_orders[0] and current_orders[0][0] else 0
-            
-            # 更新标签：显示订单时间范围 + 导入时间 + 单量
+                start_display = start_date
+
+            if end_date and len(end_date) >= 10:
+                end_display = end_date[5:10]
+            else:
+                end_display = end_date
+
+            if start_display == end_display:
+                date_str = start_display
+            else:
+                date_str = f"{start_display}~{end_display}"
+
+            net_profit = record[17] if record[17] else 0
+            net_margin = record[18] if record[18] else 0
+
             self.lbl_current_history.setText(
-                f"📍 订单: {order_range_str} | 导入: {import_date_formatted} | {current_total}单"
+                f"📍 最新: {date_str} | 净利润: ¥{net_profit:.2f} ({net_margin:.2f}%)"
             )
             self.lbl_current_history.setStyleSheet("""
                 QLabel {
