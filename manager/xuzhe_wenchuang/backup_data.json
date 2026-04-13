@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "export_time": "2026-04-13 13:48:02",
+  "stores": [
+    {
+      "id": 1,
+      "name": "1",
+      "sort_order": 1,
+      "memo": null,
+      "weight_synced": 0,
+      "image_data": null
+    }
+  ],
+  "products": [],
+  "product_specs": [],
+  "cost_library": [],
+  "imported_orders": [],
+  "import_history": [],
+  "records": [],
+  "store_records": [],
+  "daily_records": [],
+  "profit_records": [],
+  "historical_data": [],
+  "manual_margin_data": [],
+  "settings": {
+    "col_0_width": "400",
+    "scroll_vertical": "0",
+    "scroll_horizontal": "0"
+  }
+}

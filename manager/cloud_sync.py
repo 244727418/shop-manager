@@ -165,6 +165,17 @@ class CloudSyncManager:
         else:
             return os.path.dirname(os.path.abspath(__file__))
 
+    def get_last_used_credentials(self):
+        """从cloud_accounts.json获取最近使用过的凭证"""
+        accounts = self.get_all_accounts()
+        if accounts:
+            last_account = accounts[-1]
+            return {
+                'secret_id': last_account.get('secret_id', ''),
+                'secret_key': last_account.get('secret_key', '')
+            }
+        return None
+
     def set_local_backup_path(self, account_id, local_path):
         """设置账号的本地备份路径"""
         for acc in self.accounts:
@@ -235,33 +246,29 @@ class CloudSyncManager:
                     self.current_account = acc
                 return
 
-    def save_local_backup(self, account_id, data):
-        """保存本地备份"""
+    def save_local_backup(self, account_id, data=None):
+        """保存本地备份 - 直接复制db文件"""
         for acc in self.accounts:
             if acc.get('id') == account_id:
                 backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
                 try:
                     os.makedirs(backup_path, exist_ok=True)
-                    backup_file = os.path.join(backup_path, "backup_data.json")
-                    with open(backup_file, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    backup_file = os.path.join(backup_path, "backup.db")
+                    import shutil
+                    shutil.copy2(self.db.db_path, backup_file)
                     return True, backup_file
                 except Exception as e:
                     return False, str(e)
         return False, "账号不存在"
 
     def load_local_backup(self, account_id):
-        """加载本地备份"""
+        """加载本地备份 - 返回db文件路径"""
         for acc in self.accounts:
             if acc.get('id') == account_id:
                 backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
-                backup_file = os.path.join(backup_path, "backup_data.json")
+                backup_file = os.path.join(backup_path, "backup.db")
                 if os.path.exists(backup_file):
-                    try:
-                        with open(backup_file, 'r', encoding='utf-8') as f:
-                            return True, json.load(f)
-                    except Exception as e:
-                        return False, str(e)
+                    return True, backup_file
                 else:
                     return False, "本地备份文件不存在"
         return False, "账号不存在"
@@ -359,55 +366,50 @@ class CloudSyncManager:
             return None
 
     def import_data_from_json(self, data):
-        """从JSON导入数据到数据库"""
+        """从JSON导入数据到数据库（整体覆盖，先清空再导入）"""
         try:
+            self.db.safe_execute("DELETE FROM stores")
+            self.db.safe_execute("DELETE FROM products")
+            self.db.safe_execute("DELETE FROM product_specs")
+            self.db.safe_execute("DELETE FROM cost_library")
+            self.db.safe_execute("DELETE FROM imported_orders")
+            self.db.safe_execute("DELETE FROM import_history")
+            self.db.safe_execute("DELETE FROM records")
+            self.db.safe_execute("DELETE FROM store_records")
+            self.db.safe_execute("DELETE FROM daily_records")
+            self.db.safe_execute("DELETE FROM profit_records")
+            self.db.safe_execute("DELETE FROM historical_data")
+            self.db.safe_execute("DELETE FROM manual_margin_data")
+
             if data.get('stores'):
                 for store in data['stores']:
-                    store_id = store.pop('id', None)
-                    columns = list(store.keys())
-                    if store_id:
-                        existing = self.db.safe_fetchall("SELECT id FROM stores WHERE id=?", (store_id,))
-                        if existing:
-                            set_clause = ','.join([f"{col}=?" for col in columns])
-                            values = [self._safe_deserialize_value(store[col], col) for col in columns] + [store_id]
-                            self.db.safe_execute(f"UPDATE stores SET {set_clause} WHERE id=?", values)
-                        else:
-                            cols_with_id = ['id'] + columns
-                            vals = [store_id] + [self._safe_deserialize_value(store[col], col) for col in columns]
-                            placeholders = ','.join(['?'] * len(cols_with_id))
-                            self.db.safe_execute(f"INSERT INTO stores ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+                    store_id = store.get('id')
+                    columns = [col for col in store.keys() if col != 'id']
+                    if store_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [store_id] + [self._safe_deserialize_value(store[col], col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT INTO stores ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
 
             if data.get('products'):
                 for product in data['products']:
-                    product_id = product.pop('id', None)
-                    columns = list(product.keys())
-                    if product_id:
-                        existing = self.db.safe_fetchall("SELECT id FROM products WHERE id=?", (product_id,))
-                        if existing:
-                            set_clause = ','.join([f"{col}=?" for col in columns])
-                            values = [self._safe_deserialize_value(product[col], col) for col in columns] + [product_id]
-                            self.db.safe_execute(f"UPDATE products SET {set_clause} WHERE id=?", values)
-                        else:
-                            cols_with_id = ['id'] + columns
-                            vals = [product_id] + [self._safe_deserialize_value(product[col], col) for col in columns]
-                            placeholders = ','.join(['?'] * len(cols_with_id))
-                            self.db.safe_execute(f"INSERT INTO products ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+                    product_id = product.get('id')
+                    columns = [col for col in product.keys() if col != 'id']
+                    if product_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [product_id] + [self._safe_deserialize_value(product[col], col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT INTO products ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
 
             if data.get('product_specs'):
                 for spec in data['product_specs']:
-                    spec_id = spec.pop('id', None)
-                    columns = list(spec.keys())
-                    if spec_id:
-                        existing = self.db.safe_fetchall("SELECT id FROM product_specs WHERE id=?", (spec_id,))
-                        if existing:
-                            set_clause = ','.join([f"{col}=?" for col in columns])
-                            values = [self._safe_deserialize_value(spec[col], col) for col in columns] + [spec_id]
-                            self.db.safe_execute(f"UPDATE product_specs SET {set_clause} WHERE id=?", values)
-                        else:
-                            cols_with_id = ['id'] + columns
-                            vals = [spec_id] + [self._safe_deserialize_value(spec[col], col) for col in columns]
-                            placeholders = ','.join(['?'] * len(cols_with_id))
-                            self.db.safe_execute(f"INSERT INTO product_specs ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+                    spec_id = spec.get('id')
+                    columns = [col for col in spec.keys() if col != 'id']
+                    if spec_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [spec_id] + [self._safe_deserialize_value(spec[col], col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT INTO product_specs ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
 
             if data.get('cost_library'):
                 for item in data['cost_library']:
@@ -582,7 +584,10 @@ class TencentCOSUploader:
                 return False, "COS客户端未初始化，请安装SDK: pip install cos-python-sdk-v5"
 
         except Exception as e:
-            return False, str(e)
+            error_str = str(e)
+            if "NoSuchKey" in error_str or "does not exist" in error_str or "NoSuch" in error_str:
+                return False, "云端没有数据，请先上传"
+            return False, error_str
 
 
 class CloudSyncDialog(QDialog):
@@ -718,7 +723,7 @@ class CloudSyncDialog(QDialog):
                 color: white;
             }
         """)
-        self.account_list.itemDoubleClicked.connect(self.on_account_double_clicked)
+        self.account_list.itemClicked.connect(self.on_account_clicked)
         account_layout.addWidget(self.account_list)
 
         btn_layout = QHBoxLayout()
@@ -737,6 +742,22 @@ class CloudSyncDialog(QDialog):
             }
         """)
         self.btn_add_account.clicked.connect(self.show_add_account_dialog)
+
+        self.btn_switch_account = QPushButton("🔄 切换账号")
+        self.btn_switch_account.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        self.btn_switch_account.clicked.connect(self.switch_to_selected_account)
 
         self.btn_delete_account = QPushButton("🗑️ 删除")
         self.btn_delete_account.setStyleSheet("""
@@ -995,15 +1016,37 @@ class CloudSyncDialog(QDialog):
         except Exception as e:
             self._show_message_box(QMessageBox.Warning, "错误", f"无法打开文件夹：{e}")
 
-    def on_account_double_clicked(self, item):
-        """双击账号切换"""
+    def on_account_clicked(self, item):
+        """点击账号时切换到该账号并显示信息"""
         account_id = item.data(Qt.UserRole)
         if account_id:
-            self.cloud_manager.switch_account(account_id)
-            self.load_accounts_to_list()
-            if self.parent_window:
-                self.parent_window.show_toast(f"已切换到账号")
-            self.update_parent_data()
+            account = self.cloud_manager._find_account_by_id(account_id)
+            if account:
+                self.cloud_manager.switch_account(account_id)
+                self.cloud_manager._load_accounts()
+                self.load_accounts_to_list()
+                self.lbl_sync_status.setText(f"已选择账号：{account.get('name', '未知')}")
+                self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #3498db; padding: 5px;")
+                self.update_sync_info()
+
+    def switch_to_selected_account(self):
+        """切换到选中的账号"""
+        current_item = self.account_list.currentItem()
+        if not current_item:
+            self._show_message_box(QMessageBox.Warning, "提示", "请先在列表中选择一个账号")
+            return
+
+        account_id = current_item.data(Qt.UserRole)
+        if account_id:
+            account = self.cloud_manager._find_account_by_id(account_id)
+            if account:
+                self.cloud_manager.switch_account(account_id)
+                self.cloud_manager._load_accounts()
+                self.load_accounts_to_list()
+                self.lbl_sync_status.setText(f"已切换到账号：{account.get('name', '未知')}")
+                self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #27ae60; padding: 5px; font-weight: bold;")
+                QTimer.singleShot(2000, lambda: self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #888; padding: 5px;"))
+                self.update_sync_info()
 
     def show_add_account_dialog(self):
         """显示添加账号对话框"""
@@ -1020,7 +1063,7 @@ class CloudSyncDialog(QDialog):
         grid = QGridLayout()
         grid.addWidget(QLabel("账号名称："), 0, 0)
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("如：张三的店铺")
+        self.name_input.setPlaceholderText("如：zhangsan_leimu")
         grid.addWidget(self.name_input, 0, 1)
 
         grid.addWidget(QLabel("SecretId："), 1, 0)
@@ -1037,11 +1080,13 @@ class CloudSyncDialog(QDialog):
         grid.addWidget(QLabel("Bucket："), 3, 0)
         self.bucket_input = QLineEdit()
         self.bucket_input.setPlaceholderText("存储桶名称")
+        self.bucket_input.setText("dianpuguanli-1305093930")
         grid.addWidget(self.bucket_input, 3, 1)
 
         grid.addWidget(QLabel("Region："), 4, 0)
         self.region_input = QLineEdit()
         self.region_input.setPlaceholderText("地域，如 ap-guangzhou")
+        self.region_input.setText("ap-beijing")
         grid.addWidget(self.region_input, 4, 1)
 
         grid.addWidget(QLabel("数据文件夹："), 5, 0)
@@ -1095,6 +1140,11 @@ class CloudSyncDialog(QDialog):
         btn_layout.addWidget(btn_ok)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
+
+        saved_creds = self.cloud_manager.get_last_used_credentials()
+        if saved_creds:
+            self.secret_id_input.setText(saved_creds.get('secret_id', ''))
+            self.secret_key_input.setText(saved_creds.get('secret_key', ''))
 
         dialog.exec_()
 
@@ -1167,7 +1217,7 @@ class CloudSyncDialog(QDialog):
             self.progress_bar.setValue(40)
             self.lbl_sync_status.setText("正在保存本地备份...")
 
-            local_ok, local_result = self.cloud_manager.save_local_backup(current['id'], data)
+            local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
             if local_ok:
                 self.lbl_sync_status.setText(f"本地备份已保存: {local_result}")
             else:
@@ -1210,16 +1260,9 @@ class CloudSyncDialog(QDialog):
             self._show_message_box(QMessageBox.Warning, "提示", "请先添加并切换到要下载的账号")
             return
 
-        reply = self._show_question_box(
-            "确认下载",
-            "下载将覆盖本地数据！\n是否继续？"
-        )
-        if reply != QMessageBox.Yes:
-            return
-
         self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(30)
-        self.lbl_sync_status.setText("正在从云端下载...")
+        self.progress_bar.setValue(20)
+        self.lbl_sync_status.setText("正在检查云端数据...")
 
         try:
             uploader = TencentCOSUploader(
@@ -1230,31 +1273,55 @@ class CloudSyncDialog(QDialog):
             )
 
             success, result = uploader.download_json(current['folder'])
-            if success:
-                data_size = len(json.dumps(result, ensure_ascii=False))
-                size_mb = data_size / (1024 * 1024)
-                self.progress_bar.setValue(50)
-                self.lbl_sync_status.setText(f"正在保存本地备份... (下载了 {size_mb:.2f} MB)")
 
-                local_ok, local_result = self.cloud_manager.save_local_backup(current['id'], result)
-
-                self.progress_bar.setValue(70)
-                self.lbl_sync_status.setText(f"正在导入数据到本地... (下载了 {size_mb:.2f} MB)")
-
-                if self.cloud_manager.import_data_from_json(result):
-                    self.cloud_manager.update_last_download_time(current['id'])
-                    self.progress_bar.setValue(100)
-                    self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB)")
-                    if self.parent_window and hasattr(self.parent_window, 'show_toast'):
-                        self.parent_window.show_toast(f"✅ 下载成功！({size_mb:.2f} MB)")
-                    else:
-                        self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB) - 数据已导入")
-                    self.update_sync_info()
-                    self.update_parent_data()
+            if not success:
+                if "云端没有数据" in str(result):
+                    self.progress_bar.setVisible(False)
+                    self.lbl_sync_status.setText("云端没有数据，请先上传")
+                    self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #e74c3c; padding: 5px; font-weight: bold;")
+                    QTimer.singleShot(2000, lambda: self.lbl_sync_status.setStyleSheet("font-size: 12px; color: #27ae60; padding: 5px;"))
+                    self._show_message_box(QMessageBox.Information, "提示", "云端没有数据，请先上传！")
+                    return
                 else:
-                    self._show_message_box(QMessageBox.Critical, "错误", "数据导入失败")
+                    self.progress_bar.setVisible(False)
+                    self._show_message_box(QMessageBox.Critical, "错误", f"下载失败：{result}")
+                    return
+
+            if not result or len(result) == 0:
+                self.progress_bar.setVisible(False)
+                self.lbl_sync_status.setText("云端没有数据，请先上传")
+                self._show_message_box(QMessageBox.Information, "提示", "云端没有数据，请先上传！")
+                return
+
+            reply = self._show_question_box(
+                "确认下载",
+                "下载将覆盖本地数据！\n是否继续？"
+            )
+            if reply != QMessageBox.Yes:
+                self.progress_bar.setVisible(False)
+                return
+
+            self.progress_bar.setValue(30)
+            self.lbl_sync_status.setText("正在下载...")
+
+            data_size = len(json.dumps(result, ensure_ascii=False))
+            size_mb = data_size / (1024 * 1024)
+
+            self.progress_bar.setValue(50)
+
+            if self.cloud_manager.import_data_from_json(result):
+                self.cloud_manager.update_last_download_time(current['id'])
+                local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
+                self.progress_bar.setValue(100)
+                self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB)")
+                if self.parent_window and hasattr(self.parent_window, 'show_toast'):
+                    self.parent_window.show_toast(f"✅ 下载成功！({size_mb:.2f} MB)")
+                else:
+                    self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB) - 数据已导入")
+                self.update_sync_info()
+                self.update_parent_data()
             else:
-                self._show_message_box(QMessageBox.Critical, "错误", f"下载失败：{result}")
+                self._show_message_box(QMessageBox.Critical, "错误", "数据导入失败")
 
         except Exception as e:
             self._show_message_box(QMessageBox.Critical, "错误", f"下载异常：{str(e)}")

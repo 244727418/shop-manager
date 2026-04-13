@@ -21,6 +21,7 @@ class SafeDatabaseManager:
             else:
                 script_dir = os.path.dirname(os.path.abspath(__file__))
             db_path = os.path.join(script_dir, db_name)
+            self.db_path = db_path
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self.cursor = self.conn.cursor()
             self.init_db()

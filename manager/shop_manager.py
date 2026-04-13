@@ -388,12 +388,12 @@ class ShopManagerApp(QMainWindow):
         """打开知识库（已禁用）"""
         self.show_knowledge_base_disabled()
 
-    def open_github_repo(self):
-        """打开GitHub仓库页面"""
+    def open_pinduoduo(self):
+        """打开拼多多商家后台"""
         import webbrowser
-        url = self.github_manager.get_repo_url()
+        url = "https://mms.pinduoduo.com/login/?redirectUrl=https%3A%2F%2Fmms.pinduoduo.com%2F"
         webbrowser.open(url)
-        self.statusBar().showMessage(f"已打开GitHub仓库: {url}", 3000)
+        self.statusBar().showMessage(f"已打开拼多多商家后台: {url}", 3000)
 
     def check_github_connection(self):
         """检测GitHub连接状态并更新界面显示"""
@@ -706,42 +706,24 @@ class ShopManagerApp(QMainWindow):
         github_layout = QHBoxLayout(github_widget)
         github_layout.setContentsMargins(0, 0, 5, 0)
 
-        self.lbl_github_status = QLabel("🔗 检测中...")
-        self.lbl_github_status.setStyleSheet("color: #888; font-size: 12px; padding: 0 5px;")
-        self.lbl_github_status.setAlignment(Qt.AlignVCenter)
-        github_layout.addWidget(self.lbl_github_status)
-
-        self.btn_github = QPushButton("⭐ GitHub")
-        self.btn_github.setFixedSize(80, 24)
-        self.btn_github.setStyleSheet("""
-            background-color: #24292e;
-            color: #ffffff;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-        """)
-        self.btn_github.clicked.connect(self.open_github_repo)
-        self.btn_github.setToolTip(f"仓库: {self.github_manager.GITHUB_REPO_OWNER}/{self.github_manager.GITHUB_REPO_NAME}\n点击访问GitHub仓库")
-        github_layout.addWidget(self.btn_github)
-
-        self.btn_check_update = QPushButton("🔄 检查更新")
-        self.btn_check_update.setFixedSize(90, 26)
-        self.btn_check_update.setStyleSheet("""
-            background-color: #17a2b8;
-            color: #ffffff;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 0 8px;
-        """)
-        self.btn_check_update.clicked.connect(self.check_for_updates)
-        self.btn_check_update.setToolTip("检查软件更新")
-        github_layout.addWidget(self.btn_check_update)
-
         self.lbl_cloud_account = QLabel("未登录")
         self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 12px; padding: 0 5px;")
         self.lbl_cloud_account.setAlignment(Qt.AlignVCenter)
         github_layout.addWidget(self.lbl_cloud_account)
+
+        self.btn_pinduoduo = QPushButton("🛒 拼多多")
+        self.btn_pinduoduo.setFixedSize(80, 24)
+        self.btn_pinduoduo.setStyleSheet("""
+            background-color: #dc3545;
+            color: #ffffff;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 1px;
+        """)
+        self.btn_pinduoduo.clicked.connect(self.open_pinduoduo)
+        self.btn_pinduoduo.setToolTip("打开拼多多商家后台")
+        github_layout.addWidget(self.btn_pinduoduo)
 
         self.btn_cloud_login = QPushButton("☁️ 云同步")
         self.btn_cloud_login.setFixedSize(80, 24)
@@ -758,9 +740,6 @@ class ShopManagerApp(QMainWindow):
         github_layout.addWidget(self.btn_cloud_login)
 
         self.statusBar().addPermanentWidget(github_widget)
-
-        # 启动时检测GitHub连接
-        QTimer.singleShot(1000, self.check_github_connection)
 
         toolbar.addWidget(btn_add_store)
         
