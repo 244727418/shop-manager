@@ -274,89 +274,32 @@ class CloudSyncManager:
         return False, "账号不存在"
 
     def export_data_to_json(self):
-        """导出数据库数据为JSON"""
+        """导出数据库数据为JSON（动态获取所有表）"""
         try:
             data = {
                 'version': '1.0',
-                'export_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'stores': [],
-                'products': [],
-                'product_specs': [],
-                'cost_library': [],
-                'imported_orders': [],
-                'import_history': [],
-                'records': [],
-                'store_records': [],
-                'daily_records': [],
-                'profit_records': [],
-                'historical_data': [],
-                'manual_margin_data': [],
-                'settings': {}
+                'export_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
 
-            stores = self.db.safe_fetchall("SELECT * FROM stores")
-            for store in stores:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['stores'].append(self._convert_row_to_dict(columns, store))
+            self.db.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = self.db.cursor.fetchall()
 
-            products = self.db.safe_fetchall("SELECT * FROM products")
-            for product in products:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['products'].append(self._convert_row_to_dict(columns, product))
+            for (table_name,) in tables:
+                if table_name in ('sqlite_sequence', 'sqlite_stat1', 'sqlite_stat2', 'sqlite_stat3', 'sqlite_stat4'):
+                    continue
 
-            specs = self.db.safe_fetchall("SELECT * FROM product_specs")
-            for spec in specs:
+                self.db.cursor.execute(f"SELECT * FROM {table_name}")
+                rows = self.db.cursor.fetchall()
                 columns = [desc[0] for desc in self.db.cursor.description]
-                data['product_specs'].append(self._convert_row_to_dict(columns, spec))
 
-            cost_items = self.db.safe_fetchall("SELECT * FROM cost_library")
-            for item in cost_items:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['cost_library'].append(self._convert_row_to_dict(columns, item))
+                table_data = []
+                for row in rows:
+                    row_dict = {}
+                    for col, val in zip(columns, row):
+                        row_dict[col] = self._safe_serialize_value(val)
+                    table_data.append(row_dict)
 
-            orders = self.db.safe_fetchall("SELECT * FROM imported_orders")
-            for order in orders:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['imported_orders'].append(self._convert_row_to_dict(columns, order))
-
-            hist = self.db.safe_fetchall("SELECT * FROM import_history")
-            for h in hist:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['import_history'].append(self._convert_row_to_dict(columns, h))
-
-            records = self.db.safe_fetchall("SELECT * FROM records")
-            for r in records:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['records'].append(self._convert_row_to_dict(columns, r))
-
-            store_records = self.db.safe_fetchall("SELECT * FROM store_records")
-            for sr in store_records:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['store_records'].append(self._convert_row_to_dict(columns, sr))
-
-            daily = self.db.safe_fetchall("SELECT * FROM daily_records")
-            for d in daily:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['daily_records'].append(self._convert_row_to_dict(columns, d))
-
-            profit = self.db.safe_fetchall("SELECT * FROM profit_records")
-            for p in profit:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['profit_records'].append(self._convert_row_to_dict(columns, p))
-
-            historical = self.db.safe_fetchall("SELECT * FROM historical_data")
-            for h in historical:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['historical_data'].append(self._convert_row_to_dict(columns, h))
-
-            manual_margin = self.db.safe_fetchall("SELECT * FROM manual_margin_data")
-            for m in manual_margin:
-                columns = [desc[0] for desc in self.db.cursor.description]
-                data['manual_margin_data'].append(self._convert_row_to_dict(columns, m))
-
-            settings = self.db.safe_fetchall("SELECT key, value FROM settings")
-            for key, value in settings:
-                data['settings'][key] = self._safe_serialize_value(value)
+                data[table_name] = table_data
 
             return data
         except Exception as e:
@@ -368,6 +311,16 @@ class CloudSyncManager:
     def import_data_from_json(self, data):
         """从JSON导入数据到数据库（整体覆盖，先清空再导入）"""
         try:
+            if not data or 'version' not in data:
+                return False
+
+            if data.get('settings') and isinstance(data['settings'], list):
+                settings_dict = {}
+                for item in data['settings']:
+                    if isinstance(item, dict) and 'key' in item:
+                        settings_dict[item['key']] = item['value']
+                data['settings'] = settings_dict
+
             self.db.safe_execute("DELETE FROM stores")
             self.db.safe_execute("DELETE FROM products")
             self.db.safe_execute("DELETE FROM product_specs")
@@ -380,6 +333,7 @@ class CloudSyncManager:
             self.db.safe_execute("DELETE FROM profit_records")
             self.db.safe_execute("DELETE FROM historical_data")
             self.db.safe_execute("DELETE FROM manual_margin_data")
+            self.db.safe_execute("DELETE FROM settings")
 
             if data.get('stores'):
                 for store in data['stores']:
@@ -423,8 +377,8 @@ class CloudSyncManager:
             if data.get('imported_orders'):
                 for order in data['imported_orders']:
                     self.db.safe_execute(
-                        """INSERT OR REPLACE INTO imported_orders 
-                        (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount) 
+                        """INSERT OR REPLACE INTO imported_orders
+                        (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount)
                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (order.get('store_id'), order.get('product_id'), order.get('spec_code'),
                          order.get('order_count', 0), order.get('import_time'), order.get('order_date'),
@@ -434,8 +388,8 @@ class CloudSyncManager:
             if data.get('import_history'):
                 for hist in data['import_history']:
                     self.db.safe_execute(
-                        """INSERT OR REPLACE INTO import_history 
-                        (store_id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data) 
+                        """INSERT OR REPLACE INTO import_history
+                        (store_id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (hist.get('store_id'), hist.get('import_time'), hist.get('file_name'),
                          hist.get('total_products', 0), hist.get('total_specs', 0), hist.get('total_orders', 0),
@@ -445,7 +399,7 @@ class CloudSyncManager:
             if data.get('records'):
                 for record in data['records']:
                     self.db.safe_execute(
-                        """INSERT OR REPLACE INTO records 
+                        """INSERT OR REPLACE INTO records
                         (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)""",
                         (record.get('product_id'), record.get('year'), record.get('month'),
                          record.get('day'), record.get('records_json'))
@@ -454,7 +408,7 @@ class CloudSyncManager:
             if data.get('store_records'):
                 for sr in data['store_records']:
                     self.db.safe_execute(
-                        """INSERT OR REPLACE INTO store_records 
+                        """INSERT OR REPLACE INTO store_records
                         (store_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)""",
                         (sr.get('store_id'), sr.get('year'), sr.get('month'),
                          sr.get('day'), sr.get('records_json'))
@@ -463,7 +417,7 @@ class CloudSyncManager:
             if data.get('daily_records'):
                 for dr in data['daily_records']:
                     self.db.safe_execute(
-                        """INSERT OR REPLACE INTO daily_records 
+                        """INSERT OR REPLACE INTO daily_records
                         (store_id, record_date, category, special_info, memo) VALUES (?, ?, ?, ?, ?)""",
                         (dr.get('store_id'), dr.get('record_date'), dr.get('category'),
                          dr.get('special_info'), dr.get('memo'))
@@ -504,7 +458,50 @@ class CloudSyncManager:
 
             if data.get('settings'):
                 for key, value in data['settings'].items():
-                    self.db.set_setting(key, value)
+                    self.db.safe_execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                        (key, value)
+                    )
+
+            if data.get('ai_prompts'):
+                for prompt in data['ai_prompts']:
+                    prompt_id = prompt.get('id')
+                    columns = [col for col in prompt.keys() if col != 'id']
+                    if prompt_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [prompt_id] + [prompt.get(col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT OR REPLACE INTO ai_prompts ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+
+            if data.get('ai_common_prompts'):
+                for prompt in data['ai_common_prompts']:
+                    prompt_id = prompt.get('id')
+                    columns = [col for col in prompt.keys() if col != 'id']
+                    if prompt_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [prompt_id] + [prompt.get(col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT OR REPLACE INTO ai_common_prompts ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+
+            if data.get('store_prompts'):
+                for prompt in data['store_prompts']:
+                    prompt_id = prompt.get('id')
+                    columns = [col for col in prompt.keys() if col != 'id']
+                    if prompt_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [prompt_id] + [prompt.get(col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT OR REPLACE INTO store_prompts ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
+
+            if data.get('knowledge_base'):
+                for kb in data['knowledge_base']:
+                    kb_id = kb.get('id')
+                    columns = [col for col in kb.keys() if col != 'id']
+                    if kb_id is not None and columns:
+                        cols_with_id = ['id'] + columns
+                        vals = [kb_id] + [kb.get(col) for col in columns]
+                        placeholders = ','.join(['?'] * len(cols_with_id))
+                        self.db.safe_execute(f"INSERT OR REPLACE INTO knowledge_base ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
 
             self.db.conn.commit()
             return True
@@ -1004,6 +1001,8 @@ class CloudSyncDialog(QDialog):
             default_path = os.path.join(self.cloud_manager._get_base_dir(), current.get('folder', current.get('name', 'backup')))
             folder_path = default_path
 
+        folder_path = os.path.normpath(folder_path)
+
         if not os.path.exists(folder_path):
             try:
                 os.makedirs(folder_path, exist_ok=True)
@@ -1012,7 +1011,7 @@ class CloudSyncDialog(QDialog):
                 return
 
         try:
-            subprocess.Popen(f'explorer "{folder_path}"')
+            subprocess.Popen(f'start "" "{folder_path}"', shell=True)
         except Exception as e:
             self._show_message_box(QMessageBox.Warning, "错误", f"无法打开文件夹：{e}")
 
@@ -1202,6 +1201,13 @@ class CloudSyncDialog(QDialog):
         current = self.cloud_manager.get_current_account()
         if not current:
             self._show_message_box(QMessageBox.Warning, "提示", "请先添加并切换到要上传的账号")
+            return
+
+        reply = self._show_question_box(
+            "确认上传",
+            f"上传将覆盖云端存档！\n\n账号：{current.get('name', '未知')}\n是否继续上传？"
+        )
+        if reply != QMessageBox.Yes:
             return
 
         self.progress_bar.setVisible(True)
