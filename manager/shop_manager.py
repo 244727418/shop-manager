@@ -298,9 +298,18 @@ class ShopManagerApp(QMainWindow):
         self.github_manager = GitHubUpdateManager(VERSION)
         self.github_manager.current_version = VERSION
 
+        # 初始化云同步管理器
+        self.cloud_manager = None
+        try:
+            from manager.cloud_sync import CloudSyncManager
+            self.cloud_manager = CloudSyncManager(self.db)
+        except Exception as e:
+            print(f"云同步管理器初始化失败: {e}")
+
         self.init_ui()
         self.load_data_safe()
-        
+        self.update_cloud_account_label()
+
         self.installEventFilter(self)
         
         # 初始化系统托盘
@@ -728,6 +737,25 @@ class ShopManagerApp(QMainWindow):
         self.btn_check_update.clicked.connect(self.check_for_updates)
         self.btn_check_update.setToolTip("检查软件更新")
         github_layout.addWidget(self.btn_check_update)
+
+        self.lbl_cloud_account = QLabel("未登录")
+        self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 12px; padding: 0 5px;")
+        self.lbl_cloud_account.setAlignment(Qt.AlignVCenter)
+        github_layout.addWidget(self.lbl_cloud_account)
+
+        self.btn_cloud_login = QPushButton("☁️ 云同步")
+        self.btn_cloud_login.setFixedSize(80, 24)
+        self.btn_cloud_login.setStyleSheet("""
+            background-color: #009688;
+            color: #ffffff;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 1px;
+        """)
+        self.btn_cloud_login.clicked.connect(self.show_cloud_login_dialog)
+        self.btn_cloud_login.setToolTip("云同步账号管理")
+        github_layout.addWidget(self.btn_cloud_login)
 
         self.statusBar().addPermanentWidget(github_widget)
 
@@ -2327,7 +2355,36 @@ class ShopManagerApp(QMainWindow):
         """打开成本库管理窗口"""
         dialog = CostLibraryDialog(self.db, self)
         dialog.show()
-    
+
+    def show_cloud_login_dialog(self):
+        """打开云同步登录窗口"""
+        try:
+            from manager.cloud_sync import CloudSyncDialog
+            dialog = CloudSyncDialog(self.db, self)
+            dialog.exec_()
+            self.update_cloud_account_label()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"打开云同步窗口失败：\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def update_cloud_account_label(self):
+        """更新云账号显示标签"""
+        try:
+            if hasattr(self, 'cloud_manager') and self.cloud_manager:
+                current = self.cloud_manager.get_current_account()
+                if current:
+                    self.lbl_cloud_account.setText(f"☁️ {current.get('name', '未知')}")
+                    self.lbl_cloud_account.setStyleSheet("color: #27ae60; font-size: 11px; padding: 0 5px;")
+                else:
+                    self.lbl_cloud_account.setText("未登录")
+                    self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 11px; padding: 0 5px;")
+            else:
+                self.lbl_cloud_account.setText("未登录")
+                self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 11px; padding: 0 5px;")
+        except Exception as e:
+            print(f"更新云账号标签失败: {e}")
+
     def show_api_config_dialog(self):
         """打开API配置窗口"""
         dialog = ApiConfigDialog(self.db, self)
@@ -2398,22 +2455,22 @@ if __name__ == "__main__":
     
     style = """
     QPushButton {
-        background-color: #3498db;
-        color: white;
-        border: none;
+        background-color: #f0f0f0;
+        color: #333;
+        border: 1px solid #ccc;
         padding: 8px 16px;
         border-radius: 6px;
         font-size: 13px;
     }
     QPushButton:hover {
-        background-color: #2980b9;
+        background-color: #e0e0e0;
     }
     QPushButton:pressed {
-        background-color: #1c6ea4;
+        background-color: #d0d0d0;
     }
     QPushButton:disabled {
-        background-color: #bdc3c7;
-        color: #7f8c8d;
+        background-color: #f5f5f5;
+        color: #999;
     }
     QLineEdit, QTextEdit, QSpinBox, QComboBox {
         border: 1px solid #dcdcdc;

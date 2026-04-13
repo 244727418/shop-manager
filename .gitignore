@@ -91,5 +91,7 @@ shop_manager/sentence-transformers/
 
 # 配置文件（有密钥，不上传）
 config.json
-manager/config.json 
+manager/config.json
+ # 密钥配置文件（不上传）
+manager/cloud_accounts.json
  
