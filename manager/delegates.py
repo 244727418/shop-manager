@@ -13,8 +13,10 @@ class SpecNameDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setMaxLength(self.max_length)
-        # 设置输入框高度与行高匹配
-        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
+        editor.setFixedHeight(option.rect.height() - 4)
+        font = editor.font()
+        font.setPointSize(font.pointSize() + 1)
+        editor.setFont(font)
         return editor
 
 
@@ -26,8 +28,10 @@ class CenterAlignDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setAlignment(Qt.AlignCenter)
-        # 设置输入框高度与行高匹配
-        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
+        editor.setFixedHeight(option.rect.height() - 4)
+        font = editor.font()
+        font.setPointSize(font.pointSize() + 1)
+        editor.setFont(font)
         return editor
 
     def paint(self, painter, option, index):
@@ -35,6 +39,8 @@ class CenterAlignDelegate(QStyledItemDelegate):
         painter.fillRect(option.rect, option.backgroundBrush)
         text = index.data(Qt.DisplayRole)
         if text:
+            option.font.setPointSize(option.font.pointSize() + 1)
+            painter.setFont(option.font)
             painter.drawText(option.rect, Qt.AlignCenter, str(text))
         painter.restore()
 
@@ -54,15 +60,20 @@ class WeightDelegate(QStyledItemDelegate):
         h = rect.height()
         text_rect = QRect(rect.left(), rect.top(), w, h)
         icon_rect = QRect(rect.right() - self.icon_width, rect.top(), self.icon_width, h)
-        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, num_text)
+        font = painter.font()
+        font.setPointSize(font.pointSize() + 1)
+        painter.setFont(font)
+        painter.drawText(text_rect, Qt.AlignCenter, num_text)
         if is_locked:
             painter.drawText(icon_rect, Qt.AlignCenter, self.lock_icon)
 
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
-        editor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        # 设置输入框高度与行高匹配
-        editor.setFixedHeight(option.rect.height() - 4)  # 减去边距
+        editor.setAlignment(Qt.AlignCenter)
+        editor.setFixedHeight(option.rect.height() - 4)
+        font = editor.font()
+        font.setPointSize(font.pointSize() + 1)
+        editor.setFont(font)
         text = index.data(Qt.DisplayRole) or ""
         num_text = text.replace("🔒", "").strip()
         import re

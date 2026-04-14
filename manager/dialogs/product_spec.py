@@ -370,18 +370,28 @@ class ProductSpecDialog(QDialog):
             "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "操作"
         ])
         
-        # 设置列宽策略 - AI列固定较小宽度，其他列自适应拉伸
+        # 设置列宽策略 - AI列和规格名称列固定宽度，其他列自适应拉伸
         header = self.table.horizontalHeader()
 
         # AI按钮列(索引0)固定宽度
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 50)
 
+        # 规格名称列(索引1)固定宽度（增加40像素）
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        self.table.setColumnWidth(1, 180)
+
         # 其他列自适应拉伸
-        for i in range(1, 12):
+        for i in range(2, 12):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 
         self.table.setAlternatingRowColors(True)
+
+        # 设置表格字体和样式
+        self.table.setStyleSheet("""
+            QTableWidget { font-size: 14px; }
+            QTableWidget::item { text-align: center; font-weight: bold; }
+        """)
         
         # 设置默认行高，确保输入框显示完整
         self.table.verticalHeader().setDefaultSectionSize(35)  # 设置合适的行高
@@ -389,9 +399,9 @@ class ProductSpecDialog(QDialog):
         # 启用自动行高调整
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         
-        # 设置数值列居中显示（关联编码、自动成本、手动售价、券后价、单规格毛利）
+        # 设置数值列居中显示（关联编码、自动成本、手动售价、券后价、单规格毛利、权重%）
         self.center_delegate = CenterAlignDelegate(self)
-        for col in [2, 3, 4, 5, 6]:
+        for col in [2, 3, 4, 5, 6, 7]:
             self.table.setItemDelegateForColumn(col, self.center_delegate)
         
         layout.addWidget(self.table)
