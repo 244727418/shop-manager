@@ -1886,6 +1886,7 @@ class StoreMarginDialog(QDialog):
         self.table.cellChanged.connect(self.on_cell_changed)
         self.calculate_total_margin()
         self.update_current_history_label()
+        self.update_orders_display()
         self.update_compare_columns()
 
     def update_product_avg_price(self):
@@ -3552,22 +3553,41 @@ class StoreMarginDialog(QDialog):
                 WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
                 ORDER BY import_time DESC
             """, (self.store_id,))
-            
+
             for hist_id, snapshot_data in all_history:
                 try:
                     snapshot = json.loads(snapshot_data)
-                    order_date = snapshot.get("order_date", "")
-                    if order_date and '~' in order_date:
-                        parts = order_date.split('~')
-                        if len(parts) == 2:
-                            prev_end_date = parts[1].strip()
-                            # 找小于当前结束日期的最接近的那一期
-                            if prev_end_date < current_end_date:
-                                last_history_data = (snapshot_data, order_date)
-                                break
+                    # 从订单数据中解析日期范围
+                    orders = snapshot.get("orders", {})
+                    all_dates = []
+                    for key, data in orders.items():
+                        if isinstance(data, dict) and "dates" in data:
+                            for date_val in data.get("dates", []):
+                                if date_val and '/' in date_val:
+                                    try:
+                                        if '~' in date_val:
+                                            for p in date_val.split('~'):
+                                                if '/' in p:
+                                                    m, d = p.split('/')
+                                                    all_dates.append((int(m), int(d)))
+                                        else:
+                                            m, d = date_val.split('/')
+                                            all_dates.append((int(m), int(d)))
+                                    except:
+                                        pass
+                    if all_dates:
+                        all_dates.sort()
+                        prev_end_date = f"{all_dates[-1][0]}/{all_dates[-1][1]}"
+                        # 找小于当前结束日期的最接近的那一期
+                        curr_parts = current_end_date.split('/')
+                        curr_m, curr_d = int(curr_parts[0]), int(curr_parts[1])
+                        prev_m, prev_d = int(all_dates[-1][0]), int(all_dates[-1][1])
+                        if prev_m < curr_m or (prev_m == curr_m and prev_d < curr_d):
+                            last_history_data = (snapshot_data, snapshot)
+                            break
                 except:
                     pass
-        
+
         # 如果没找到按日期的对比，取最新的历史记录
         if not last_history_data:
             last_history = self.db.safe_fetchall("""
