@@ -4,11 +4,11 @@
 """
 import os
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
-    QTimeEdit, QDialog, QSizePolicy
+    QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit
 )
-from PyQt5.QtCore import Qt, QEvent, QTime, QSize
+from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate
 from PyQt5.QtGui import QPixmap, QIcon
 
 
@@ -465,7 +465,7 @@ class StoreWidget(QWidget):
         self.sync_flag_label.hide()
 
         self.label = QLabel(f" {store_name}")
-        self.label.setStyleSheet("background-color: #ffe0b2; font-weight: bold; padding: 1px; border-radius: 5px;")
+        self.label.setStyleSheet("background-color: #87CEEB; font-weight: bold; padding: 1px; border-radius: 5px;")
         self.label.setWordWrap(True)
         self.label.setCursor(Qt.PointingHandCursor)
         self.label.setToolTip("左键双击查看店铺毛利 | 右键双击编辑店铺备注")
@@ -809,12 +809,28 @@ class StoreWidget(QWidget):
 
 class RecordRow(QWidget):
     """单条操作记录的输入行"""
-    def __init__(self, time_str="", text=""):
+    def __init__(self, time_str="", text="", with_task_buttons=False, parent_dialog=None):
         super().__init__()
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        self.parent_dialog = parent_dialog
+        self.with_task_buttons = with_task_buttons
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        row1 = QWidget()
+        row1.setStyleSheet("border-bottom: 1px solid #ddd; background-color: #fafafa;")
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(3, 2, 3, 2)
+        row1_layout.setSpacing(3)
+
+        time_label = QLabel("🕐")
+        time_label.setFixedWidth(20)
+        row1_layout.addWidget(time_label)
+
         self.time_edit = QTimeEdit()
         self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.setFixedWidth(55)
         if time_str:
             try:
                 self.time_edit.setTime(QTime.fromString(time_str, "HH:mm"))
@@ -822,17 +838,88 @@ class RecordRow(QWidget):
                 self.time_edit.setTime(QTime.currentTime())
         else:
             self.time_edit.setTime(QTime.currentTime())
+        row1_layout.addWidget(self.time_edit)
+
+        text_label = QLabel("📝")
+        text_label.setFixedWidth(20)
+        row1_layout.addWidget(text_label)
+
         self.text_edit = QTextEdit(text)
-        self.text_edit.setFixedHeight(40)
-        self.btn_del = QPushButton("×")
-        self.btn_del.setFixedSize(24, 24)
-        self.btn_del.clicked.connect(self.deleteLater)
-        layout.addWidget(self.time_edit)
-        layout.addWidget(self.text_edit)
-        layout.addWidget(self.btn_del)
+        self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.text_edit.setMinimumHeight(30)
+        self.text_edit.setMaximumHeight(60)
+        self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        row1_layout.addWidget(self.text_edit, 1)
+
+        self.btn_del = QPushButton("🗑")
+        self.btn_del.setFixedSize(22, 22)
+        self.btn_del.setStyleSheet("padding: 0px; border: none; background: transparent;")
+        self.btn_del.clicked.connect(self.on_delete_clicked)
+        row1_layout.addWidget(self.btn_del)
+
+        main_layout.addWidget(row1)
+
+        if with_task_buttons:
+            row2 = QWidget()
+            row2.setStyleSheet("background-color: #f0f7ff;")
+            row2_layout = QHBoxLayout(row2)
+            row2_layout.setContentsMargins(3, 2, 3, 2)
+            row2_layout.setSpacing(8)
+
+            self.chk_task = QCheckBox("☑️ 任务")
+            self.chk_task.setFixedWidth(70)
+            row2_layout.addWidget(self.chk_task)
+
+            self.chk_reminder = QCheckBox("🔔 提醒")
+            self.chk_reminder.setFixedWidth(70)
+            self.chk_reminder.stateChanged.connect(self.on_reminder_toggled)
+            row2_layout.addWidget(self.chk_reminder)
+
+            date_label = QLabel("📅")
+            date_label.setFixedWidth(20)
+            row2_layout.addWidget(date_label)
+
+            tomorrow = QDate.currentDate().addDays(1)
+            self.reminder_date = QDateEdit()
+            self.reminder_date.setCalendarPopup(True)
+            self.reminder_date.setDate(tomorrow)
+            self.reminder_date.setDisplayFormat("yyyy-MM-dd")
+            self.reminder_date.setFixedWidth(105)
+            self.reminder_date.setVisible(False)
+            row2_layout.addWidget(self.reminder_date)
+
+            time_label2 = QLabel("⏰")
+            time_label2.setFixedWidth(20)
+            row2_layout.addWidget(time_label2)
+
+            self.reminder_time = QTimeEdit()
+            self.reminder_time.setDisplayFormat("HH:mm")
+            self.reminder_time.setFixedWidth(55)
+            self.reminder_time.setVisible(False)
+            row2_layout.addWidget(self.reminder_time)
+
+            row2_layout.addStretch()
+
+            main_layout.addWidget(row2)
+
+    def on_reminder_toggled(self, state):
+        if hasattr(self, 'reminder_date'):
+            self.reminder_date.setVisible(state == Qt.Checked)
+        if hasattr(self, 'reminder_time'):
+            self.reminder_time.setVisible(state == Qt.Checked)
+
+    def on_delete_clicked(self):
+        self.deleteLater()
 
     def get_data(self):
-        return {"time": self.time_edit.time().toString("HH:mm"), "text": self.text_edit.toPlainText().strip()}
+        data = {"time": self.time_edit.time().toString("HH:mm"), "text": self.text_edit.toPlainText().strip()}
+        if self.with_task_buttons:
+            data["add_task"] = self.chk_task.isChecked()
+            data["add_reminder"] = self.chk_reminder.isChecked()
+            if data["add_reminder"]:
+                data["reminder_datetime"] = f"{self.reminder_date.date().toString('yyyy-MM-dd')} {self.reminder_time.time().toString('HH:mm')}"
+        return data
 
 
 class InPlaceEditor(QWidget):

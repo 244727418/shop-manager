@@ -14,7 +14,7 @@ except ImportError:
 
 class OperationRecordDialog(QDialog):
     """操作记录弹窗编辑对话框"""
-    def __init__(self, records, prod_id, prod_code, year, month, day, save_callback, parent=None):
+    def __init__(self, records, prod_id, prod_code, year, month, day, save_callback, parent=None, store_id=None, store_name=None):
         super().__init__(parent)
         self.records = records
         self.prod_id = prod_id
@@ -23,31 +23,28 @@ class OperationRecordDialog(QDialog):
         self.month = month
         self.day = day
         self.save_callback = save_callback
+        self.store_id = store_id
+        self.store_name = store_name
         self.rows = []
 
         self.setWindowTitle(f"编辑操作记录 - {year}年{month:02d}月{day:02d}日")
-        self.resize(500, 400)
+        self.resize(550, 450)
         self.init_ui()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-
-
-        self._debug_ord_label = QLabel("【板块:操作记录对话框\n文件:records.py】商品ID/日期/操作列表/添加删除")
-        self._debug_ord_label.setStyleSheet("background-color: #87CEEB; color: #000; font-weight: bold; padding: 1px;")
-        self._debug_ord_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main_layout.addWidget(self._debug_ord_label)
-
-        info_label = QLabel(f"商品ID: {self.prod_code} | 日期: {self.year}年{self.month:02d}月{self.day:02d}日")
-        info_label.setStyleSheet("font-weight: bold; color: #333; padding: 5px;")
-        main_layout.addWidget(info_label)
+        main_layout.setSpacing(5)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll_widget = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
+        self.scroll_layout.setSpacing(0)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setAlignment(Qt.AlignTop)
         self.scroll.setWidget(self.scroll_widget)
+        self.scroll.setMinimumHeight(150)
+        self.scroll.setMaximumHeight(200)
 
         for rec in self.records:
             self.add_row(rec.get("time", ""), rec.get("text", ""))
@@ -57,26 +54,31 @@ class OperationRecordDialog(QDialog):
         main_layout.addWidget(self.scroll)
 
         bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(10)
+
         btn_add = QPushButton("+ 加一行")
+        btn_add.setStyleSheet("padding: 5px 15px;")
         btn_add.clicked.connect(lambda: self.add_row())
-        btn_save = QPushButton("保存")
+
+        btn_save = QPushButton("💾 保存")
         btn_save.setStyleSheet("""
             QPushButton {
                 background-color: #28a745;
                 color: white;
-                padding: 6px 20px;
+                padding: 5px 20px;
                 border-radius: 4px;
                 font-weight: bold;
             }
             QPushButton:hover { background-color: #218838; }
         """)
         btn_save.clicked.connect(self.save)
+
         btn_cancel = QPushButton("取消")
         btn_cancel.setStyleSheet("""
             QPushButton {
                 background-color: #6c757d;
                 color: white;
-                padding: 6px 20px;
+                padding: 5px 20px;
                 border-radius: 4px;
             }
             QPushButton:hover { background-color: #5a6268; }
@@ -91,21 +93,61 @@ class OperationRecordDialog(QDialog):
         main_layout.addLayout(bottom_layout)
 
     def add_row(self, time_str="", text=""):
-        row = RecordRow(time_str, text)
+        row = RecordRow(time_str, text, with_task_buttons=True, parent_dialog=self)
         self.scroll_layout.addWidget(row)
         self.rows.append(row)
 
     def save(self):
         data = []
+        task_list = []
+        reminder_list = []
+
         for row in self.rows:
             try:
                 row_data = row.get_data()
                 if row_data and row_data.get("text"):
-                    data.append(row_data)
+                    data.append({"time": row_data.get("time", ""), "text": row_data.get("text", "")})
+
+                    if row_data.get("add_task"):
+                        task_list.append(row_data.get("text", ""))
+
+                    if row_data.get("add_reminder"):
+                        reminder_list.append({
+                            "text": row_data.get("text", ""),
+                            "datetime": row_data.get("reminder_datetime", "")
+                        })
             except Exception:
                 continue
 
         self.save_callback(data)
+
+        if task_list or reminder_list:
+            try:
+                from datetime import datetime
+                created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                for task_text in task_list:
+                    self.parent().db.safe_execute(
+                        """INSERT INTO daily_tasks (store_id, product_id, year, month, day, task_content, created_time)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (self.store_id, self.prod_id, self.year, self.month, self.day, task_text, created_time)
+                    )
+
+                for reminder in reminder_list:
+                    self.parent().db.safe_execute(
+                        """INSERT INTO task_reminders (store_id, product_id, task_content, remind_time, created_time)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (self.store_id, self.prod_id, reminder["text"], reminder["datetime"], created_time)
+                    )
+
+                if task_list:
+                    self.parent().show_toast(f"✅ 已添加 {len(task_list)} 条到每日任务")
+                if reminder_list:
+                    self.parent().show_toast(f"✅ 已设置 {len(reminder_list)} 个提醒")
+
+            except Exception as e:
+                print(f"添加任务/提醒失败: {e}")
+
         self.accept()
 
 
@@ -125,11 +167,6 @@ class DailyRecordDialog(QDialog):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-
-        self._debug_drd_label = QLabel("【板块:日报记录对话框\n文件:records.py】日期选择/操作记录/历史查看")
-        self._debug_drd_label.setStyleSheet("background-color: #DDA0DD; color: #000; font-weight: bold; padding: 1px; font-size: 13px;")
-        self._debug_drd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main_layout.addWidget(self._debug_drd_label)
 
         header = QLabel(f"📝 每日记录 - {self.store_name}")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px; color: #2c3e50;")

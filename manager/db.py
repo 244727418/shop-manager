@@ -411,6 +411,32 @@ class SafeDatabaseManager:
             )''')
             print("✅ 手动毛利数据表已创建")
 
+            # 每日任务表
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS daily_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                day INTEGER NOT NULL,
+                task_content TEXT NOT NULL,
+                is_completed INTEGER DEFAULT 0,
+                created_time TEXT NOT NULL
+            )''')
+            print("✅ 每日任务表已创建")
+
+            # 任务提醒表
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS task_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                task_content TEXT NOT NULL,
+                remind_time TEXT NOT NULL,
+                is_reminded INTEGER DEFAULT 0,
+                created_time TEXT NOT NULL
+            )''')
+            print("✅ 任务提醒表已创建")
+
         except Exception as e:
             print(f"数据库表创建失败：{e}")
 

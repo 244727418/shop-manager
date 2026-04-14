@@ -125,7 +125,8 @@ class ShopManagerApp(QMainWindow):
         self.month = self.current_date.month
         self.row_store_map = {}
         self.row_data_map = {}
-        
+        self.product_store_map = {}
+
         self.is_loading = False  # 防止重复加载
 
         # 初始化云同步管理器
@@ -305,7 +306,25 @@ class ShopManagerApp(QMainWindow):
             }
         """)
         self.btn_tag_filter.clicked.connect(self.show_tag_filter_menu)
-        
+
+        self.btn_store_filter = QPushButton("🏪 店铺")
+        self.btn_store_filter.setFixedWidth(80)
+        self.btn_store_filter.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #27ae60;
+                background-color: transparent;
+                color: #27ae60;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+                color: white;
+            }
+        """)
+        self.btn_store_filter.clicked.connect(self.show_store_filter_menu)
+
         self.tag_filter_menu = QDialog(self)
         self.tag_filter_menu.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
         self.tag_filter_menu.setStyleSheet("""
@@ -422,6 +441,7 @@ class ShopManagerApp(QMainWindow):
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(btn_search)
         search_layout.addWidget(self.btn_tag_filter)
+        search_layout.addWidget(self.btn_store_filter)
         toolbar.addLayout(search_layout)
         
         icons_dir = os.path.join(os.path.dirname(__file__), "icons")
@@ -438,35 +458,62 @@ class ShopManagerApp(QMainWindow):
         btn_daily_task.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
         btn_daily_task.clicked.connect(self.show_daily_task_dialog)
         toolbar.addWidget(btn_daily_task)
-        
+
         btn_export = QPushButton("📊导出Excel")
-                # 【新增】导入成本表按钮
-        btn_import_cost = QPushButton("📥 导入成本表")
-        btn_import_cost.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
-        btn_import_cost.clicked.connect(self.import_cost_data)
-        toolbar.addWidget(btn_import_cost)
-        btn_view_cost = QPushButton("📦 查看成本库")
-        btn_view_cost.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
-        btn_view_cost.clicked.connect(self.show_cost_library)
-        toolbar.addWidget(btn_view_cost)
-        
-        btn_api_config = QPushButton("🔑 API配置")
-        btn_api_config.setStyleSheet("background-color: #e67e22; color: white; font-weight: bold;")
-        btn_api_config.clicked.connect(self.show_api_config_dialog)
-        toolbar.addWidget(btn_api_config)
-        
-        btn_knowledge = QPushButton("📚 知识库")
-        btn_knowledge.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; border-radius: 6px;")
-        btn_knowledge.clicked.connect(self.show_knowledge_base_disabled)
-        toolbar.addWidget(btn_knowledge)
-        
         btn_export.clicked.connect(self.export_to_excel)
         toolbar.addWidget(btn_export)
-        
+
         toolbar.addWidget(btn_prev)
         toolbar.addWidget(self.lbl_month)
         toolbar.addWidget(btn_next)
         toolbar.addStretch()
+
+        # 状态栏左下角按钮区域
+        bottom_left_widget = QWidget()
+        bottom_left_layout = QHBoxLayout(bottom_left_widget)
+        bottom_left_layout.setContentsMargins(5, 0, 0, 0)
+        bottom_left_layout.setSpacing(5)
+
+        self.btn_api_config = QPushButton("🔑 API配置")
+        self.btn_api_config.setFixedSize(80, 24)
+        self.btn_api_config.setStyleSheet("""
+            background-color: #e67e22;
+            color: white;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 1px;
+        """)
+        self.btn_api_config.clicked.connect(self.show_api_config_dialog)
+        bottom_left_layout.addWidget(self.btn_api_config)
+
+        self.btn_import_cost = QPushButton("📥 导入成本表")
+        self.btn_import_cost.setFixedSize(100, 24)
+        self.btn_import_cost.setStyleSheet("""
+            background-color: #17a2b8;
+            color: white;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 1px;
+        """)
+        self.btn_import_cost.clicked.connect(self.import_cost_data)
+        bottom_left_layout.addWidget(self.btn_import_cost)
+
+        self.btn_view_cost = QPushButton("📦 查看成本库")
+        self.btn_view_cost.setFixedSize(100, 24)
+        self.btn_view_cost.setStyleSheet("""
+            background-color: #6c757d;
+            color: white;
+            font-weight: bold;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 1px;
+        """)
+        self.btn_view_cost.clicked.connect(self.show_cost_library)
+        bottom_left_layout.addWidget(self.btn_view_cost)
+
+        self.statusBar().addWidget(bottom_left_widget)
 
         # 状态栏右下角按钮区域
         status_widget = QWidget()
@@ -1043,6 +1090,7 @@ class ShopManagerApp(QMainWindow):
                 
             self.row_data_map.clear()
             self.row_store_map.clear()
+            self.product_store_map.clear()
             row_idx = 0
             
             for s_idx, store in enumerate(stores):
@@ -1080,6 +1128,7 @@ class ShopManagerApp(QMainWindow):
                     p_widget = ProductWidget(p_id, p_code, p_title, p_img, self)
                     self.frozen_table.setCellWidget(row_idx, 0, p_widget)
                     self.row_data_map[row_idx] = p_id
+                    self.product_store_map[p_id] = store_id
                     
                     self.table.setRowHeight(row_idx, 100)
                     self.frozen_table.setRowHeight(row_idx, 100)
@@ -1225,36 +1274,46 @@ class ShopManagerApp(QMainWindow):
             
         prod_id = self.row_data_map[row]
         day = col
-        
+
         try:
-            res = self.db.safe_fetchall("SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?", 
+            res = self.db.safe_fetchall("SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
                                    (prod_id, self.year, self.month, day))
             records = json.loads(res[0][0]) if res else []
         except:
             records = []
-        
+
         prod_code = str(prod_id)
+        prod_store_id = self.product_store_map.get(prod_id)
         try:
             prod_res = self.db.safe_fetchall("SELECT name FROM products WHERE id=?", (prod_id,))
             if prod_res and prod_res[0][0]:
                 prod_code = prod_res[0][0]
         except:
             pass
-        
+
+        store_name = ""
+        if prod_store_id:
+            try:
+                store_res = self.db.safe_fetchall("SELECT name FROM stores WHERE id=?", (prod_store_id,))
+                if store_res and store_res[0][0]:
+                    store_name = store_res[0][0]
+            except:
+                pass
+
         def save_callback(new_data):
             try:
                 if new_data:
                     self.db.safe_execute("INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
                                     (prod_id, self.year, self.month, day, json.dumps(new_data)))
                 else:
-                    self.db.safe_execute("DELETE FROM records WHERE product_id=? AND year=? AND month=? AND day=?", 
+                    self.db.safe_execute("DELETE FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
                                     (prod_id, self.year, self.month, day))
                 self.load_data_safe()
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"保存记录失败：{e}")
                 self.load_data_safe()
-        
-        dialog = OperationRecordDialog(records, prod_id, prod_code, self.year, self.month, day, save_callback, self)
+
+        dialog = OperationRecordDialog(records, prod_id, prod_code, self.year, self.month, day, save_callback, self, store_id=prod_store_id, store_name=store_name)
         dialog.exec_()
     
     def open_store_record_editor(self, row, col):
@@ -1276,14 +1335,14 @@ class ShopManagerApp(QMainWindow):
                 if new_data:
                     self.db.save_store_record(store_id, self.year, self.month, day, new_data)
                 else:
-                    self.db.safe_execute("DELETE FROM store_records WHERE store_id=? AND year=? AND month=? AND day=?", 
+                    self.db.safe_execute("DELETE FROM store_records WHERE store_id=? AND year=? AND month=? AND day=?",
                                     (store_id, self.year, self.month, day))
                 self.load_data_safe()
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"保存记录失败：{e}")
                 self.load_data_safe()
-        
-        dialog = OperationRecordDialog(records, store_id, store_name, self.year, self.month, day, save_callback, self)
+
+        dialog = OperationRecordDialog(records, store_id, store_name, self.year, self.month, day, save_callback, self, store_id=store_id, store_name=store_name)
         dialog.exec_()
     
     def _activate_cell(self, row, col):
@@ -1582,6 +1641,148 @@ class ShopManagerApp(QMainWindow):
         global_pos = self.btn_tag_filter.mapToGlobal(QPoint(0, btn_rect.bottom()))
         self.tag_filter_menu.move(global_pos)
         self.tag_filter_menu.exec_()
+
+    def show_store_filter_menu(self):
+        """显示店铺筛选下拉菜单"""
+        self.store_filter_menu = QDialog(self)
+        self.store_filter_menu.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        self.store_filter_menu.setStyleSheet("""
+            QDialog {
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+            }
+            QCheckBox {
+                padding: 5px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+        """)
+
+        filter_layout = QVBoxLayout(self.store_filter_menu)
+        filter_layout.setContentsMargins(10, 10, 10, 10)
+        filter_layout.setSpacing(5)
+
+        filter_title = QLabel("🏪 选择筛选店铺")
+        filter_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50; padding-bottom: 5px;")
+        filter_layout.addWidget(filter_title)
+
+        filter_layout.addWidget(QLabel("<hr>"))
+
+        self.store_checkboxes = {}
+        stores = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order")
+        for store_id, store_name in stores:
+            cb = QCheckBox(store_name)
+            cb.setCheckable(True)
+            cb.stateChanged.connect(lambda state, sid=store_id: self.apply_store_filter(sid))
+            self.store_checkboxes[store_id] = cb
+            filter_layout.addWidget(cb)
+
+        filter_layout.addWidget(QLabel("<hr>"))
+
+        btn_layout = QHBoxLayout()
+        btn_save_filter = QPushButton("💾 保存筛选")
+        btn_save_filter.setStyleSheet("""
+            QPushButton { background-color: #27ae60; color: white; border: none; padding: 8px 16px; border-radius: 3px; font-weight: bold; }
+            QPushButton:hover { background-color: #219a52; }
+        """)
+        btn_save_filter.clicked.connect(lambda: self.apply_store_filter(close_menu=True))
+        btn_clear_filter = QPushButton("清空")
+        btn_clear_filter.setStyleSheet("""
+            QPushButton { background-color: #95a5a6; color: white; border: none; padding: 8px 16px; border-radius: 3px; font-weight: bold; }
+            QPushButton:hover { background-color: #7f8c8d; }
+        """)
+        btn_clear_filter.clicked.connect(self.clear_store_filter_selection)
+        btn_layout.addWidget(btn_save_filter)
+        btn_layout.addWidget(btn_clear_filter)
+        filter_layout.addLayout(btn_layout)
+
+        self.current_store_filter = set()
+        self.store_filter_menu_selected_store = None
+
+        btn_rect = self.btn_store_filter.rect()
+        global_pos = self.btn_store_filter.mapToGlobal(QPoint(0, btn_rect.bottom()))
+        self.store_filter_menu.move(global_pos)
+        self.store_filter_menu.exec_()
+
+    def apply_store_filter(self, store_id=None, close_menu=False):
+        """应用店铺筛选
+
+        Args:
+            store_id: 如果指定，则只切换该店铺的选中状态
+            close_menu: 是否关闭筛选菜单
+        """
+        try:
+            if store_id is not None:
+                checkbox = self.store_checkboxes.get(store_id)
+                if checkbox:
+                    if checkbox.isChecked():
+                        self.current_store_filter.add(store_id)
+                    else:
+                        self.current_store_filter.discard(store_id)
+
+            if close_menu and self.store_filter_menu:
+                self.store_filter_menu.close()
+                return
+
+            if not self.current_store_filter:
+                self.clear_store_filter()
+                return
+
+            selected_store_id = store_id if store_id else (list(self.current_store_filter)[0] if self.current_store_filter else None)
+
+            hidden_count = 0
+            for row in range(self.table.rowCount()):
+                prod_id = self.row_data_map.get(row)
+                store_id_at_row = self.row_store_map.get(row)
+
+                should_hide = True
+                if row in self.row_store_map:
+                    if self.row_store_map[row] in self.current_store_filter:
+                        should_hide = False
+                elif prod_id:
+                    product_store_id = self.product_store_map.get(prod_id)
+                    if product_store_id and product_store_id in self.current_store_filter:
+                        should_hide = False
+
+                if should_hide:
+                    hidden_count += 1
+                    self.table.setRowHidden(row, True)
+                    self.frozen_table.setRowHidden(row, True)
+                else:
+                    self.table.setRowHidden(row, False)
+                    self.frozen_table.setRowHidden(row, False)
+
+            filtered_count = self.table.rowCount() - hidden_count
+            self.btn_store_filter.setText(f"🏪 店铺 ({filtered_count})")
+            self.show_toast(f"店铺筛选: 显示 {filtered_count} 个商品")
+
+        except Exception as e:
+            print(f"应用店铺筛选失败: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "筛选失败", f"店铺筛选出错: {e}")
+
+    def clear_store_filter_selection(self):
+        """清空店铺筛选选择"""
+        for cb in self.store_checkboxes.values():
+            cb.setChecked(False)
+        self.current_store_filter.clear()
+
+    def clear_store_filter(self):
+        """清除店铺筛选，显示所有商品"""
+        self.clear_store_filter_selection()
+        self.btn_store_filter.setText("🏪 店铺")
+
+        for row in range(self.table.rowCount()):
+            self.table.setRowHidden(row, False)
+            self.frozen_table.setRowHidden(row, False)
+
+        self.show_toast("已清除店铺筛选")
+        self.current_store_filter = set()
     
     def calculate_profit_label(self, product_id):
         """根据净利润率计算利润标签: 赚钱>5%, 亏钱<5%, 保本=5%"""
