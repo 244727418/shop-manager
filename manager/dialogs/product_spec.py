@@ -2958,12 +2958,12 @@ class SpecImportHistoryDialog(QDialog):
         layout.addWidget(title_label)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels([
-            "导入时间", "规格编码", "单量", "权重%"
+            "导入时间", "规格编码", "单量", "权重%", "操作"
         ])
         header = self.table.horizontalHeader()
-        for i in range(4):
+        for i in range(5):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -3015,7 +3015,7 @@ class SpecImportHistoryDialog(QDialog):
                         try:
                             if int(prod_id_part) == self.product_id:
                                 if import_time not in grouped_data:
-                                    grouped_data[import_time] = {"specs": [], "dates": []}
+                                    grouped_data[import_time] = {"hist_id": hist_id, "specs": [], "dates": []}
                                 count = data.get("count", 0)
                                 grouped_data[import_time]["specs"].append({
                                     "spec_code": spec_code_part,
@@ -3068,6 +3068,57 @@ class SpecImportHistoryDialog(QDialog):
             if spec_count > 1:
                 self.table.setSpan(row_index, 0, spec_count, 1)
 
+            # 添加操作列按钮（只在第一行添加）
+            hist_id = data_info["hist_id"]
+            btn_widget = QWidget()
+            btn_layout = QVBoxLayout(btn_widget)
+            btn_layout.setContentsMargins(1, 1, 1, 1)
+            btn_layout.setSpacing(2)
+            btn_layout.setAlignment(Qt.AlignCenter)
+            
+            btn_apply = QPushButton("应用")
+            btn_apply.setFixedSize(45, 28)
+            btn_apply.setStyleSheet("""
+                QPushButton {
+                    background-color: #27ae60;
+                    color: white;
+                    border: none;
+                    border-radius: 3px;
+                    font-size: 11px;
+                    font-weight: bold;
+                    padding: 1px 2px;
+                    min-height: 24px;
+                }
+                QPushButton:hover {
+                    background-color: #229954;
+                }
+            """)
+            btn_apply.clicked.connect(lambda _, hid=hist_id, it=import_time: self.apply_history(hid, it))
+            btn_layout.addWidget(btn_apply)
+            
+            btn_delete = QPushButton("删除")
+            btn_delete.setFixedSize(45, 28)
+            btn_delete.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    border-radius: 3px;
+                    font-size: 11px;
+                    padding: 1px 2px;
+                    min-height: 24px;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """)
+            btn_delete.clicked.connect(lambda _, hid=hist_id: self.delete_history(hid))
+            btn_layout.addWidget(btn_delete)
+            
+            self.table.setCellWidget(row_index, 4, btn_widget)
+            if spec_count > 1:
+                self.table.setSpan(row_index, 4, spec_count, 1)
+
             for i, spec in enumerate(specs):
                 spec_item = QTableWidgetItem(spec["spec_code"])
                 spec_item.setFlags(Qt.ItemIsEnabled)
@@ -3090,3 +3141,83 @@ class SpecImportHistoryDialog(QDialog):
                 self.table.setItem(row_index, 3, weight_item)
 
                 row_index += 1
+
+    def apply_history(self, hist_id, import_time):
+        """应用历史记录的订单数据"""
+        try:
+            history_row = self.db.safe_fetchall(
+                "SELECT snapshot_data FROM import_history WHERE id=?",
+                (hist_id,)
+            )
+            
+            if not history_row or not history_row[0][0]:
+                QMessageBox.warning(self, "错误", "历史记录数据不存在")
+                return
+            
+            snapshot = json.loads(history_row[0][0])
+            orders_data = snapshot.get("orders", {})
+            
+            if not orders_data:
+                QMessageBox.warning(self, "错误", "历史记录中没有订单数据")
+                return
+            
+            self.db.safe_execute(
+                "DELETE FROM imported_orders WHERE product_id=?",
+                (self.product_id,)
+            )
+            
+            for key, data in orders_data.items():
+                parts = key.split("_")
+                if len(parts) >= 2:
+                    try:
+                        prod_id = int(parts[0])
+                        if prod_id == self.product_id:
+                            spec_code = "_".join(parts[1:])
+                            order_count = data.get("count", 0)
+                            dates = data.get("dates", [])
+                            earliest_date = min(dates) if dates else None
+                            latest_date = max(dates) if dates else None
+                            date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
+                            
+                            self.db.safe_execute("""
+                                INSERT OR REPLACE INTO imported_orders
+                                (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                snapshot.get("store_id", 0),
+                                prod_id, spec_code, order_count,
+                                import_time,
+                                date_range, 0
+                            ))
+                    except ValueError:
+                        pass
+            
+            self.accept()
+            
+            if self.parent():
+                self.parent().sync_order_weight(auto_restore=False)
+                self.parent().main_app.show_toast("✅ 已应用")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"应用失败: {e}")
+
+    def delete_history(self, hist_id):
+        """删除历史记录"""
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("确认删除")
+        msg_box.setText("确定要删除这条导入记录吗？")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        
+        if msg_box.exec_() == QMessageBox.No:
+            return
+        
+        try:
+            self.db.safe_execute("DELETE FROM import_history WHERE id=?", (hist_id,))
+            self.load_history()
+            
+            if self.parent():
+                self.parent().main_app.show_toast("✅ 已删除")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"删除失败: {e}")

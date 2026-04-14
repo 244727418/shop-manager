@@ -107,7 +107,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 2:
                 if (previous[3] or 0) != 0:
@@ -116,7 +116,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 3:
                 if (previous[4] or 0) != 0:
@@ -125,7 +125,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 4:
                 change = (current[11] or 0) - (previous[11] or 0)
@@ -139,7 +139,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 6:
                 change = (current[12] or 0) - (previous[12] or 0)
@@ -153,7 +153,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 8:
                 change = (current[13] or 0) - (previous[13] or 0)
@@ -167,7 +167,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 10:
                 if (previous[7] or 0) != 0:
@@ -176,7 +176,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 11:
                 change = (current[15] or 0) - (previous[15] or 0)
@@ -190,7 +190,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 13:
                 if (previous[8] or 0) != 0:
@@ -199,7 +199,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 14:
                 if (previous[9] or 0) != 0:
@@ -208,7 +208,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(RED if change > 0 else GREEN if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 15:
                 if (previous[10] or 0) != 0:
@@ -217,7 +217,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 16:
                 if previous_net_profit != 0:
@@ -226,7 +226,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 17:
                 change = current_net_margin - previous_net_margin
@@ -240,7 +240,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
             elif col == 19:
                 if previous_daily != 0:
@@ -249,7 +249,7 @@ class LargeMarginDataDialog(QDialog):
                     item.setText(f"{icon} {abs(change):.1f}%")
                     item.setForeground(GREEN if change > 0 else RED if change < 0 else GRAY)
                 else:
-                    item.setText("-")
+                    item.setText("→ 0.0%")
                     item.setForeground(GRAY)
 
             item.setFont(QFont("", -1, QFont.Bold))
@@ -679,12 +679,12 @@ class LargeMarginDataDialog(QDialog):
         self.toast_opacity.setOpacity(1)
         QApplication.processEvents()
 
-        QTimer.singleShot(1000, self.fade_out_toast)
+        QTimer.singleShot(500, self.fade_out_toast)
 
     def fade_out_toast(self):
         if hasattr(self, 'toast_opacity'):
             self.toast_opacity.setOpacity(0)
-            QTimer.singleShot(1000, self.toast_label.hide if hasattr(self, 'toast_label') else lambda: None)
+            QTimer.singleShot(500, self.toast_label.hide if hasattr(self, 'toast_label') else lambda: None)
 
     def calculate_total(self):
         """计算选中行或所有行的总和并弹出窗口显示"""
@@ -1118,7 +1118,7 @@ class StoreMarginDialog(QDialog):
         y = parent_pos.y() - 80
         self.toast_label.move(x, y)
         self.toast_label.show()
-        QTimer.singleShot(1000, self.fade_out_toast)
+        QTimer.singleShot(500, self.fade_out_toast)
 
     def fade_out_toast(self):
         """淡出气泡提示"""
@@ -1417,6 +1417,18 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_reading_mode.clicked.connect(self.toggle_reading_mode)
 
+        self.lbl_current_history = QLabel("📍 当前: 暂无数据")
+        self.lbl_current_history.setStyleSheet("""
+            QLabel {
+                color: #3498db;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+                background-color: #e8f4fc;
+                border-radius: 4px;
+            }
+        """)
+
         date_layout.addWidget(date_label)
         date_layout.addWidget(self.date_start_input)
         date_layout.addWidget(self.date_separator)
@@ -1425,6 +1437,7 @@ class StoreMarginDialog(QDialog):
         date_layout.addWidget(self.btn_input_data)
         date_layout.addWidget(self.btn_import_data)
         date_layout.addWidget(self.btn_reading_mode)
+        date_layout.addWidget(self.lbl_current_history)
         date_layout.addStretch()
 
         historical_layout.addWidget(date_row)
@@ -1636,20 +1649,7 @@ class StoreMarginDialog(QDialog):
             }
         """)
         self.btn_history.clicked.connect(self.show_import_history)
-        
-        # 当前使用数据标签
-        self.lbl_current_history = QLabel("📍 当前: 暂无数据")
-        self.lbl_current_history.setStyleSheet("""
-            QLabel {
-                color: #3498db;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 6px 12px;
-                background-color: #e8f4fc;
-                border-radius: 4px;
-            }
-        """)
-        
+
         self.btn_sync_weight = QPushButton("🔄 同步最新订单")
         self.btn_sync_weight.setStyleSheet("""
             QPushButton {
@@ -1711,7 +1711,6 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_import_orders)
         btn_layout.addWidget(self.btn_history)
-        btn_layout.addWidget(self.lbl_current_history)
         btn_layout.addWidget(self.btn_sync_weight)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_save)
@@ -3425,22 +3424,61 @@ class StoreMarginDialog(QDialog):
                         order_label.setText("0单")
                         order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
     
-    def sync_order_weight(self):
-        """同步订单权重"""
-        print(f"[DEBUG store_margin] sync_order_weight called for store_id={self.store_id}")
+    def sync_order_weight(self, auto_restore=True):
+        """同步订单权重
+
+        Args:
+            auto_restore: 是否自动从历史记录恢复最新数据。
+                         True=点击"同步最新订单"按钮时调用，自动恢复最新记录
+                         False=从"全部记录"应用历史后调用，不自动恢复
+        """
+        print(f"[DEBUG store_margin] sync_order_weight called for store_id={self.store_id}, auto_restore={auto_restore}")
+
+        if auto_restore:
+            latest_history = self.db.safe_fetchall("""
+                SELECT snapshot_data FROM import_history WHERE store_id=? ORDER BY import_time DESC LIMIT 1
+            """, (self.store_id,))
+
+            if latest_history and latest_history[0][0]:
+                try:
+                    snapshot = json.loads(latest_history[0][0])
+                    orders_data = snapshot.get("orders", {})
+                    if orders_data:
+                        self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
+                        for key, data in orders_data.items():
+                            parts = key.split("_")
+                            if len(parts) >= 2:
+                                prod_id = int(parts[0])
+                                spec_code = "_".join(parts[1:])
+                                order_count = data.get("count", 0)
+                                dates = data.get("dates", [])
+                                earliest_date = min(dates) if dates else None
+                                latest_date = max(dates) if dates else None
+                                date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
+                                self.db.safe_execute("""
+                                    INSERT OR REPLACE INTO imported_orders
+                                    (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (self.store_id, prod_id, spec_code, order_count,
+                                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), date_range, 0))
+                        print(f"[DEBUG store_margin] 已恢复最新历史记录到 imported_orders")
+                except Exception as e:
+                    print(f"[DEBUG store_margin] 恢复历史记录失败: {e}")
+
+        print(f"[DEBUG store_margin] sys_id_to_user_id 映射: {self.sys_id_to_user_id}")
+
         imported_data = self.db.safe_fetchall(
             "SELECT product_id, spec_code, order_count FROM imported_orders WHERE store_id=?",
             (self.store_id,)
         )
         print(f"[DEBUG store_margin] imported_data: {imported_data}")
-        
-        # 即使没有数据，也要更新对比列和单量列
+
         self.update_compare_columns()
         self.update_orders_display()
-        
+
         if not imported_data:
             self.update_current_history_label()
-            self.main_app.show_toast("⚠️ 请先上传订单")
+            self.main_app.show_toast("⚠️ 没有可用的订单数据")
             return
         prod_order_totals = {}
         spec_order_counts = {}
@@ -3956,12 +3994,12 @@ class ImportHistoryDialog(QDialog):
             # 操作按钮（应用和删除）
             btn_widget = QWidget()
             btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(0, 0, 0, 0)
+            btn_layout.setContentsMargins(1, 1, 1, 1)
             btn_layout.setAlignment(Qt.AlignCenter)
-            btn_layout.setSpacing(5)
+            btn_layout.setSpacing(1)
             
             btn_apply = QPushButton("应用")
-            btn_apply.setFixedSize(45, 25)
+            btn_apply.setFixedSize(45, 28)
             btn_apply.setStyleSheet("""
                 QPushButton {
                     background-color: #27ae60;
@@ -3970,7 +4008,7 @@ class ImportHistoryDialog(QDialog):
                     border-radius: 3px;
                     font-size: 11px;
                     font-weight: bold;
-                    padding: 1px 5px;
+                    padding: 1px 2px;
                 }
                 QPushButton:hover {
                     background-color: #229954;
@@ -3980,7 +4018,7 @@ class ImportHistoryDialog(QDialog):
             btn_layout.addWidget(btn_apply)
             
             btn_delete = QPushButton("删除")
-            btn_delete.setFixedSize(45, 25)
+            btn_delete.setFixedSize(45, 28)
             btn_delete.setStyleSheet("""
                 QPushButton {
                     background-color: #e74c3c;
@@ -3988,7 +4026,7 @@ class ImportHistoryDialog(QDialog):
                     border: none;
                     border-radius: 3px;
                     font-size: 11px;
-                    padding: 1px 5px;
+                    padding: 1px 2px;
                 }
                 QPushButton:hover {
                     background-color: #c0392b;
@@ -4135,5 +4173,5 @@ class ImportHistoryDialog(QDialog):
 
         # 通知主窗口刷新
         if self.parent_window:
-            self.parent_window.sync_order_weight()
+            self.parent_window.sync_order_weight(auto_restore=False)
             self.parent_window.main_app.show_toast("✅ 已应用")
