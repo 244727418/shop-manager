@@ -271,11 +271,7 @@ class ShopManagerApp(QMainWindow):
         self.resource_timer = QTimer()
         self.resource_timer.timeout.connect(self.update_resource_usage)
         self.resource_timer.start(3000)  # 每3秒更新一次
-        
-        # ===== 临时调试标签（后续会横向排列） =====
-        self._debug_label_1 = QLabel("【板块:主界面-工具栏\n文件:shop_manager.py】搜索框/添加店铺/导入/导出/月份切换")
-        self._debug_label_1.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        
+
         toolbar = QHBoxLayout()
         btn_prev = QPushButton("◀ 上个月")
         btn_prev.clicked.connect(self.prev_month)
@@ -513,10 +509,9 @@ class ShopManagerApp(QMainWindow):
         self.statusBar().addPermanentWidget(status_widget)
 
         toolbar.addWidget(btn_add_store)
-        
-         # 1. 创建表格
+
+        # 1. 创建表格
         self.table = QTableWidget()
-        self._debug_label_2 = QLabel("【板块:主界面-冻结列\n文件:shop_manager.py】左侧冻结列商品展示/FrozenTable")
         from PyQt5.QtGui import QStandardItemModel
         self.model = QStandardItemModel()
         self.frozen_table = QTableWidget(self.table)  # 冻结表作为主表的子控件
@@ -537,39 +532,33 @@ class ShopManagerApp(QMainWindow):
         
         # --- 布局代码 (保持你原有的不变) ---
         main_layout = QVBoxLayout()
-        
+
         # 添加资源监控标签到顶部
         main_layout.addWidget(self.resource_label)
-        
-        # ===== 调试标签横向排列 =====
-        debug_layout = QHBoxLayout()
-        
-        # 标签1: 工具栏
-        self._debug_label_1.setText("【板块:主界面-工具栏\n文件:shop_manager.py】搜索框/添加店铺/导入/导出/月份切换")
-        self._debug_label_1.setStyleSheet("background-color: #ffff00; color: #000; font-weight: bold; padding: 1px; font-size: 13px;")
-        self._debug_label_1.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_label_1)
-        
-        # 标签2: 左侧冻结列表格区
-        self._debug_label_2.setText("""【板块:主界面-冻结列\n文件:widgets/product_store.py】
-        - 店铺控件/商品ID+图片+标题
-        - 毛利信息区（综合毛利显示）
-        - 净利状态区（盈利/微盈利/保本/微亏/一般亏/巨亏的颜色渐变显示）
-        - 投产倍数区（当前投产/净保本投产）""")
-        self._debug_label_2.setStyleSheet("background-color: #90EE90; color: #000; font-weight: bold; padding: 1px; font-size: 13px;")
-        self._debug_label_2.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_label_2)
-        
-        # 标签3: 右侧主表功能分区
-        self._debug_label_3 = QLabel("【板块:主界面-主表\n文件:shop_manager.py】右侧主表/MainTable-记录日志区")
-        self._debug_label_3.setStyleSheet("background-color: #87CEEB; color: #000; font-weight: bold; padding: 1px; font-size: 13px;")
-        self._debug_label_3.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_label_3)
-        
-        debug_layout.addStretch()
-        main_layout.addLayout(debug_layout)
-        
-        main_layout.addLayout(toolbar) # 确保 toolbar 变量名和你上面定义的一致
+
+        debug_label = QLabel("【主界面工具栏区】")
+        debug_label.setStyleSheet("background-color: #FFB6C1; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        main_layout.addWidget(debug_label)
+
+        main_layout.addLayout(toolbar)
+
+        debug_container = QWidget()
+        debug_layout = QHBoxLayout(debug_container)
+        debug_layout.setContentsMargins(0, 0, 0, 0)
+        debug_layout.setSpacing(10)
+
+        debug_label1 = QLabel("【左侧冻结列区】")
+        debug_label1.setStyleSheet("background-color: #98FB98; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label1.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_layout.addWidget(debug_label1)
+
+        debug_label2 = QLabel("【右侧主表区】")
+        debug_label2.setStyleSheet("background-color: #87CEEB; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label2.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_layout.addWidget(debug_label2)
+
+        main_layout.addWidget(debug_container)
         main_layout.addWidget(self.table)
         
         central_widget = QWidget()
@@ -749,50 +738,64 @@ class ShopManagerApp(QMainWindow):
                 background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
                 color: black;                   /* 选中行文字颜色 - 白色 */
                 border: none;
+                padding: 0px;
             }
-            
+
             /* 当窗口失去焦点时的选中行样式 */
             QTableWidget::item:selected:!active {
                 background-color: #d4edda;    /* 失焦时的背景色 - 灰色 */
                 color: black;
+                padding: 0px;
             }
-            
+
             /* 鼠标悬停时的行样式 */
             QTableWidget::item:hover {
                 background-color: #d4edda;    /* 悬停时的背景色 - 浅蓝色 */
+                padding: 0px;
+            }
+
+            /* 单元格基础样式 */
+            QTableWidget::item {
+                padding: 0px;
+                border: none;
             }
         """)
         
         # 冻结表样式（和主表保持一致，但确保文字清晰可读）
         self.frozen_table.setStyleSheet("""
-            QTableWidget { 
-                border-right: 2px solid #555; 
-                background-color: white; 
+            QTableWidget {
+                border-right: 2px solid #555;
+                background-color: white;
                 color: #333333;
                 font-weight: bold;
             }
-            
+
             QTableWidget::item {
                 color: #333333;
                 font-weight: bold;
+                padding: 0px;
+                border: none;
             }
-            
+
             /* 选中行的样式 */
             QTableWidget::item:selected {
                 background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
                 color: #333333;
+                padding: 0px;
             }
-            
+
             /* 失焦时的选中行样式 */
             QTableWidget::item:selected:!active {
                 background-color: #d4edda;
                 color: #333333;
+                padding: 0px;
             }
-            
+
             /* 悬停行样式 */
             QTableWidget::item:hover {
                 background-color: #e6f3ff;
                 color: #333333;
+                padding: 0px;
             }
         """)
     def _sync_frozen_from_main(self):
