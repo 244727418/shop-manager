@@ -64,32 +64,6 @@ class ProductSpecDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # ===== 调试标签 =====
-        debug_layout = QHBoxLayout()
-        
-        self._debug_psd_label = QLabel("【商品规格对话框\nproduct_spec.py】")
-        self._debug_psd_label.setStyleSheet("background-color: #FFB6C1; color: #000; padding: 1px 3px; font-size: 11px;")
-        self._debug_psd_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_psd_label)
-        
-        self._debug_promo_label = QLabel("【促销标签设置区\nproduct_spec.py】")
-        self._debug_promo_label.setStyleSheet("background-color: #FFD700; color: #000; padding: 1px 3px; font-size: 11px;")
-        self._debug_promo_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_promo_label)
-        
-        self._debug_roi_label = QLabel("【投产比分析区\nproduct_spec.py】")
-        self._debug_roi_label.setStyleSheet("background-color: #98FB98; color: #000; padding: 1px 3px; font-size: 11px;")
-        self._debug_roi_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_roi_label)
-        
-        self._debug_spec_label = QLabel("【规格管理表格\nproduct_spec.py】")
-        self._debug_spec_label.setStyleSheet("background-color: #87CEEB; color: #000; padding: 1px 3px; font-size: 11px;")
-        self._debug_spec_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(self._debug_spec_label)
-        
-        debug_layout.addStretch()
-        layout.addLayout(debug_layout)
-        
         # 顶部信息
         info_widget = QWidget()
         info_layout = QHBoxLayout(info_widget)
@@ -126,32 +100,32 @@ class ProductSpecDialog(QDialog):
         promo_layout.setSpacing(5)
         
         promo_title = QLabel("🎯 促销标签设置")
-        promo_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50; padding-bottom: 5px;")
+        promo_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50; padding-bottom: 3px;")
         promo_layout.addWidget(promo_title)
-        
+
         promo_h_layout = QHBoxLayout()
-        promo_h_layout.setSpacing(30)
+        promo_h_layout.setSpacing(20)
         promo_h_layout.setAlignment(Qt.AlignLeft)
-        
+
         # ===== 优惠券 =====
         coupon_widget = QWidget()
         coupon_h = QHBoxLayout(coupon_widget)
         coupon_h.setContentsMargins(0, 0, 0, 0)
         coupon_h.setSpacing(5)
-        
+
         cp_icon = QLabel()
-        cp_icon.setFixedSize(20, 20)
+        cp_icon.setFixedSize(16, 16)
         cp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "coupon.svg")
         if os.path.exists(cp_path):
-            cp_icon.setPixmap(QPixmap(cp_path).scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        
+            cp_icon.setPixmap(QPixmap(cp_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
         cp_text = QLabel("优惠券")
-        cp_text.setStyleSheet("font-weight: bold; color: #d81e06; font-size: 13px;")
-        
+        cp_text.setStyleSheet("font-weight: bold; color: #d81e06; font-size: 12px;")
+
         self.coupon_input = QLineEdit()
         self.coupon_input.setPlaceholderText("金额...")
-        self.coupon_input.setFixedWidth(80)
-        self.coupon_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;")
+        self.coupon_input.setFixedWidth(70)
+        self.coupon_input.setStyleSheet("padding: 3px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px;")
         self.coupon_input.textChanged.connect(self.on_discount_changed)
         
         coupon_h.addWidget(cp_icon)
@@ -163,20 +137,20 @@ class ProductSpecDialog(QDialog):
         nc_h = QHBoxLayout(nc_widget)
         nc_h.setContentsMargins(0, 0, 0, 0)
         nc_h.setSpacing(5)
-        
+
         nc_icon = QLabel()
-        nc_icon.setFixedSize(20, 20)
+        nc_icon.setFixedSize(16, 16)
         nc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "new_customer.svg")
         if os.path.exists(nc_path):
-            nc_icon.setPixmap(QPixmap(nc_path).scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        
+            nc_icon.setPixmap(QPixmap(nc_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
         nc_text = QLabel("新客立减")
-        nc_text.setStyleSheet("font-weight: bold; color: #9b59b6; font-size: 13px;")
-        
+        nc_text.setStyleSheet("font-weight: bold; color: #9b59b6; font-size: 12px;")
+
         self.new_customer_input = QLineEdit()
         self.new_customer_input.setPlaceholderText("金额...")
-        self.new_customer_input.setFixedWidth(80)
-        self.new_customer_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;")
+        self.new_customer_input.setFixedWidth(70)
+        self.new_customer_input.setStyleSheet("padding: 3px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px;")
         self.new_customer_input.textChanged.connect(self.on_discount_changed)
         
         nc_h.addWidget(nc_icon)
@@ -188,25 +162,20 @@ class ProductSpecDialog(QDialog):
         lt_v = QVBoxLayout(lt_widget)
         lt_v.setContentsMargins(0, 0, 0, 0)
         lt_v.setSpacing(3)
-        
-        lt_text = QLabel("限时限量购")
-        lt_text.setStyleSheet("font-weight: bold; color: #e74c3c; font-size: 13px;")
-        lt_text.setAlignment(Qt.AlignCenter)
-        
+
         self.btn_limited_time = QPushButton()
-        self.btn_limited_time.setFixedSize(45, 45)
+        self.btn_limited_time.setFixedSize(35, 35)
         lt_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "limited-time.svg")
         if os.path.exists(lt_icon_path):
             self.btn_limited_time.setIcon(QIcon(lt_icon_path))
-        self.btn_limited_time.setIconSize(QSize(35, 35))
+        self.btn_limited_time.setIconSize(QSize(28, 28))
         self.btn_limited_time.setStyleSheet("""
             QPushButton { border: 2px solid #e74c3c; background-color: transparent; border-radius: 8px; }
             QPushButton:checked { background-color: #e74c3c; }
         """)
         self.btn_limited_time.setCheckable(True)
         self.btn_limited_time.clicked.connect(self.update_tag_button_styles)
-        
-        lt_v.addWidget(lt_text)
+
         lt_v.addWidget(self.btn_limited_time, 0, Qt.AlignCenter)
         
         # ===== 营销活动 =====
@@ -214,25 +183,20 @@ class ProductSpecDialog(QDialog):
         mk_v = QVBoxLayout(mk_widget)
         mk_v.setContentsMargins(0, 0, 0, 0)
         mk_v.setSpacing(3)
-        
-        mk_text = QLabel("营销活动")
-        mk_text.setStyleSheet("font-weight: bold; color: #9b59b6; font-size: 13px;")
-        mk_text.setAlignment(Qt.AlignCenter)
-        
+
         self.btn_marketing = QPushButton()
-        self.btn_marketing.setFixedSize(45, 45)
+        self.btn_marketing.setFixedSize(35, 35)
         mk_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "marketing.svg")
         if os.path.exists(mk_icon_path):
             self.btn_marketing.setIcon(QIcon(mk_icon_path))
-        self.btn_marketing.setIconSize(QSize(35, 35))
+        self.btn_marketing.setIconSize(QSize(28, 28))
         self.btn_marketing.setStyleSheet("""
             QPushButton { border: 2px solid #9b59b6; background-color: transparent; border-radius: 8px; }
             QPushButton:checked { background-color: #9b59b6; }
         """)
         self.btn_marketing.setCheckable(True)
         self.btn_marketing.clicked.connect(self.update_tag_button_styles)
-        
-        mk_v.addWidget(mk_text)
+
         mk_v.addWidget(self.btn_marketing, 0, Qt.AlignCenter)
         
         # ===== 最大优惠 =====
@@ -240,16 +204,11 @@ class ProductSpecDialog(QDialog):
         max_v = QVBoxLayout(max_widget)
         max_v.setContentsMargins(0, 0, 0, 0)
         max_v.setSpacing(3)
-        
-        max_text = QLabel("最大优惠")
-        max_text.setStyleSheet("font-weight: bold; color: #27ae60; font-size: 13px;")
-        max_text.setAlignment(Qt.AlignCenter)
-        
+
         self.max_discount_label = QLabel("¥0.00")
-        self.max_discount_label.setStyleSheet("font-weight: bold; font-size: 18px; color: #27ae60; padding: 8px 15px; background-color: #e8f8f5; border-radius: 8px; border: 2px solid #27ae60;")
+        self.max_discount_label.setStyleSheet("font-weight: bold; font-size: 18px; color: #27ae60; padding: 5px 12px; background-color: #e8f8f5; border-radius: 8px; border: 2px solid #27ae60;")
         self.max_discount_label.setAlignment(Qt.AlignCenter)
-        
-        max_v.addWidget(max_text)
+
         max_v.addWidget(self.max_discount_label, 0, Qt.AlignCenter)
         
         # 添加到主水平布局
@@ -344,57 +303,66 @@ class ProductSpecDialog(QDialog):
         self.return_rate_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 3px;")
         self.return_rate_input.textChanged.connect(self.on_return_rate_changed)
         roi_grid.addWidget(self.return_rate_input, 0, 3)
-        
+
         roi_grid.addWidget(QLabel("毛保本投产:"), 0, 4)
         self.lbl_gross_break_even = QLabel("0.00")
         self.lbl_gross_break_even.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
         self.lbl_gross_break_even.setAlignment(Qt.AlignCenter)
         roi_grid.addWidget(self.lbl_gross_break_even, 0, 5)
-        
-        roi_grid.addWidget(QLabel("净保本投产:"), 1, 0)
+
+        roi_grid.addWidget(QLabel("净保本投产:"), 0, 6)
         self.lbl_net_break_even = QLabel("0.00")
         self.lbl_net_break_even.setStyleSheet("font-weight: bold; color: #e67e22; background-color: #fef5e7; padding: 5px 10px; border-radius: 3px;")
         self.lbl_net_break_even.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_net_break_even, 1, 1)
-        
-        roi_grid.addWidget(QLabel("最佳投产:"), 1, 2)
+        roi_grid.addWidget(self.lbl_net_break_even, 0, 7)
+
+        roi_grid.addWidget(QLabel("最佳投产:"), 1, 0)
         self.lbl_best_roi = QLabel("0.00")
         self.lbl_best_roi.setStyleSheet("font-weight: bold; color: #27ae60; background-color: #e8f8f5; padding: 5px 10px; border-radius: 3px;")
         self.lbl_best_roi.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_best_roi, 1, 3)
-        
-        roi_grid.addWidget(QLabel("净利率:"), 1, 4)
+        roi_grid.addWidget(self.lbl_best_roi, 1, 1)
+
+        roi_grid.addWidget(QLabel("净利率:"), 1, 2)
         self.lbl_net_profit_rate = QLabel("0.00%")
         self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #3498db; background-color: #ebf5fb; padding: 5px 10px; border-radius: 3px;")
         self.lbl_net_profit_rate.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_net_profit_rate, 1, 5)
-        
-        roi_grid.addWidget(QLabel("投产倍数:"), 2, 0)
+        roi_grid.addWidget(self.lbl_net_profit_rate, 1, 3)
+
+        roi_grid.addWidget(QLabel("投产倍数:"), 1, 4)
         self.lbl_roi_multiple = QLabel("--")
         self.lbl_roi_multiple.setStyleSheet("font-weight: bold; color: #9b59b6; background-color: #f5eef8; padding: 5px 10px; border-radius: 3px;")
         self.lbl_roi_multiple.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_roi_multiple, 2, 1)
-        
-        roi_grid.addWidget(QLabel("放量投产:"), 2, 2)
+        roi_grid.addWidget(self.lbl_roi_multiple, 1, 5)
+
+        roi_grid.addWidget(QLabel("放量投产:"), 1, 6)
         self.lbl_scale_roi = QLabel("--")
         self.lbl_scale_roi.setStyleSheet("font-weight: bold; color: #e67e22; background-color: #fef5e7; padding: 5px 10px; border-radius: 3px;")
         self.lbl_scale_roi.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_scale_roi, 2, 3)
-        
-        roi_grid.addWidget(QLabel("推广占比:"), 2, 4)
+        roi_grid.addWidget(self.lbl_scale_roi, 1, 7)
+
+        roi_grid.addWidget(QLabel("推广占比:"), 1, 8)
         self.lbl_promotion_ratio = QLabel("--")
         self.lbl_promotion_ratio.setStyleSheet("font-weight: bold; color: #3498db; background-color: #ebf5fb; padding: 5px 10px; border-radius: 3px;")
         self.lbl_promotion_ratio.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_promotion_ratio, 2, 5)
-        
+        roi_grid.addWidget(self.lbl_promotion_ratio, 1, 9)
+
         roi_grid.setColumnStretch(4, 1)
         roi_grid.setColumnStretch(5, 1)
-        
+        roi_grid.setColumnStretch(6, 1)
+        roi_grid.setColumnStretch(7, 1)
+        roi_grid.setColumnStretch(8, 1)
+        roi_grid.setColumnStretch(9, 1)
+
         roi_layout.addLayout(roi_grid)
         
         roi_widget.setStyleSheet("background-color: #f8f9fa; border-radius: 5px; border: 1px solid #dee2e6;")
         layout.addWidget(roi_widget)
-        
+
+        debug_label = QLabel("【规格表格区】")
+        debug_label.setStyleSheet("background-color: #87CEEB; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(debug_label)
+
         # 2. 规格表格
         self.table = QTableWidget()
         self.table.setColumnCount(12)
@@ -436,7 +404,12 @@ class ProductSpecDialog(QDialog):
         # 权重列
         self.weight_delegate = WeightDelegate(self)
         self.table.setItemDelegateForColumn(7, self.weight_delegate)
-        
+
+        debug_label = QLabel("【底部按钮操作区】")
+        debug_label.setStyleSheet("background-color: #DDA0DD; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(debug_label)
+
         # 3. 底部按钮区
         btn_layout = QHBoxLayout()
         
@@ -492,36 +465,52 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
 
-        # 4. 统计标签
+        debug_label = QLabel("【底部数据显示区】")
+        debug_label.setStyleSheet("background-color: #F0E68C; color: #000; padding: 2px 5px; font-size: 11px;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(debug_label)
+
+        stats_container = QWidget()
+        stats_layout = QVBoxLayout(stats_container)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setSpacing(5)
+
+        stats_row1 = QHBoxLayout()
+        stats_row1.setSpacing(20)
+
         self.lbl_total_margin = QLabel("当前综合毛利率：0.00%")
-        self.lbl_total_margin.setStyleSheet("font-size: 16px; font-weight: bold; color: #d9534f; padding: 10px;")
-        self.lbl_total_margin.setAlignment(Qt.AlignRight)
-        layout.addWidget(self.lbl_total_margin)
+        self.lbl_total_margin.setStyleSheet("font-size: 14px; font-weight: bold; color: #d9534f; padding: 5px 10px;")
+        self.lbl_total_margin.setAlignment(Qt.AlignLeft)
+        stats_row1.addWidget(self.lbl_total_margin)
 
-        # 4.1 总订单标签
-        self.lbl_total_orders = QLabel("总订单: 0")
+        self.lbl_total_orders = QLabel("订单时间范围: 无日期 | 导入: 未知")
         self.lbl_total_orders.setStyleSheet("font-size: 14px; color: #666; padding: 5px 10px;")
-        self.lbl_total_orders.setAlignment(Qt.AlignRight)
-        layout.addWidget(self.lbl_total_orders)
+        self.lbl_total_orders.setAlignment(Qt.AlignLeft)
+        stats_row1.addWidget(self.lbl_total_orders)
 
-        # 4.1.1 订单时间范围和导入时间标签
-        self.lbl_order_date_range = QLabel("订单: 无日期 | 导入: 未知")
-        self.lbl_order_date_range.setStyleSheet("font-size: 14px; color: #8e44ad; padding: 5px 10px; font-weight: bold;")
-        self.lbl_order_date_range.setAlignment(Qt.AlignRight)
-        layout.addWidget(self.lbl_order_date_range)
+        stats_row1.addStretch()
 
-        # 4.2 销售金额和客单价标签
+        stats_layout.addLayout(stats_row1)
+
+        stats_row2 = QHBoxLayout()
+        stats_row2.setSpacing(20)
+
         self.lbl_sales_info = QLabel("销售额: - | 客单价: -")
         self.lbl_sales_info.setStyleSheet("font-size: 14px; color: #27ae60; padding: 5px 10px; font-weight: bold;")
-        self.lbl_sales_info.setAlignment(Qt.AlignRight)
-        layout.addWidget(self.lbl_sales_info)
-        
-        # 5. 剩余可分配权重标签
-        self.lbl_remaining_weight = QLabel("剩余可分配权重：100.00%")
-        self.lbl_remaining_weight.setStyleSheet("font-size: 14px; font-weight: bold; color: #2980b9; padding: 5px 10px; background-color: #e8f4fc; border-radius: 3px;")
-        self.lbl_remaining_weight.setAlignment(Qt.AlignRight)
-        layout.addWidget(self.lbl_remaining_weight)
-        
+        self.lbl_sales_info.setAlignment(Qt.AlignLeft)
+        stats_row2.addWidget(self.lbl_sales_info)
+
+        self.lbl_order_date_range = QLabel("")
+        self.lbl_order_date_range.setStyleSheet("font-size: 14px; color: #8e44ad; padding: 5px 10px; font-weight: bold;")
+        self.lbl_order_date_range.setAlignment(Qt.AlignLeft)
+        stats_row2.addWidget(self.lbl_order_date_range)
+
+        stats_row2.addStretch()
+
+        stats_layout.addLayout(stats_row2)
+
+        layout.addWidget(stats_container)
+
         # 5. 信号连接
         self.table.cellChanged.connect(self.on_cell_change)
 
@@ -1277,18 +1266,8 @@ class ProductSpecDialog(QDialog):
         return max(0, 100.0 - locked_sum)
     
     def update_remaining_weight_label(self):
-        """更新剩余可分配权重标签"""
-        remaining = self.get_remaining_weight()
-        locked_sum = self.calculate_locked_weight_sum()
-        
-        self.lbl_remaining_weight.setText(f"剩余可分配权重：{remaining:.2f}% | 已锁定：{locked_sum:.2f}%")
-        
-        if remaining < 0:
-            self.lbl_remaining_weight.setStyleSheet("font-size: 14px; font-weight: bold; color: #e74c3c; padding: 5px 10px; background-color: #fadbd8; border-radius: 3px;")
-        elif remaining < 20:
-            self.lbl_remaining_weight.setStyleSheet("font-size: 14px; font-weight: bold; color: #e67e22; padding: 5px 10px; background-color: #fdebd0; border-radius: 3px;")
-        else:
-            self.lbl_remaining_weight.setStyleSheet("font-size: 14px; font-weight: bold; color: #2980b9; padding: 5px 10px; background-color: #e8f4fc; border-radius: 3px;")
+        """更新剩余可分配权重标签（已移除显示）"""
+        pass
 
     def calculate_all_margins(self):
         """辅助函数：刷新所有行的单行毛利和总毛利"""
