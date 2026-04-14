@@ -399,7 +399,7 @@ class ProductSpecDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比", "单量", "单量对比", "操作"
+            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "操作"
         ])
         
         # 设置列宽策略 - AI列固定较小宽度，其他列自适应拉伸
@@ -461,21 +461,6 @@ class ProductSpecDialog(QDialog):
         """)
         self.btn_profit_calc.clicked.connect(self.open_profit_calculator)
 
-        self.btn_sync_weight = QPushButton("🔄 同步订单权重")
-        self.btn_sync_weight.setStyleSheet("""
-            QPushButton {
-                background-color: #e67e22;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #d35400;
-            }
-        """)
-        self.btn_sync_weight.clicked.connect(self.sync_order_weight)
-
         self.btn_history = QPushButton("📜 全部记录")
         self.btn_history.setStyleSheet("""
             QPushButton {
@@ -501,7 +486,6 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_add)
         btn_layout.addWidget(btn_avg)
         btn_layout.addWidget(self.btn_profit_calc)
-        btn_layout.addWidget(self.btn_sync_weight)
         btn_layout.addWidget(self.btn_history)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
@@ -1191,12 +1175,15 @@ class ProductSpecDialog(QDialog):
 
         # 第8列：权重对比
         weight_compare_widget = QWidget()
-        weight_compare_layout = QHBoxLayout(weight_compare_widget)
-        weight_compare_layout.setContentsMargins(0, 0, 0, 0)
+        weight_compare_layout = QVBoxLayout(weight_compare_widget)
+        weight_compare_layout.setContentsMargins(0, 2, 0, 2)
         weight_compare_layout.setAlignment(Qt.AlignCenter)
-        weight_compare_label = QLabel("-")
-        weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-        weight_compare_layout.addWidget(weight_compare_label)
+        weight_compare_value_label = QLabel("-")
+        weight_compare_value_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        weight_compare_sub_label = QLabel("较上周")
+        weight_compare_sub_label.setStyleSheet("color: #95a5a6; font-size: 10px;")
+        weight_compare_layout.addWidget(weight_compare_value_label)
+        weight_compare_layout.addWidget(weight_compare_sub_label)
         self.table.setCellWidget(idx, 8, weight_compare_widget)
 
         # 第9列：单量
@@ -1206,12 +1193,15 @@ class ProductSpecDialog(QDialog):
 
         # 第10列：单量对比
         order_compare_widget = QWidget()
-        order_compare_layout = QHBoxLayout(order_compare_widget)
-        order_compare_layout.setContentsMargins(0, 0, 0, 0)
+        order_compare_layout = QVBoxLayout(order_compare_widget)
+        order_compare_layout.setContentsMargins(0, 2, 0, 2)
         order_compare_layout.setAlignment(Qt.AlignCenter)
-        order_compare_label = QLabel("-")
-        order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-        order_compare_layout.addWidget(order_compare_label)
+        order_compare_value_label = QLabel("-")
+        order_compare_value_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        order_compare_sub_label = QLabel("较上周")
+        order_compare_sub_label.setStyleSheet("color: #95a5a6; font-size: 10px;")
+        order_compare_layout.addWidget(order_compare_value_label)
+        order_compare_layout.addWidget(order_compare_sub_label)
         self.table.setCellWidget(idx, 10, order_compare_widget)
 
         # 第11列：删除按钮
@@ -2065,111 +2055,96 @@ class ProductSpecDialog(QDialog):
         cleaned = cleaned.replace('·', '')
         return cleaned
 
-    def sync_order_weight(self):
-        """同步订单权重（从已导入的订单数据中读取）"""
-        print(f"[DEBUG product_spec] sync_order_weight called for product_id={self.product_id}")
-        imported_data = self.db.safe_fetchall(
-            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
-            (self.product_id,)
-        )
-        print(f"[DEBUG product_spec] imported_data: {imported_data}")
-        if not imported_data:
-            QMessageBox.information(self, "提示", "没有找到该商品的已导入订单数据\n请先在店铺毛利管理中导入订单")
-            return
-
-        spec_order_counts = {str(row[0]): row[1] for row in imported_data}
-        total_orders = sum(spec_order_counts.values())
-        print(f"[DEBUG product_spec] spec_order_counts: {spec_order_counts}, total_orders: {total_orders}")
-        if total_orders == 0:
-            return
-
-        last_snapshot = self._get_last_snapshot()
-        last_spec_counts = {}
-        if last_snapshot:
-            for key, data in last_snapshot.items():
-                parts = key.split("_")
-                if len(parts) >= 2:
-                    prod_id_part = parts[0]
-                    spec_code_part = "_".join(parts[1:])
-                    try:
-                        if int(prod_id_part) == self.product_id:
-                            last_spec_counts[spec_code_part] = data.get("count", 0)
-                    except:
-                        pass
-
-        for row in range(self.table.rowCount()):
-            spec_code_item = self.table.item(row, 2)
-            if not spec_code_item:
-                continue
-            spec_code = str(spec_code_item.text()).strip()
-            print(f"[DEBUG product_spec] row={row}, spec_code='{spec_code}', checking in spec_order_counts: {spec_code in spec_order_counts}")
-            is_locked_item = self.table.item(row, 7)
-            is_locked = 1 if is_locked_item and "🔒" in is_locked_item.text() else 0
-            if spec_code in spec_order_counts:
-                count = spec_order_counts[spec_code]
-                weight = (count / total_orders) * 100
-                print(f"[DEBUG product_spec] Updating row {row}: count={count}, weight={weight:.2f}%")
-                self.db.safe_execute(
-                    "UPDATE product_specs SET weight_percent=? WHERE product_id=? AND spec_code=?",
-                    (weight, self.product_id, spec_code)
-                )
-                if is_locked == 1:
-                    weight_text = f"🔒 {weight:.2f}%"
-                else:
-                    weight_text = f"{weight:.2f}%"
-                weight_item = QTableWidgetItem(weight_text)
-                weight_item.setData(Qt.UserRole, count)
-                weight_item.setToolTip(f"订单数: {count}单")
-                self.table.setItem(row, 7, weight_item)
-                order_count_item = QTableWidgetItem(f"{count}单")
-                order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 9, order_count_item)
-
-                last_count = last_spec_counts.get(spec_code, None)
-                self._update_spec_compare_labels(row, count, last_count, total_orders)
-            else:
-                self.db.safe_execute(
-                    "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
-                    (self.product_id, spec_code)
-                )
-                weight_item = self.table.item(row, 7)
-                if weight_item:
-                    if is_locked == 1:
-                        weight_item.setText(f"🔒 0.00%")
-                    else:
-                        weight_item.setText("0.00%")
-                    weight_item.setData(Qt.UserRole, 0)
-                    weight_item.setToolTip("")
-                order_count_item = QTableWidgetItem("0单")
-                order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 9, order_count_item)
-
-                self._update_spec_compare_labels(row, 0, None, total_orders)
-        self.update_total_orders_label()
-        self.main_app.show_toast("✅ 订单权重已同步")
-
     def _get_last_snapshot(self):
-        """获取上一次导入的历史快照数据"""
+        """获取上一期导入的历史快照数据 - 直接取排序后的下一条记录"""
+        print(f"[DEBUG product_spec] _get_last_snapshot called for product_id={self.product_id}")
         try:
             store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
             if not store_rows or not store_rows[0][0]:
+                print(f"[DEBUG product_spec] No store_id found")
                 return None
             store_id = store_rows[0][0]
+            print(f"[DEBUG product_spec] store_id={store_id}")
 
-            last_history = self.db.safe_fetchall("""
-                SELECT snapshot_data
+            # 获取当前商品导入的订单日期范围
+            current_data = self.db.safe_fetchall("""
+                SELECT order_date FROM imported_orders WHERE product_id=?
+            """, (self.product_id,))
+
+            current_end_date = None
+            current_start_date = None
+            if current_data:
+                for (order_date,) in current_data:
+                    if order_date and '~' in order_date:
+                        parts = order_date.split('~')
+                        if len(parts) == 2:
+                            current_start_date = parts[0].strip()
+                            current_end_date = parts[1].strip()
+                            break
+            print(f"[DEBUG product_spec] current_start_date={current_start_date}, current_end_date={current_end_date}")
+
+            # 获取所有历史记录（已按订单结束日期降序排序）
+            all_history = self.db.safe_fetchall("""
+                SELECT id, snapshot_data
                 FROM import_history
-                WHERE store_id=?
+                WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
                 ORDER BY import_time DESC
-                LIMIT 2
             """, (store_id,))
+            print(f"[DEBUG product_spec] all_history count={len(all_history)}")
 
-            if len(last_history) < 2:
+            # 从快照中解析订单结束日期
+            def get_end_date_from_snapshot(snapshot_data):
+                try:
+                    snapshot = json.loads(snapshot_data)
+                    orders = snapshot.get("orders", {})
+                    all_dates = []
+                    for key, data in orders.items():
+                        if isinstance(data, dict) and "dates" in data:
+                            for date_val in data.get("dates", []):
+                                if date_val and '/' in date_val:
+                                    try:
+                                        if '~' in date_val:
+                                            for p in date_val.split('~'):
+                                                if '/' in p:
+                                                    m, d = p.split('/')
+                                                    all_dates.append((int(m), int(d)))
+                                        else:
+                                            m, d = date_val.split('/')
+                                            all_dates.append((int(m), int(d)))
+                                    except:
+                                        pass
+                    if all_dates:
+                        all_dates.sort()
+                        return all_dates[-1]  # 返回结束日期
+                except:
+                    pass
                 return None
 
-            last_snapshot = json.loads(last_history[1][0])
-            return last_snapshot.get("orders", {})
-        except:
+            # 遍历历史记录，找到当前数据对应的下一条
+            for i, (hist_id, snapshot_data) in enumerate(all_history):
+                prev_end_date = get_end_date_from_snapshot(snapshot_data)
+                print(f"[DEBUG product_spec] hist_id={hist_id}, prev_end_date={prev_end_date}")
+                
+                # 如果当前有数据，找结束日期小于当前结束日期的第一条
+                if current_end_date and prev_end_date:
+                    # 比较日期 - 需要处理月份可能不同的情况
+                    try:
+                        curr_parts = current_end_date.split('/')
+                        curr_m, curr_d = int(curr_parts[0]), int(curr_parts[1])
+                        prev_m, prev_d = int(prev_end_date[0]), int(prev_end_date[1])
+                        
+                        # 如果月份不同，用月份比较；如果月份相同，用日期比较
+                        if prev_m < curr_m or (prev_m == curr_m and prev_d < curr_d):
+                            print(f"[DEBUG product_spec] Found previous record: hist_id={hist_id}")
+                            return json.loads(snapshot_data).get("orders", {})
+                    except:
+                        pass
+            
+            # 如果没找到，返回None
+            print(f"[DEBUG product_spec] No previous record found")
+            return None
+        except Exception as e:
+            print(f"[DEBUG product_spec] Exception in _get_last_snapshot: {e}")
             return None
 
     def _update_spec_compare_labels(self, row, current_count, last_count, current_total):
@@ -2234,6 +2209,60 @@ class ProductSpecDialog(QDialog):
                 except:
                     pass
         return result
+
+    def refresh_weight_display(self):
+        """刷新权重显示（应用历史后调用）"""
+        imported_data = self.db.safe_fetchall(
+            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            (self.product_id,)
+        )
+        
+        if not imported_data:
+            for row in range(self.table.rowCount()):
+                weight_item = self.table.item(row, 7)
+                if weight_item:
+                    weight_item.setText("0.00%")
+                    weight_item.setData(Qt.UserRole, 0)
+                order_item = self.table.item(row, 9)
+                if order_item:
+                    order_item.setText("0单")
+            self.update_total_orders_label()
+            self.update_compare_columns()
+            return
+        
+        spec_order_counts = {str(row[0]): row[1] for row in imported_data}
+        total_orders = sum(spec_order_counts.values())
+        
+        for row in range(self.table.rowCount()):
+            spec_code_item = self.table.item(row, 2)
+            if not spec_code_item:
+                continue
+            spec_code = str(spec_code_item.text()).strip()
+            is_locked_item = self.table.item(row, 7)
+            is_locked = is_locked_item and "🔒" in is_locked_item.text() if is_locked_item else False
+            
+            if spec_code in spec_order_counts:
+                count = spec_order_counts[spec_code]
+                weight = (count / total_orders) * 100 if total_orders > 0 else 0
+                weight_text = f"🔒 {weight:.2f}%" if is_locked else f"{weight:.2f}%"
+                weight_item = QTableWidgetItem(weight_text)
+                weight_item.setData(Qt.UserRole, count)
+                weight_item.setToolTip(f"订单数: {count}单")
+                self.table.setItem(row, 7, weight_item)
+                order_item = QTableWidgetItem(f"{count}单")
+                order_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 9, order_item)
+            else:
+                weight_text = f"🔒 0.00%" if is_locked else "0.00%"
+                weight_item = QTableWidgetItem(weight_text)
+                weight_item.setData(Qt.UserRole, 0)
+                self.table.setItem(row, 7, weight_item)
+                order_item = QTableWidgetItem("0单")
+                order_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 9, order_item)
+        
+        self.update_total_orders_label()
+        self.update_compare_columns()
 
     def update_total_orders_label(self):
         """更新总订单标签"""
@@ -2991,12 +3020,11 @@ class SpecImportHistoryDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def load_history(self):
-        """加载历史记录，按时间分组显示"""
+        """加载历史记录，按时间分组显示 - 按订单日期范围排序（最新日期在上面）"""
         records = self.db.safe_fetchall("""
             SELECT id, import_time, snapshot_data
             FROM import_history
             WHERE store_id = (SELECT store_id FROM products WHERE id = ?)
-            ORDER BY import_time DESC
         """, (self.product_id,))
 
         grouped_data = {}
@@ -3039,7 +3067,16 @@ class SpecImportHistoryDialog(QDialog):
             except:
                 continue
 
-        time_list = sorted(grouped_data.keys(), reverse=True)
+        # 按订单结束日期排序（最新日期在上面）
+        def get_end_date(import_time_key):
+            data_info = grouped_data[import_time_key]
+            dates = data_info["dates"]
+            if dates:
+                dates.sort()
+                return dates[-1]  # 返回结束日期
+            return (0, 0)
+        
+        time_list = sorted(grouped_data.keys(), key=get_end_date, reverse=True)
         row_index = 0
         self.table.setRowCount(sum(len(grouped_data[t]["specs"]) for t in time_list))
 
@@ -3195,7 +3232,7 @@ class SpecImportHistoryDialog(QDialog):
             self.accept()
             
             if self.parent():
-                self.parent().sync_order_weight(auto_restore=False)
+                self.parent().refresh_weight_display()
                 self.parent().main_app.show_toast("✅ 已应用")
                 
         except Exception as e:

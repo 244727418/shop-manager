@@ -1277,31 +1277,36 @@ class StoreMarginDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # ====== 板块1: 顶部标题区域 ======
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(10, 15, 10, 15)
-        self.lbl_title = QLabel(f"📊 {self.store_name} - 毛利明细")
-        self.lbl_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
-        self.lbl_total_margin = QLabel("综合毛利: 0.00%")
-        self.lbl_total_margin.setStyleSheet(
-            "font-size: 20px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 10px 20px; border-radius: 8px;"
-        )
-        header_layout.addWidget(self.lbl_title)
-        header_layout.addStretch()
-        header_layout.addWidget(self.lbl_total_margin)
-        layout.addWidget(header_widget)
-
-        # ====== 板块2: 过往数据分析板块 ======
+        # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
         historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px;")
         historical_layout = QVBoxLayout(historical_widget)
         historical_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 板块标题
-        historical_title = QLabel("📈 过往数据分析（基于ERP数据计算）")
-        historical_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
-        historical_layout.addWidget(historical_title)
+        # 板块标题栏（放在日期选择行上方）- 包含多个功能标签
+        section_title_bar = QWidget()
+        section_title_bar.setStyleSheet("background-color: #ecf0f1; padding: 5px 10px; border-radius: 4px;")
+        section_title_layout = QHBoxLayout(section_title_bar)
+        section_title_layout.setContentsMargins(5, 5, 5, 5)
+
+        section_label_1 = QLabel("📈 过往数据分析")
+        section_label_1.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 5px 10px; background-color: #d5dbdb; border-radius: 4px;")
+        section_title_layout.addWidget(section_label_1)
+
+        section_label_2 = QLabel("📅 数据周期选择")
+        section_label_2.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
+        section_title_layout.addWidget(section_label_2)
+
+        section_label_3 = QLabel("📝 手动录入数据")
+        section_label_3.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
+        section_title_layout.addWidget(section_label_3)
+
+        section_label_4 = QLabel("📊 周环比对比")
+        section_label_4.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
+        section_title_layout.addWidget(section_label_4)
+
+        section_title_layout.addStretch()
+        historical_layout.addWidget(section_title_bar)
 
         # 日期选择行
         date_row = QWidget()
@@ -1556,10 +1561,15 @@ class StoreMarginDialog(QDialog):
         
         historical_layout.addWidget(self.week_table)
 
-        # ====== 板块 3: 毛利明细表格 ======
+        # 板块标题：商品规格毛利权重
+        section_title_2 = QLabel("📦 订单规格毛利权重")
+        section_title_2.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 4px;")
+        historical_layout.addWidget(section_title_2)
+
+        # 毛利明细表格
         self.table = QTableWidget()
         self.table.setColumnCount(13)
-        self.table.setHorizontalHeaderLabels(["图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)", "权重对比", "单量", "单量对比", "销售额", "主卖规格", "操作"])
+        self.table.setHorizontalHeaderLabels(["图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "销售额", "主卖规格", "操作"])
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1650,25 +1660,16 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_history.clicked.connect(self.show_import_history)
 
-        self.btn_sync_weight = QPushButton("🔄 同步最新订单")
-        self.btn_sync_weight.setStyleSheet("""
-            QPushButton {
-                background-color: #e67e22;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #d35400;
-            }
-            QPushButton:pressed {
-                background-color: #ba4a00;
-            }
-        """)
-        self.btn_sync_weight.clicked.connect(self.sync_order_weight)
+        self.lbl_total_margin = QLabel("综合毛利: 0.00%")
+        self.lbl_total_margin.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 6px 12px; border-radius: 6px;"
+        )
+
+        self.lbl_total_orders = QLabel("总单量: 0")
+        self.lbl_total_orders.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #3498db; background-color: #e8f4fc; padding: 6px 12px; border-radius: 6px;"
+        )
+
         self.btn_save = QPushButton("💾 保存")
         self.btn_save.setStyleSheet("""
             QPushButton {
@@ -1711,7 +1712,9 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_import_orders)
         btn_layout.addWidget(self.btn_history)
-        btn_layout.addWidget(self.btn_sync_weight)
+        btn_layout.addSpacing(10)
+        btn_layout.addWidget(self.lbl_total_margin)
+        btn_layout.addWidget(self.lbl_total_orders)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_close)
@@ -3283,8 +3286,9 @@ class StoreMarginDialog(QDialog):
                     "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (self.store_id, prod_id, spec_code, data["count"], import_time, date_range, 0)
                 )
+            self.update_compare_columns()
+            self.update_orders_display()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
-            self.sync_order_weight()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
 
@@ -3423,191 +3427,9 @@ class StoreMarginDialog(QDialog):
                     else:
                         order_label.setText("0单")
                         order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        
+        self.update_total_orders_label()
     
-    def sync_order_weight(self, auto_restore=True):
-        """同步订单权重
-
-        Args:
-            auto_restore: 是否自动从历史记录恢复最新数据。
-                         True=点击"同步最新订单"按钮时调用，自动恢复最新记录
-                         False=从"全部记录"应用历史后调用，不自动恢复
-        """
-        print(f"[DEBUG store_margin] sync_order_weight called for store_id={self.store_id}, auto_restore={auto_restore}")
-
-        if auto_restore:
-            latest_history = self.db.safe_fetchall("""
-                SELECT snapshot_data FROM import_history WHERE store_id=? ORDER BY import_time DESC LIMIT 1
-            """, (self.store_id,))
-
-            if latest_history and latest_history[0][0]:
-                try:
-                    snapshot = json.loads(latest_history[0][0])
-                    orders_data = snapshot.get("orders", {})
-                    if orders_data:
-                        self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
-                        for key, data in orders_data.items():
-                            parts = key.split("_")
-                            if len(parts) >= 2:
-                                prod_id = int(parts[0])
-                                spec_code = "_".join(parts[1:])
-                                order_count = data.get("count", 0)
-                                dates = data.get("dates", [])
-                                earliest_date = min(dates) if dates else None
-                                latest_date = max(dates) if dates else None
-                                date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
-                                self.db.safe_execute("""
-                                    INSERT OR REPLACE INTO imported_orders
-                                    (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (self.store_id, prod_id, spec_code, order_count,
-                                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), date_range, 0))
-                        print(f"[DEBUG store_margin] 已恢复最新历史记录到 imported_orders")
-                except Exception as e:
-                    print(f"[DEBUG store_margin] 恢复历史记录失败: {e}")
-
-        print(f"[DEBUG store_margin] sys_id_to_user_id 映射: {self.sys_id_to_user_id}")
-
-        imported_data = self.db.safe_fetchall(
-            "SELECT product_id, spec_code, order_count FROM imported_orders WHERE store_id=?",
-            (self.store_id,)
-        )
-        print(f"[DEBUG store_margin] imported_data: {imported_data}")
-
-        self.update_compare_columns()
-        self.update_orders_display()
-
-        if not imported_data:
-            self.update_current_history_label()
-            self.main_app.show_toast("⚠️ 没有可用的订单数据")
-            return
-        prod_order_totals = {}
-        spec_order_counts = {}
-        for product_id, spec_code, order_count in imported_data:
-            spec_code_str = str(spec_code).strip()
-            if product_id not in prod_order_totals:
-                prod_order_totals[product_id] = 0
-            prod_order_totals[product_id] += order_count
-            key = (product_id, spec_code_str)
-            if key not in spec_order_counts:
-                spec_order_counts[key] = 0
-            spec_order_counts[key] += order_count
-        products_in_store = self.db.safe_fetchall(
-            "SELECT id, name FROM products WHERE store_id=?", (self.store_id,)
-        )
-        store_total_orders = sum(prod_order_totals.get(p[0], 0) for p in products_in_store)
-        print(f"[DEBUG] 店铺总订单: {store_total_orders}")
-        print(f"[DEBUG] 每个商品订单: {prod_order_totals}")
-        print(f"[DEBUG] 每个规格订单: {spec_order_counts}")
-        for sys_id, user_id in self.sys_id_to_user_id.items():
-            if sys_id in prod_order_totals:
-                total = prod_order_totals[sys_id]
-                weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
-                print(f"[DEBUG] 商品 {user_id}: 订单{total}, 权重{weight:.2f}%")
-                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, sys_id))
-                if user_id in self.product_weights:
-                    self.product_weights[user_id]["weight"] = weight
-            else:
-                print(f"[DEBUG] 商品 {user_id}: 订单0, 权重0.00%")
-                self.db.safe_execute("UPDATE products SET store_weight=0 WHERE id=?", (sys_id,))
-                if user_id in self.product_weights:
-                    self.product_weights[user_id]["weight"] = 0
-        for user_id, prod_data in self.product_weights.items():
-            sys_id = prod_data.get("sys_id")
-            if not sys_id:
-                continue
-            specs = self.db.safe_fetchall(
-                "SELECT spec_code FROM product_specs WHERE product_id=?", (sys_id,)
-            )
-            for (spec_code,) in specs:
-                key = (sys_id, str(spec_code))
-                if key not in spec_order_counts:
-                    self.db.safe_execute(
-                        "UPDATE product_specs SET weight_percent=0 WHERE product_id=? AND spec_code=?",
-                        (sys_id, str(spec_code))
-                    )
-        for (sys_id, spec_code), count in spec_order_counts.items():
-            user_id = self.sys_id_to_user_id.get(sys_id)
-            prod_total = prod_order_totals.get(sys_id, 0)
-            weight = (count / prod_total * 100) if prod_total > 0 else 0
-            print(f"[DEBUG] 规格 {user_id}/{spec_code}: 订单{count}, 权重{weight:.2f}%")
-            self.db.safe_execute(
-                "UPDATE product_specs SET weight_percent=? WHERE product_id=? AND spec_code=?",
-                (weight, sys_id, str(spec_code))
-            )
-        for row in range(self.table.rowCount()):
-            prod_id_item = self.table.item(row, 1)
-            if not prod_id_item:
-                continue
-            user_id = prod_id_item.data(Qt.UserRole)
-            if not user_id:
-                continue
-            sys_id = self.get_sys_id_by_user_id(user_id)
-            if not sys_id:
-                continue
-            cell_widget = self.table.cellWidget(row, 6)
-            weight_input = None
-            if sys_id not in prod_order_totals:
-                weight_input = cell_widget.findChild(QLineEdit) if cell_widget else None
-                if weight_input:
-                    weight_input.blockSignals(True)
-                    weight_input.setText("0")
-                    weight_input.blockSignals(False)
-                order_label_widget = self.table.cellWidget(row, 8)
-                if order_label_widget:
-                    order_label = order_label_widget.layout().itemAt(0).widget()
-                    if order_label:
-                        order_label.setText("0单")
-                        order_label.setStyleSheet("color: black; font-size: 12px;")
-                main_spec_widget = self.table.cellWidget(row, 11)
-                if main_spec_widget:
-                    main_spec_label = main_spec_widget.layout().itemAt(0).widget()
-                    if main_spec_label:
-                        main_spec_label.setText("无")
-                        main_spec_label.setStyleSheet("color: black; font-size: 12px;")
-                if user_id in self.product_weights:
-                    self.product_weights[user_id]["weight"] = 0
-                continue
-            total = prod_order_totals[sys_id]
-            weight = (total / store_total_orders * 100) if store_total_orders > 0 else 0
-            if cell_widget:
-                weight_input = cell_widget.findChild(QLineEdit)
-                if weight_input:
-                    weight_input.blockSignals(True)
-                    weight_str = str(int(weight)) if weight == int(weight) else f"{weight:.1f}"
-                    weight_input.setText(weight_str)
-                    weight_input.blockSignals(False)
-            spec_counts = self.db.safe_fetchall(
-                "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
-                (sys_id,)
-            )
-            total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
-            order_label_widget = self.table.cellWidget(row, 8)
-            if order_label_widget:
-                order_label = order_label_widget.layout().itemAt(0).widget()
-                if order_label:
-                    order_label.setText(f"{total_prod_orders}单")
-                    order_label.setStyleSheet("color: black; font-size: 12px;")
-            main_spec_widget = self.table.cellWidget(row, 11)
-            if main_spec_widget:
-                main_spec_label = main_spec_widget.layout().itemAt(0).widget()
-                if main_spec_label:
-                    if total_prod_orders > 0:
-                        max_spec = max(spec_counts, key=lambda x: x[1] if x[1] else 0) if spec_counts else None
-                        main_spec_label.setText(str(max_spec[0]) if max_spec and max_spec[0] else "-")
-                    else:
-                        main_spec_label.setText("无")
-                    main_spec_label.setStyleSheet("color: black; font-size: 12px;")
-            if weight_input and total_prod_orders > 0:
-                weight_input.setToolTip(f"订单数: {total_prod_orders}单")
-        self.calculate_total_margin()
-        self.db.safe_execute("UPDATE stores SET weight_synced=1 WHERE id=?", (self.store_id,))
-        # 更新对比列
-        self.update_compare_columns()
-        # 更新当前使用数据标签
-        self.update_current_history_label()
-        self.main_app.show_toast("✅ 订单权重已同步")
-        self.main_app.refresh_store_weight_sync_flag(self.store_id)
-
     def update_current_history_label(self):
         """更新当前使用数据标签"""
         if not hasattr(self, 'lbl_current_history'):
@@ -3670,67 +3492,135 @@ class StoreMarginDialog(QDialog):
                 }
             """)
     
+    def update_total_orders_label(self):
+        """更新总单量标签"""
+        total_data = self.db.safe_fetchall("""
+            SELECT SUM(order_count) FROM imported_orders WHERE store_id=?
+        """, (self.store_id,))
+        total = total_data[0][0] if total_data and total_data[0][0] else 0
+        self.lbl_total_orders.setText(f"总单量: {total}")
+    
     def update_compare_columns(self):
-        """更新对比列数据"""
+        """更新对比列数据 - 按订单时间范围与上一期对比"""
         # 获取当前导入的数据
         current_data = self.db.safe_fetchall("""
-            SELECT product_id, spec_code, order_count
+            SELECT product_id, spec_code, order_count, order_date
             FROM imported_orders
             WHERE store_id=?
         """, (self.store_id,))
         
-        # 获取历史记录
-        last_history = self.db.safe_fetchall("""
-            SELECT snapshot_data
-            FROM import_history
-            WHERE store_id=?
-            ORDER BY import_time DESC
-            LIMIT 2
-        """, (self.store_id,))
-        
-        # 如果没有任何数据（当前数据和历史记录都没有），显示 "-"
+        # 如果没有任何数据，显示 "-"
         if not current_data:
             for row in range(self.table.rowCount()):
-                weight_compare_label = self.table.cellWidget(row, 7).layout().itemAt(0).widget()
-                weight_compare_label.setText("-")
-                weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                
-                order_compare_label = self.table.cellWidget(row, 9).layout().itemAt(0).widget()
-                order_compare_label.setText("-")
-                order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_compare_widget = self.table.cellWidget(row, 7)
+                if weight_compare_widget:
+                    weight_label = weight_compare_widget.layout().itemAt(0).widget()
+                    weight_label.setText("-")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    
+                order_compare_widget = self.table.cellWidget(row, 9)
+                if order_compare_widget:
+                    order_label = order_compare_widget.layout().itemAt(0).widget()
+                    order_label.setText("-")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
             return
         
-        # 如果没有可对比的历史（只有1条或更少），显示 "无"
-        if len(last_history) < 2:
+        # 获取当前订单的日期范围（用于找上一期）
+        current_date_range = None
+        for _, _, _, order_date in current_data:
+            if order_date and '~' in order_date:
+                current_date_range = order_date
+                break
+        
+        # 解析当前日期范围获取结束日期
+        current_end_date = None
+        if current_date_range:
+            try:
+                parts = current_date_range.split('~')
+                if len(parts) == 2:
+                    current_end_date = parts[1].strip()
+            except:
+                pass
+        
+        # 找上一期历史记录（按订单日期范围排序，找小于当前结束日期的最接近的那一期）
+        last_history_data = None
+        if current_end_date:
+            # 获取所有历史记录
+            all_history = self.db.safe_fetchall("""
+                SELECT id, snapshot_data
+                FROM import_history
+                WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
+                ORDER BY import_time DESC
+            """, (self.store_id,))
+            
+            for hist_id, snapshot_data in all_history:
+                try:
+                    snapshot = json.loads(snapshot_data)
+                    order_date = snapshot.get("order_date", "")
+                    if order_date and '~' in order_date:
+                        parts = order_date.split('~')
+                        if len(parts) == 2:
+                            prev_end_date = parts[1].strip()
+                            # 找小于当前结束日期的最接近的那一期
+                            if prev_end_date < current_end_date:
+                                last_history_data = (snapshot_data, order_date)
+                                break
+                except:
+                    pass
+        
+        # 如果没找到按日期的对比，取最新的历史记录
+        if not last_history_data:
+            last_history = self.db.safe_fetchall("""
+                SELECT snapshot_data
+                FROM import_history
+                WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
+                ORDER BY import_time DESC
+                LIMIT 1
+            """, (self.store_id,))
+            if last_history and last_history[0][0]:
+                try:
+                    last_history_data = (last_history[0][0], None)
+                except:
+                    pass
+        
+        # 如果还是没有可对比的历史，显示 "无"
+        if not last_history_data:
             for row in range(self.table.rowCount()):
-                weight_compare_label = self.table.cellWidget(row, 7).layout().itemAt(0).widget()
-                weight_compare_label.setText("无")
-                weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                
-                order_compare_label = self.table.cellWidget(row, 9).layout().itemAt(0).widget()
-                order_compare_label.setText("无")
-                order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_compare_widget = self.table.cellWidget(row, 7)
+                if weight_compare_widget:
+                    weight_label = weight_compare_widget.layout().itemAt(0).widget()
+                    weight_label.setText("无")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    
+                order_compare_widget = self.table.cellWidget(row, 9)
+                if order_compare_widget:
+                    order_label = order_compare_widget.layout().itemAt(0).widget()
+                    order_label.setText("无")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
             return
         
-        # 解析上一次的快照数据
+        # 解析上一期的快照数据
         try:
-            last_snapshot = json.loads(last_history[1][0])
+            last_snapshot = json.loads(last_history_data[0])
             last_orders = last_snapshot.get("orders", {})
         except:
-            # 解析失败（旧数据没有快照），显示 "无"
             for row in range(self.table.rowCount()):
-                weight_compare_label = self.table.cellWidget(row, 7).layout().itemAt(0).widget()
-                weight_compare_label.setText("无")
-                weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                
-                order_compare_label = self.table.cellWidget(row, 9).layout().itemAt(0).widget()
-                order_compare_label.setText("无")
-                order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_compare_widget = self.table.cellWidget(row, 7)
+                if weight_compare_widget:
+                    weight_label = weight_compare_widget.layout().itemAt(0).widget()
+                    weight_label.setText("无")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    
+                order_compare_widget = self.table.cellWidget(row, 9)
+                if order_compare_widget:
+                    order_label = order_compare_widget.layout().itemAt(0).widget()
+                    order_label.setText("无")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
             return
         
         # 计算每个商品的总订单数
         product_current = {}
-        for prod_id, spec_code, order_count in current_data:
+        for prod_id, spec_code, order_count, _ in current_data:
             if prod_id not in product_current:
                 product_current[prod_id] = {"orders": 0, "specs": {}}
             product_current[prod_id]["orders"] += order_count
@@ -3764,51 +3654,57 @@ class StoreMarginDialog(QDialog):
                     break
             
             # 权重对比（百分比，2位小数）
-            weight_compare_label = self.table.cellWidget(row, 7).layout().itemAt(0).widget()
+            weight_compare_widget = self.table.cellWidget(row, 7)
+            if not weight_compare_widget:
+                continue
+            weight_label = weight_compare_widget.layout().itemAt(0).widget()
             if sys_id and sys_id in product_current and sys_id in product_last:
                 current_total_orders = product_current[sys_id]["orders"]
                 last_total_orders = product_last[sys_id]["orders"]
-                
+
                 order_change = current_total_orders - last_total_orders
                 if last_total_orders > 0:
                     order_change_percent = (order_change / last_total_orders * 100)
                 else:
                     order_change_percent = 0
-                
+
                 if order_change_percent > 0:
-                    weight_compare_label.setText(f"🟢 ↑{order_change_percent:.2f}%")
-                    weight_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                    weight_label.setText(f"🟢 ↑{order_change_percent:.2f}%")
+                    weight_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
                 elif order_change_percent < 0:
-                    weight_compare_label.setText(f"🔴 ↓{abs(order_change_percent):.2f}%")
-                    weight_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+                    weight_label.setText(f"🔴 ↓{abs(order_change_percent):.2f}%")
+                    weight_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
                 else:
-                    weight_compare_label.setText("⚪ 0.00%")
-                    weight_compare_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+                    weight_label.setText("⚪ 0.00%")
+                    weight_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
             else:
                 # 商品不在对比数据中，显示 "无"
-                weight_compare_label.setText("无")
-                weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_label.setText("无")
+                weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
             
             # 单量对比
-            order_compare_label = self.table.cellWidget(row, 9).layout().itemAt(0).widget()
+            order_compare_widget = self.table.cellWidget(row, 9)
+            if not order_compare_widget:
+                continue
+            order_label = order_compare_widget.layout().itemAt(0).widget()
             if sys_id and sys_id in product_current and sys_id in product_last:
                 current_orders = product_current[sys_id]["orders"]
                 last_orders_count = product_last[sys_id]["orders"]
                 order_change = current_orders - last_orders_count
-                
+
                 if order_change > 0:
-                    order_compare_label.setText(f"🟢 ↑{order_change}")
-                    order_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                    order_label.setText(f"🟢 ↑{order_change}")
+                    order_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
                 elif order_change < 0:
-                    order_compare_label.setText(f"🔴 ↓{abs(order_change)}")
-                    order_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+                    order_label.setText(f"🔴 ↓{abs(order_change)}")
+                    order_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
                 else:
-                    order_compare_label.setText("⚪ 0")
-                    order_compare_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+                    order_label.setText("⚪ 0")
+                    order_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
             else:
                 # 商品不在对比数据中，显示 "无"
-                order_compare_label.setText("无")
-                order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                order_label.setText("无")
+                order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
 
     def show_import_history(self):
         """显示导入历史记录对话框"""
@@ -3924,13 +3820,45 @@ class ImportHistoryDialog(QDialog):
         layout.addLayout(btn_layout)
     
     def load_history(self):
-        """加载历史记录"""
+        """加载历史记录 - 按订单日期范围排序（最新日期排最上面）"""
         records = self.db.safe_fetchall("""
             SELECT id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data
             FROM import_history
             WHERE store_id=?
-            ORDER BY import_time DESC
         """, (self.store_id,))
+
+        # 计算每个记录的订单日期范围，并按结束日期降序排序
+        def get_order_end_date(record):
+            _, _, _, _, _, _, _, snapshot_data = record
+            if snapshot_data:
+                try:
+                    snapshot = json.loads(snapshot_data)
+                    if snapshot and "orders" in snapshot:
+                        all_dates = []
+                        for key, data in snapshot["orders"].items():
+                            if isinstance(data, dict) and "dates" in data:
+                                for date_val in data.get("dates", []):
+                                    if date_val and '/' in date_val:
+                                        try:
+                                            if '~' in date_val:
+                                                for p in date_val.split('~'):
+                                                    if '/' in p:
+                                                        m, d = p.split('/')
+                                                        all_dates.append((int(m), int(d)))
+                                            else:
+                                                m, d = date_val.split('/')
+                                                all_dates.append((int(m), int(d)))
+                                        except:
+                                            pass
+                        if all_dates:
+                            all_dates.sort()
+                            return all_dates[-1]  # 返回结束日期
+                except:
+                    pass
+            return (0, 0)  # 默认最小的日期
+
+        # 按订单结束日期降序排序
+        records.sort(key=get_order_end_date, reverse=True)
 
         self.table.setRowCount(len(records))
 
@@ -4097,10 +4025,6 @@ class ImportHistoryDialog(QDialog):
             
             self.load_history()
             
-            # 通知主窗口刷新对比列
-            if self.parent_window:
-                self.parent_window.sync_order_weight()
-            
             # 气泡显示已删除
             self.parent_window.main_app.show_toast("✅ 已删除")
     
@@ -4171,7 +4095,8 @@ class ImportHistoryDialog(QDialog):
         # 关闭对话框
         self.accept()
 
-        # 通知主窗口刷新
+        # 刷新界面显示
         if self.parent_window:
-            self.parent_window.sync_order_weight(auto_restore=False)
+            self.parent_window.update_compare_columns()
+            self.parent_window.update_orders_display()
             self.parent_window.main_app.show_toast("✅ 已应用")
