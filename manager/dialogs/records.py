@@ -35,6 +35,12 @@ class OperationRecordDialog(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(5)
 
+        debug_label = QLabel("🔧 调试: records.py (OperationRecordDialog)")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        main_layout.addWidget(debug_label)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll_widget = QWidget()
@@ -167,6 +173,12 @@ class DailyRecordDialog(QDialog):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
+
+        debug_label = QLabel("🔧 调试: records.py (DailyRecordDialog)")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        main_layout.addWidget(debug_label)
 
         header = QLabel(f"📝 每日记录 - {self.store_name}")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px; color: #2c3e50;")

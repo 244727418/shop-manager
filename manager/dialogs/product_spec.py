@@ -64,6 +64,12 @@ class ProductSpecDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
+        debug_label = QLabel("🔧 调试: product_spec.py")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        layout.addWidget(debug_label)
+
         # 顶部信息
         info_widget = QWidget()
         info_layout = QHBoxLayout(info_widget)
@@ -365,9 +371,9 @@ class ProductSpecDialog(QDialog):
 
         # 2. 规格表格
         self.table = QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(14)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "操作"
+            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
         ])
         
         # 设置列宽策略 - AI列和规格名称列固定宽度，其他列自适应拉伸
@@ -382,7 +388,7 @@ class ProductSpecDialog(QDialog):
         self.table.setColumnWidth(1, 180)
 
         # 其他列自适应拉伸
-        for i in range(2, 12):
+        for i in range(2, 14):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 
         self.table.setAlternatingRowColors(False)
@@ -692,10 +698,11 @@ class ProductSpecDialog(QDialog):
 
                 # 权重列 - 根据锁定状态显示锁图标
                 order_count_res = self.db.safe_fetchall(
-                    "SELECT order_count FROM imported_orders WHERE product_id=? AND spec_code=?",
+                    "SELECT order_count, refund_count FROM imported_orders WHERE product_id=? AND spec_code=?",
                     (self.product_id, str(spec_code))
                 )
                 order_count = order_count_res[0][0] if order_count_res and order_count_res[0][0] else 0
+                refund_count = order_count_res[0][1] if order_count_res and len(order_count_res[0]) > 1 and order_count_res[0][1] else 0
                 if is_locked == 1:
                     weight_text = f"🔒 {weight_percent:.2f}%"
                 else:
@@ -731,7 +738,29 @@ class ProductSpecDialog(QDialog):
                 order_compare_layout.addWidget(order_compare_label)
                 self.table.setCellWidget(row_idx, 10, order_compare_widget)
 
-                # 第 11 列添加删除按钮
+                # 第 11 列添加退款订单
+                refund_orders_item = QTableWidgetItem(f"{refund_count}单" if refund_count > 0 else "无")
+                refund_orders_item.setTextAlignment(Qt.AlignCenter)
+                refund_orders_item.setFlags(refund_orders_item.flags() & ~Qt.ItemIsEditable)
+                if refund_count > 0:
+                    refund_orders_item.setForeground(QColor("#e74c3c"))
+                else:
+                    refund_orders_item.setForeground(QColor("#95a5a6"))
+                self.table.setItem(row_idx, 11, refund_orders_item)
+
+                # 第 12 列添加退款占比
+                if order_count > 0 and refund_count > 0:
+                    refund_ratio = refund_count / order_count * 100
+                    refund_ratio_item = QTableWidgetItem(f"{refund_ratio:.2f}%")
+                    refund_ratio_item.setForeground(QColor("#e74c3c"))
+                else:
+                    refund_ratio_item = QTableWidgetItem("无")
+                    refund_ratio_item.setForeground(QColor("#95a5a6"))
+                refund_ratio_item.setTextAlignment(Qt.AlignCenter)
+                refund_ratio_item.setFlags(refund_ratio_item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row_idx, 12, refund_ratio_item)
+
+                # 第 13 列添加删除按钮
                 btn_delete = QPushButton("🗑️")
                 btn_delete.setToolTip("删除此规格")
                 btn_delete.setStyleSheet("""
@@ -742,7 +771,7 @@ class ProductSpecDialog(QDialog):
                     QPushButton:pressed { background-color: #d9363e; }
                 """)
                 btn_delete.clicked.connect(lambda checked, r=row_idx: self.delete_spec_row(r))
-                self.table.setCellWidget(row_idx, 11, btn_delete)
+                self.table.setCellWidget(row_idx, 13, btn_delete)
                 
                 # 🔑【关键修复】强制更新表格
                 self.table.update()
@@ -1217,7 +1246,21 @@ class ProductSpecDialog(QDialog):
         order_compare_layout.addWidget(order_compare_sub_label)
         self.table.setCellWidget(idx, 10, order_compare_widget)
 
-        # 第11列：删除按钮
+        # 第11列：退款订单
+        refund_orders_item = QTableWidgetItem("无")
+        refund_orders_item.setTextAlignment(Qt.AlignCenter)
+        refund_orders_item.setFlags(refund_orders_item.flags() & ~Qt.ItemIsEditable)
+        refund_orders_item.setForeground(QColor("#95a5a6"))
+        self.table.setItem(idx, 11, refund_orders_item)
+
+        # 第12列：退款占比
+        refund_ratio_item = QTableWidgetItem("无")
+        refund_ratio_item.setTextAlignment(Qt.AlignCenter)
+        refund_ratio_item.setFlags(refund_ratio_item.flags() & ~Qt.ItemIsEditable)
+        refund_ratio_item.setForeground(QColor("#95a5a6"))
+        self.table.setItem(idx, 12, refund_ratio_item)
+
+        # 第13列：删除按钮
         btn_delete = QPushButton("🗑️")
         btn_delete.setToolTip("删除此规格")
         btn_delete.setStyleSheet("""
@@ -1228,7 +1271,7 @@ class ProductSpecDialog(QDialog):
             QPushButton:pressed { background-color: #d9363e; }
         """)
         btn_delete.clicked.connect(lambda checked, r=idx: self.delete_spec_row(r))
-        self.table.setCellWidget(idx, 11, btn_delete)
+        self.table.setCellWidget(idx, 13, btn_delete)
 
         self.table.scrollToBottom()
 
@@ -2984,6 +3027,12 @@ class SpecImportHistoryDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
+
+        debug_label = QLabel("🔧 调试: product_spec.py (SpecImportHistoryDialog)")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        layout.addWidget(debug_label)
 
         title_label = QLabel(f"📊 {self.product_name} - 规格订单历史记录")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")

@@ -1,0 +1,24 @@
+﻿{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Shop Manager",
+            "type": "shell",
+            "command": "${workspaceFolder}\\venv_package\\Scripts\\python.exe",
+            "args": [
+                "${workspaceFolder}\\manager\\shop_manager.py"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

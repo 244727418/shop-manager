@@ -19,6 +19,12 @@ class InputDataDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
+        debug_label = QLabel("🔧 调试: input_data_dialog.py")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        layout.addWidget(debug_label)
+
         title = QLabel("📝 请填写以下数据（手动输入项）")
         title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
         layout.addWidget(title)

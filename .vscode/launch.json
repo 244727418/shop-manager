@@ -1,0 +1,17 @@
+﻿{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug manager/shop_manager.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/manager/shop_manager.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": []
+        }
+    ]
+}

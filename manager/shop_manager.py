@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "2.8.1"
+VERSION = "2.9"
 
 # ================= 系统标准库 =================
 import sys
@@ -256,6 +256,12 @@ class ShopManagerApp(QMainWindow):
     def init_ui(self):
         self.setWindowTitle(f"电商店铺操作记录管理工具 v{VERSION}")
         self.resize(1350, 850)
+
+        # 调试标签
+        self.debug_label = QLabel("🔧 调试: shop_manager.py (ShopManagerApp)")
+        self.debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        self.debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.debug_label.setCursor(Qt.IBeamCursor)
 
         # 系统资源监控显示（顶部细条）
         self.resource_label = QLabel("📊 系统资源: 初始化...")
@@ -579,6 +585,9 @@ class ShopManagerApp(QMainWindow):
         
         # --- 布局代码 (保持你原有的不变) ---
         main_layout = QVBoxLayout()
+
+        # 添加调试标签到最顶部
+        main_layout.addWidget(self.debug_label)
 
         # 添加资源监控标签到顶部
         main_layout.addWidget(self.resource_label)

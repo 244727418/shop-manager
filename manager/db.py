@@ -342,6 +342,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加actual_amount字段到imported_orders表")
                 except Exception as e:
                     print(f"添加actual_amount字段失败: {e}")
+            if 'refund_count' not in imported_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN refund_count INTEGER DEFAULT 0")
+                    print("✅ 已添加refund_count字段到imported_orders表")
+                except Exception as e:
+                    print(f"添加refund_count字段失败: {e}")
 
             self.cursor.execute("PRAGMA table_info(profit_records)")
             columns = [col[1] for col in self.cursor.fetchall()]
