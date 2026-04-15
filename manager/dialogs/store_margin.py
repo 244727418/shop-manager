@@ -407,8 +407,9 @@ class LargeMarginDataDialog(QDialog):
                 font-size: 16px;
             }
             QTableWidget::item:selected {
-                background-color: #0078d7;
-                color: white;
+                background-color: #e6f3ff;
+                color: black;
+                outline: none;
             }
             QHeaderView {
                 border: none;
@@ -1478,8 +1479,9 @@ class StoreMarginDialog(QDialog):
                 font-size: 14px;
             }
             QTableWidget::item:selected {
-                background-color: #0078d7;
-                color: white;
+                background-color: #e6f3ff;
+                color: black;
+                outline: none;
             }
             QHeaderView {
                 border: none;
@@ -1538,7 +1540,7 @@ class StoreMarginDialog(QDialog):
                 font-size: 14px;
                 border: 1px solid #cccccc;
                 border-radius: 4px;
-                background-color: #f0f8ff;
+                background-color: white;
             }
             QTableWidget::item {
                 padding: 0px;
@@ -1570,7 +1572,7 @@ class StoreMarginDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(13)
         self.table.setHorizontalHeaderLabels(["图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "销售额", "主卖规格", "操作"])
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
@@ -1578,6 +1580,29 @@ class StoreMarginDialog(QDialog):
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
         for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 100, 60, 100, 80, 100, 80]):
             self.table.setColumnWidth(i, w)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #cccccc;
+                font-size: 14px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                background-color: white;
+            }
+            QTableWidget::item {
+                padding: 0px;
+                text-align: center;
+                border: 1px solid #cccccc;
+                font-size: 14px;
+            }
+            QTableWidget::item:selected {
+                background-color: #e6f3ff;
+                color: black;
+                outline: none;
+            }
+            QTableWidget::item:hover {
+                background-color: #d4edda;
+            }
+        """)
         historical_layout.addWidget(self.table)
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)

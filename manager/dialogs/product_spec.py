@@ -385,12 +385,26 @@ class ProductSpecDialog(QDialog):
         for i in range(2, 12):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
 
         # 设置表格字体和样式
         self.table.setStyleSheet("""
-            QTableWidget { font-size: 14px; }
-            QTableWidget::item { text-align: center; font-weight: bold; }
+            QTableWidget {
+                font-size: 13px;
+            }
+            QTableWidget::item {
+                text-align: center;
+                font-weight: normal;
+            }
+            QTableWidget::item:selected {
+                background-color: #e6f3ff;
+                color: black;
+                outline: none;
+            }
+            QHeaderView::section {
+                font-size: 13px;
+                font-weight: bold;
+            }
         """)
         
         # 设置默认行高，确保输入框显示完整
@@ -2984,9 +2998,18 @@ class SpecImportHistoryDialog(QDialog):
         for i in range(5):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.setStyleSheet("""
-            QTableWidget::item { text-align: center; }
+            QTableWidget {
+                font-size: 13px;
+            }
+            QTableWidget::item {
+                text-align: center;
+            }
+            QHeaderView::section {
+                font-size: 13px;
+                font-weight: bold;
+            }
         """)
         layout.addWidget(self.table)
 

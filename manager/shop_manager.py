@@ -783,9 +783,10 @@ class ShopManagerApp(QMainWindow):
             /* 选中行的样式 */
             QTableWidget::item:selected {
                 background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
-                color: black;                   /* 选中行文字颜色 - 白色 */
+                color: black;                   /* 选中行文字颜色 - 黑色 */
                 border: none;
                 padding: 0px;
+                outline: none;
             }
 
             /* 当窗口失去焦点时的选中行样式 */
@@ -793,6 +794,7 @@ class ShopManagerApp(QMainWindow):
                 background-color: #d4edda;    /* 失焦时的背景色 - 灰色 */
                 color: black;
                 padding: 0px;
+                outline: none;
             }
 
             /* 鼠标悬停时的行样式 */

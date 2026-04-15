@@ -28,7 +28,7 @@ class OperationRecordDialog(QDialog):
         self.rows = []
 
         self.setWindowTitle(f"编辑操作记录 - {year}年{month:02d}月{day:02d}日")
-        self.resize(550, 450)
+        self.resize(500, 300)
         self.init_ui()
 
     def init_ui(self):

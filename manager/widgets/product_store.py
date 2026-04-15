@@ -819,9 +819,8 @@ class RecordRow(QWidget):
         main_layout.setSpacing(0)
 
         row1 = QWidget()
-        row1.setStyleSheet("border-bottom: 1px solid #ddd; background-color: #fafafa;")
         row1_layout = QHBoxLayout(row1)
-        row1_layout.setContentsMargins(3, 2, 3, 2)
+        row1_layout.setContentsMargins(2, 1, 2, 1)
         row1_layout.setSpacing(3)
 
         time_label = QLabel("🕐")
@@ -862,9 +861,8 @@ class RecordRow(QWidget):
 
         if with_task_buttons:
             row2 = QWidget()
-            row2.setStyleSheet("background-color: #f0f7ff;")
             row2_layout = QHBoxLayout(row2)
-            row2_layout.setContentsMargins(3, 2, 3, 2)
+            row2_layout.setContentsMargins(2, 1, 2, 1)
             row2_layout.setSpacing(8)
 
             self.chk_task = QCheckBox("☑️ 任务")
@@ -896,6 +894,7 @@ class RecordRow(QWidget):
             self.reminder_time = QTimeEdit()
             self.reminder_time.setDisplayFormat("HH:mm")
             self.reminder_time.setFixedWidth(55)
+            self.reminder_time.setTime(QTime.currentTime())
             self.reminder_time.setVisible(False)
             row2_layout.addWidget(self.reminder_time)
 
