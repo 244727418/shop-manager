@@ -299,12 +299,13 @@ class SafeDatabaseManager:
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS imported_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 store_id INTEGER NOT NULL,
-                product_id INTEGER NOT NULL,
+                product_id TEXT NOT NULL,
                 spec_code TEXT NOT NULL,
                 order_count INTEGER DEFAULT 1,
                 import_time TEXT NOT NULL,
                 order_date TEXT,
                 actual_amount REAL DEFAULT 0,
+                refund_count INTEGER DEFAULT 0,
                 UNIQUE(store_id, product_id, spec_code))''')
             
             # 创建订单导入历史记录表
@@ -324,9 +325,20 @@ class SafeDatabaseManager:
 
             self.cursor.execute("PRAGMA table_info(imported_orders)")
             imported_columns = [col[1] for col in self.cursor.fetchall()]
-            if 'product_id' not in imported_columns:
+
+            if 'product_id' in imported_columns:
+                self.cursor.execute(f"PRAGMA table_info(imported_orders)")
+                columns_info = self.cursor.fetchall()
+                for col in columns_info:
+                    if col[1] == 'product_id':
+                        col_type = col[2]
+                        if col_type == 'INTEGER':
+                            print("🔄 检测到 product_id 为 INTEGER，开始迁移为 TEXT...")
+                            self._migrate_imported_orders_product_id_to_text()
+                        break
+            else:
                 try:
-                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN product_id INTEGER")
+                    self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN product_id TEXT")
                     print("✅ 已添加product_id字段到imported_orders表")
                 except Exception as e:
                     print(f"添加product_id字段失败: {e}")
@@ -348,6 +360,9 @@ class SafeDatabaseManager:
                     print("✅ 已添加refund_count字段到imported_orders表")
                 except Exception as e:
                     print(f"添加refund_count字段失败: {e}")
+
+            # 检查并迁移 import_history.snapshot_data（旧数据格式转换）
+            self._migrate_import_history_snapshot_data()
 
             self.cursor.execute("PRAGMA table_info(profit_records)")
             columns = [col[1] for col in self.cursor.fetchall()]
@@ -445,6 +460,183 @@ class SafeDatabaseManager:
 
         except Exception as e:
             print(f"数据库表创建失败：{e}")
+
+    def _migrate_imported_orders_product_id_to_text(self):
+        """迁移 imported_orders.product_id 从 INTEGER (products.id) 改为 TEXT (products.name)
+
+        这个迁移会把 product_id 从存储 products.id 改为存储 products.name
+        确保未来直接用商品ID（用户输入的）作为关联键，更简单稳定
+        """
+        try:
+            print("🔍 开始迁移 imported_orders 表的 product_id 字段...")
+
+            # 1. 先备份原数据到临时表
+            self.cursor.execute("CREATE TABLE IF NOT EXISTS imported_orders_backup AS SELECT * FROM imported_orders")
+            print("  ✅ 已创建备份表 imported_orders_backup")
+
+            # 2. 创建新结构的表
+            self.cursor.execute("DROP TABLE IF EXISTS imported_orders_new")
+            self.cursor.execute('''CREATE TABLE imported_orders_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                product_id TEXT NOT NULL,
+                spec_code TEXT NOT NULL,
+                order_count INTEGER DEFAULT 1,
+                import_time TEXT NOT NULL,
+                order_date TEXT,
+                actual_amount REAL DEFAULT 0,
+                refund_count INTEGER DEFAULT 0,
+                UNIQUE(store_id, product_id, spec_code))''')
+            print("  ✅ 已创建新结构表 imported_orders_new")
+
+            # 3. 迁移数据：把 products.id 转换为 products.name
+            self.cursor.execute('''
+                INSERT INTO imported_orders_new (id, store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
+                SELECT
+                    io.id,
+                    io.store_id,
+                    COALESCE(p.name, CAST(io.product_id AS TEXT)) as product_id,
+                    io.spec_code,
+                    io.order_count,
+                    io.import_time,
+                    io.order_date,
+                    io.actual_amount,
+                    COALESCE(io.refund_count, 0) as refund_count
+                FROM imported_orders_backup io
+                LEFT JOIN products p ON io.product_id = p.id
+            ''')
+            migrated_count = self.cursor.rowcount
+            print(f"  ✅ 已迁移 {migrated_count} 条数据")
+
+            # 4. 删除旧表，重命名新表
+            self.cursor.execute("DROP TABLE imported_orders")
+            self.cursor.execute("ALTER TABLE imported_orders_new RENAME TO imported_orders")
+            print("  ✅ 已用新表替换旧表")
+
+            # 5. 删除备份表
+            self.cursor.execute("DROP TABLE imported_orders_backup")
+            print("  ✅ 已删除备份表")
+
+            # 6. 提交事务
+            self.conn.commit()
+            print("✅ imported_orders.product_id 迁移完成！")
+
+            # 7. 迁移 import_history.snapshot_data
+            self._migrate_import_history_snapshot_data()
+
+        except Exception as e:
+            print(f"❌ 迁移失败: {e}")
+            self.conn.rollback()
+            try:
+                # 恢复备份
+                self.cursor.execute("DROP TABLE IF EXISTS imported_orders")
+                self.cursor.execute("ALTER TABLE imported_orders_backup RENAME TO imported_orders")
+                print("  ✅ 已从备份恢复")
+                self.conn.commit()
+            except:
+                pass
+            raise e
+
+    def _migrate_import_history_snapshot_data(self):
+        """迁移 import_history.snapshot_data 中的 product_id 从 sys_id 改为 product_name
+
+        旧的 snapshot_data key 格式: "1_红色M" (sys_id_规格编码)
+        新的 snapshot_data key 格式: "ABC123_红色M" (product_name_规格编码)
+
+        迁移策略：
+        1. 尝试把 key 的第一部分当作 sys_id（数字）查找对应的 products.name
+        2. 如果找到了，说明是旧格式，用 products.name 替换
+        3. 如果没找到，说明已经是新格式，保持原样
+        """
+        try:
+            print("🔍 开始迁移 import_history.snapshot_data...")
+
+            # 获取所有历史记录
+            self.cursor.execute("SELECT id, snapshot_data FROM import_history WHERE snapshot_data IS NOT NULL")
+            records = self.cursor.fetchall()
+
+            migrated_count = 0
+            for record_id, snapshot_data in records:
+                if not snapshot_data:
+                    continue
+
+                try:
+                    import json
+                    snapshot = json.loads(snapshot_data)
+                    if "orders" not in snapshot:
+                        continue
+
+                    new_orders = {}
+                    changed = False
+                    for old_key, data in snapshot["orders"].items():
+                        parts = old_key.split("_", 1)
+                        if len(parts) >= 2:
+                            first_part = parts[0]
+                            spec_code = parts[1]
+
+                            # 检查 first_part 是否是纯数字（sys_id 格式）
+                            if first_part.isdigit():
+                                # 可能是旧格式，尝试查找对应的商品
+                                sys_id = int(first_part)
+                                self.cursor.execute("SELECT name FROM products WHERE id = ?", (sys_id,))
+                                result = self.cursor.fetchone()
+                                if result:
+                                    # 找到了，说明确实是旧格式，需要转换
+                                    new_prod_id = result[0]
+                                    new_key = f"{new_prod_id}_{spec_code}"
+                                    new_orders[new_key] = data
+                                    changed = True
+                                    continue
+
+                            # 不是纯数字，或者是纯数字但找不到对应商品（新商品还没创建），保持原样
+                            new_orders[old_key] = data
+
+                    if changed:
+                        new_snapshot = json.dumps({"orders": new_orders})
+                        self.cursor.execute("UPDATE import_history SET snapshot_data = ? WHERE id = ?",
+                                          (new_snapshot, record_id))
+                        migrated_count += 1
+
+                except (json.JSONDecodeError, Exception):
+                    continue
+
+            self.conn.commit()
+            if migrated_count > 0:
+                print(f"  ✅ 已迁移 {migrated_count} 条历史记录的 snapshot_data")
+            else:
+                print("  ℹ️  没有需要迁移的 snapshot_data（可能已经是新格式）")
+
+        except Exception as e:
+            print(f"  ⚠️  snapshot_data 迁移失败: {e}")
+            self.conn.rollback()
+
+    def _check_and_migrate_snapshot_data(self):
+        """手动检查并迁移 snapshot_data（调试用）"""
+        try:
+            print("🔍 手动检查 snapshot_data 迁移状态...")
+
+            self.cursor.execute("SELECT id, snapshot_data FROM import_history WHERE snapshot_data IS NOT NULL")
+            records = self.cursor.fetchall()
+
+            for record_id, snapshot_data in records:
+                if not snapshot_data:
+                    continue
+
+                try:
+                    import json
+                    snapshot = json.loads(snapshot_data)
+                    if "orders" not in snapshot:
+                        continue
+
+                    orders = snapshot.get("orders", {})
+                    if len(orders) > 0:
+                        sample_keys = list(orders.keys())[:3]
+                        print(f"  record_id={record_id}, sample_keys={sample_keys}")
+                except:
+                    continue
+
+        except Exception as e:
+            print(f"  ⚠️  检查失败: {e}")
 
     def safe_execute(self, query, params=()):
         try:

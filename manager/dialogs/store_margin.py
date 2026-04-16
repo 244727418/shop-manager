@@ -267,6 +267,12 @@ class LargeMarginDataDialog(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
+        debug_label = QLabel("🔧 调试: store_margin.py (LargeMarginDataDialog)")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        main_layout.addWidget(debug_label)
+
         header_label = QLabel("📈 毛利数据明细 - 放大查看模式（点击右上角关闭按钮退出）")
         header_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
         main_layout.addWidget(header_label)
@@ -835,7 +841,7 @@ class LargeMarginDataDialog(QDialog):
         
         # 创建表格显示总和
         total_table = QTableWidget()
-        total_table.setColumnCount(21)
+        total_table.setColumnCount(20)
         total_table.setHorizontalHeaderLabels([
             "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
             "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
@@ -1132,11 +1138,11 @@ class StoreMarginDialog(QDialog):
                 return sys_id
         return None
 
-    def get_main_spec(self, sys_id):
+    def get_main_spec(self, prod_id):
         """获取商品的主卖规格"""
         spec_counts = self.db.safe_fetchall(
             "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
-            (sys_id,)
+            (prod_id,)
         )
         if not spec_counts:
             return None, 0
@@ -1277,6 +1283,12 @@ class StoreMarginDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        debug_label = QLabel("🔧 调试: store_margin.py")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        layout.addWidget(debug_label)
 
         # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
@@ -1450,7 +1462,7 @@ class StoreMarginDialog(QDialog):
 
         # 子板块C: 手动录入数据表格
         self.margin_data_table = QTableWidget()
-        self.margin_data_table.setColumnCount(21)  # 日期 + 20个指标
+        self.margin_data_table.setColumnCount(20)  # 日期 + 19个指标
         # 设置表头
         self.margin_data_table.setHorizontalHeaderLabels([
             "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
@@ -1567,6 +1579,13 @@ class StoreMarginDialog(QDialog):
         section_title_2 = QLabel("📦 订单规格毛利权重")
         section_title_2.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 4px;")
         historical_layout.addWidget(section_title_2)
+
+        # 调试标签：显示 imported_orders 数据情况
+        self.lbl_debug_refund = QLabel("🔧 imported_orders表: 待查询...")
+        self.lbl_debug_refund.setStyleSheet("font-size: 11px; color: #e74c3c; background-color: #fdf2f2; padding: 4px 8px; border: 1px solid #e74c3c; border-radius: 4px;")
+        self.lbl_debug_refund.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_debug_refund.setCursor(Qt.IBeamCursor)
+        historical_layout.addWidget(self.lbl_debug_refund)
 
         # 毛利明细表格
         self.table = QTableWidget()
@@ -1760,6 +1779,7 @@ class StoreMarginDialog(QDialog):
         )
         self.sys_id_to_user_id = {}
         self.product_weights = {}
+        self.refund_widgets = {}
         for prod in products:
             sys_id, prod_id, prod_title, image_data, store_weight, store_locked = prod
             self.sys_id_to_user_id[sys_id] = prod_id
@@ -1891,30 +1911,21 @@ class StoreMarginDialog(QDialog):
             self.table.setCellWidget(row, 11, main_spec_widget)
             if prod_id in self.product_weights:
                 self.product_weights[prod_id]["main_spec"] = main_spec_label
-                main_spec_code, spec_orders = self.get_main_spec(sys_id)
+                main_spec_code, spec_orders = self.get_main_spec(prod_id)
                 if spec_orders > 0 and main_spec_code:
                     main_spec_label.setText(str(main_spec_code))
                 elif spec_orders == 0:
                     main_spec_label.setText("无")
-            
-            refund_orders_widget = QWidget()
-            refund_orders_layout = QHBoxLayout(refund_orders_widget)
-            refund_orders_layout.setContentsMargins(0, 0, 0, 0)
             refund_orders_label = QLabel("无")
             refund_orders_label.setAlignment(Qt.AlignCenter)
-            refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 14px;")
-            refund_orders_layout.addWidget(refund_orders_label)
-            self.table.setCellWidget(row, 12, refund_orders_widget)
-            
-            refund_ratio_widget = QWidget()
-            refund_ratio_layout = QHBoxLayout(refund_ratio_widget)
-            refund_ratio_layout.setContentsMargins(0, 0, 0, 0)
+            refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            self.table.setCellWidget(row, 12, refund_orders_label)
+            self.refund_widgets[row] = {'orders': refund_orders_label}
             refund_ratio_label = QLabel("无")
             refund_ratio_label.setAlignment(Qt.AlignCenter)
-            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 14px;")
-            refund_ratio_layout.addWidget(refund_ratio_label)
-            self.table.setCellWidget(row, 13, refund_ratio_widget)
-            
+            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            self.table.setCellWidget(row, 13, refund_ratio_label)
+            self.refund_widgets[row]['ratio'] = refund_ratio_label
             btn_widget = QWidget()
             btn_layout = QHBoxLayout(btn_widget)
             btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -1923,11 +1934,10 @@ class StoreMarginDialog(QDialog):
             btn_edit.clicked.connect(lambda checked, sid=sys_id, pid=prod_id, pt=prod_title: self.open_spec_dialog(sid, pid, pt))
             btn_layout.addWidget(btn_edit)
             self.table.setCellWidget(row, 14, btn_widget)
-            
             self.table.setItem(row, 10, QTableWidgetItem("-"))
             self.table.item(row, 1).setData(Qt.UserRole, prod_id)
             order_label.setProperty("prod_id", prod_id)
-            self._update_order_label_for_row(row, weight_input, order_label, sys_id)
+            self._update_order_label_for_row(row, weight_input, order_label, prod_id)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.calculate_total_margin()
         self.update_current_history_label()
@@ -1941,17 +1951,19 @@ class StoreMarginDialog(QDialog):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            user_id = prod_id_item.data(Qt.UserRole)
-            if not user_id:
+            user_product_id = prod_id_item.data(Qt.UserRole)
+            if not user_product_id:
                 continue
-            sys_id = self.get_sys_id_by_user_id(user_id)
+            sys_id = self.get_sys_id_by_user_id(user_product_id)
             if not sys_id:
+                self.table.item(row, 4).setText("-")
+                self.table.item(row, 10).setText("-")
                 continue
             spec_sales = self.db.safe_fetchall(
                 "SELECT ps.sale_price, io.order_count FROM product_specs ps "
-                "LEFT JOIN imported_orders io ON io.product_id = ps.product_id AND io.spec_code = ps.spec_code "
+                "LEFT JOIN imported_orders io ON io.product_id = ? AND io.spec_code = ps.spec_code "
                 "WHERE ps.product_id = ?",
-                (sys_id,)
+                (user_product_id, sys_id)
             )
             total_amount = 0.0
             total_orders = 0
@@ -2873,7 +2885,7 @@ class StoreMarginDialog(QDialog):
     def _update_order_label_for_row(self, row, weight_input, order_label, prod_id):
         """更新单量显示标签"""
         spec_counts = self.db.safe_fetchall(
-            "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+            "SELECT spec_code, order_count, refund_count FROM imported_orders WHERE product_id=?",
             (prod_id,)
         )
         total_prod_orders = sum(sc[1] for sc in spec_counts) if spec_counts else 0
@@ -2883,6 +2895,57 @@ class StoreMarginDialog(QDialog):
         else:
             order_label.setText("0单")
             weight_input.setToolTip("")
+        refund_orders_label = self.table.cellWidget(row, 12)
+        refund_ratio_label = self.table.cellWidget(row, 13)
+        # 调试
+        print(f"【调试 _update_order_label_for_row】行={row}, prod_id={prod_id}, spec_counts记录数={len(spec_counts) if spec_counts else 0}")
+        if spec_counts:
+            total_orders = sum(sc[1] or 0 for sc in spec_counts)
+            total_refund = sum(sc[2] or 0 for sc in spec_counts)
+            print(f"  total_orders={total_orders}, total_refund={total_refund}")
+            if total_orders > 0 and total_refund > 0:
+                refund_rate = total_refund / total_orders * 100
+                if refund_orders_label and hasattr(refund_orders_label, 'setText'):
+                    refund_orders_label.setText(f"{refund_rate:.2f}%")
+                    refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                max_refund_spec = None
+                max_refund_rate = -1
+                for spec_code, oc, rc in spec_counts:
+                    oc = oc or 0
+                    rc = rc or 0
+                    if oc > 0 and rc > 0:
+                        sr = rc / oc
+                        if sr > max_refund_rate:
+                            max_refund_rate = sr
+                            max_refund_spec = spec_code
+                if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
+                    if max_refund_spec:
+                        refund_ratio_label.setText(str(max_refund_spec))
+                        refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                    else:
+                        refund_ratio_label.setText("无")
+                        refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            elif total_orders > 0 and total_refund == 0:
+                if refund_orders_label and hasattr(refund_orders_label, 'setText'):
+                    refund_orders_label.setText("0.00%")
+                    refund_orders_label.setStyleSheet("color: #27ae60; font-size: 12px;")
+                if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
+                    refund_ratio_label.setText("无")
+                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            else:
+                if refund_orders_label and hasattr(refund_orders_label, 'setText'):
+                    refund_orders_label.setText("无")
+                    refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
+                    refund_ratio_label.setText("无")
+                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        else:
+            if refund_orders_label and hasattr(refund_orders_label, 'setText'):
+                refund_orders_label.setText("无")
+                refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
+                refund_ratio_label.setText("无")
+                refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
 
     def get_product_margin(self, product_id):
         specs = self.db.safe_fetchall(
@@ -3190,13 +3253,14 @@ class StoreMarginDialog(QDialog):
         
         self.comparison_result.setText(result_text)
 
-    def open_spec_dialog_by_id(self, user_id):
-        for sys_id, uid in self.sys_id_to_user_id.items():
-            if uid == user_id:
-                prod = self.db.safe_fetchall("SELECT title FROM products WHERE id=?", (sys_id,))
-                if prod:
-                    self.open_spec_dialog(sys_id, user_id, prod[0][0])
-                break
+    def open_spec_dialog_by_id(self, user_product_id):
+        prod = self.db.safe_fetchall(
+            "SELECT id, title FROM products WHERE name=? AND store_id=?",
+            (user_product_id, self.store_id)
+        )
+        if prod:
+            sys_id, prod_title = prod[0]
+            self.open_spec_dialog(sys_id, user_product_id, prod_title)
 
     def open_spec_dialog(self, sys_id, prod_id, prod_title):
         """通过 main_app 打开规格对话框，避免 dialogs 依赖主模块中的 ProductSpecDialog"""
@@ -3256,10 +3320,12 @@ class StoreMarginDialog(QDialog):
                     product_id_value = str(row[product_id_col]).strip() if product_id_col < len(row) else ""
                     spec_code_value = str(row[spec_code_col]).strip() if spec_code_col < len(row) else ""
                     quantity_value = row[quantity_col] if quantity_col < len(row) and quantity_col is not None else None
-                    status_value = str(row[status_col]).strip() if status_col is not None and status_col < len(row) else ""
                     date_value = None
                     if date_col is not None and date_col < len(row):
                         date_value = row[date_col]
+                    status_value = None
+                    if status_col is not None and status_col < len(row):
+                        status_value = str(row[status_col]).strip() if row[status_col] else ""
                 except:
                     continue
                 if not product_id_value or product_id_value == "None":
@@ -3294,30 +3360,21 @@ class StoreMarginDialog(QDialog):
                 spec_codes = all_store_specs.get(prod_id, set())
                 spec_code_str = str(spec_code_value).strip() if spec_code_value else ""
                 if spec_code_str and spec_code_str != "None" and spec_code_str in spec_codes:
-                    is_valid_order = False
-                    is_refund = False
+                    if status_col is not None and status_value:
+                        is_valid_order = ("已发货" in status_value) or ("已收货" in status_value)
+                        if not is_valid_order:
+                            continue
+                    matched_count += 1
+                    key = (prod_id, spec_code_str)
+                    if key not in order_data:
+                        order_data[key] = {"count": 0, "refund_count": 0, "dates": []}
+                    order_data[key]["count"] += quantity
+                    if order_date_str:
+                        order_data[key]["dates"].append(order_date_str)
                     if status_value:
-                        if "已发货" in status_value or "已收货" in status_value:
-                            is_valid_order = True
-                            if "退款成功" in status_value:
-                                is_refund = True
-                        elif "已取消" in status_value or "未发货" in status_value:
-                            is_valid_order = False
-                            is_refund = False
-                        else:
-                            is_valid_order = True
-                    else:
-                        is_valid_order = True
-                    if is_valid_order:
-                        matched_count += 1
-                        key = (prod_id, spec_code_str)
-                        if key not in order_data:
-                            order_data[key] = {"count": 0, "dates": [], "refund_count": 0}
-                        order_data[key]["count"] += quantity
+                        is_refund = "退款成功" in status_value
                         if is_refund:
                             order_data[key]["refund_count"] += quantity
-                        if order_date_str:
-                            order_data[key]["dates"].append(order_date_str)
             
             missing_product_codes = product_codes_in_store - excel_product_codes_found
             if missing_product_codes:
@@ -3348,14 +3405,12 @@ class StoreMarginDialog(QDialog):
                 earliest_date = min(data["dates"]) if data["dates"] else None
                 latest_date = max(data["dates"]) if data["dates"] else None
                 date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
-                refund_count = data.get("refund_count", 0)
                 self.db.safe_execute(
                     "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.store_id, prod_id, spec_code, data["count"], import_time, date_range, 0, refund_count)
+                    (self.store_id, prod_id, spec_code, data["count"], import_time, date_range, 0, data.get("refund_count", 0))
                 )
             self.update_compare_columns()
             self.update_orders_display()
-            self.update_product_avg_price()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
@@ -3367,7 +3422,7 @@ class StoreMarginDialog(QDialog):
         spec_code_keywords = ["规格编码", "规格code", "spec_code", "规格code", "sku", "SKU"]
         quantity_keywords = ["数量", "订单数量", "quantity", "count", "num", "销售数量"]
         order_date_keywords = ["日期", "date", "时间", "time", "订单日期", "下单日期", "成交时间"]
-        order_status_keywords = ["订单状态", "状态", "order_status", "status"]
+        order_status_keywords = ["订单状态", "状态", "order_status", "order state"]
         for idx, header in enumerate(headers):
             header_lower = header.lower().strip()
             if mapping["product_id"] is None:
@@ -3392,7 +3447,7 @@ class StoreMarginDialog(QDialog):
                         break
             if mapping["order_status"] is None:
                 for kw in order_status_keywords:
-                    if kw in header_lower:
+                    if kw in header:
                         mapping["order_status"] = idx
                         break
         return mapping
@@ -3438,7 +3493,7 @@ class StoreMarginDialog(QDialog):
         combo_order_status.addItems(["-- 不选择 --"] + headers)
         if auto_mapping.get("order_status") is not None:
             combo_order_status.setCurrentIndex(auto_mapping["order_status"] + 1)
-        layout.addWidget(QLabel("订单状态列（用于识别退款订单）："))
+        layout.addWidget(QLabel("订单状态列（用于识别退款）："))
         layout.addWidget(combo_order_status)
         
         layout.addSpacing(20)
@@ -3469,77 +3524,96 @@ class StoreMarginDialog(QDialog):
     
     def update_orders_display(self):
         """更新单量列显示"""
+        # 获取当前导入的数据
         current_data = self.db.safe_fetchall("""
             SELECT product_id, spec_code, order_count, refund_count
             FROM imported_orders
             WHERE store_id=?
         """, (self.store_id,))
-        
+
+        # 计算每个商品的总订单数和退款数（直接用 product_id 即商品ID字符串）
         prod_order_totals = {}
-        prod_refund_totals = {}
-        prod_refund_specs = {}
+        prod_refund_data = {}
+        total_refund_sum = 0
         for prod_id, spec_code, order_count, refund_count in current_data:
             if prod_id not in prod_order_totals:
                 prod_order_totals[prod_id] = 0
-                prod_refund_totals[prod_id] = 0
-                prod_refund_specs[prod_id] = []
+                prod_refund_data[prod_id] = []
             prod_order_totals[prod_id] += order_count or 0
-            prod_refund_totals[prod_id] += refund_count or 0
-            if order_count and order_count > 0 and refund_count and refund_count > 0:
-                spec_refund_rate = refund_count / order_count
-                prod_refund_specs[prod_id].append((spec_code, spec_refund_rate))
-        
+            prod_refund_data[prod_id].append((spec_code, order_count or 0, refund_count or 0))
+            total_refund_sum += refund_count or 0
+
+        # 更新调试标签
+        if hasattr(self, 'lbl_debug_refund'):
+            # 获取表格中第一行的商品ID用于对比
+            first_table_prod_id = None
+            if self.table.rowCount() > 0:
+                item = self.table.item(0, 1)
+                if item:
+                    first_table_prod_id = item.data(Qt.UserRole)
+            # 获取prod_refund_data中第一个商品ID用于对比
+            first_refund_prod_id = None
+            if prod_refund_data:
+                first_refund_prod_id = list(prod_refund_data.keys())[0]
+            refund_info = (f"🔧 imported_orders表: {len(current_data)}条记录, {len(prod_refund_data)}个商品, "
+                          f"总退款数:{total_refund_sum} | 表第1行prod_id={first_table_prod_id}, "
+                          f"import第1个={first_refund_prod_id}")
+            self.lbl_debug_refund.setText(refund_info)
+            self.lbl_debug_refund.setToolTip(f"文件: store_margin.py\n类: StoreMarginDialog\n方法: update_orders_display()\n"
+                                            f"表格第1行prod_id={first_table_prod_id}\n"
+                                            f"imported_orders第1个prod_id={first_refund_prod_id}\n"
+                                            f"两者是否相等={first_table_prod_id == first_refund_prod_id}")
+
+        # 遍历表格行，统计匹配情况
+        match_success = 0
+        match_fail_no_data = 0
+        match_fail_no_refund = 0
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            user_id = prod_id_item.data(Qt.UserRole)
-            if not user_id:
+            user_product_id = prod_id_item.data(Qt.UserRole)
+            if not user_product_id:
                 continue
-            
-            sys_id = None
-            for sid, uid in self.sys_id_to_user_id.items():
-                if uid == user_id:
-                    sys_id = sid
-                    break
-            
+
             order_label_widget = self.table.cellWidget(row, 8)
-            refund_orders_widget = self.table.cellWidget(row, 12)
-            refund_ratio_widget = self.table.cellWidget(row, 13)
-            
-            refund_orders_label = refund_orders_widget.layout().itemAt(0).widget() if refund_orders_widget else None
-            refund_ratio_label = refund_ratio_widget.layout().itemAt(0).widget() if refund_ratio_widget else None
-            
-            if sys_id and sys_id in prod_order_totals:
-                total_orders = prod_order_totals[sys_id]
-                total_refund = prod_refund_totals.get(sys_id, 0)
-                if order_label_widget:
-                    order_label = order_label_widget.layout().itemAt(0).widget()
-                    if order_label:
-                        order_label.setText(f"{total_orders}单")
+            if order_label_widget and user_product_id:
+                order_label = order_label_widget.layout().itemAt(0).widget()
+                if order_label:
+                    if user_product_id in prod_order_totals:
+                        order_label.setText(f"{prod_order_totals[user_product_id]}单")
                         order_label.setStyleSheet("color: black; font-size: 12px;")
-                if total_orders > 0:
-                    if total_refund > 0:
-                        refund_rate = total_refund / total_orders * 100
-                        if refund_orders_label:
-                            refund_orders_label.setText(f"{refund_rate:.2f}%")
-                            refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
-                        max_refund_spec = None
-                        max_refund_rate = -1
-                        for spec_code, spec_rate in prod_refund_specs.get(sys_id, []):
-                            if spec_rate > max_refund_rate:
-                                max_refund_rate = spec_rate
+                    else:
+                        order_label.setText("0单")
+                        order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+
+            refund_orders_label = self.refund_widgets.get(row, {}).get('orders')
+            refund_ratio_label = self.refund_widgets.get(row, {}).get('ratio')
+            if user_product_id and user_product_id in prod_refund_data:
+                spec_data = prod_refund_data[user_product_id]
+                total_orders = sum(d[1] for d in spec_data)
+                total_refund = sum(d[2] for d in spec_data)
+                if total_orders > 0 and total_refund > 0:
+                    refund_rate = total_refund / total_orders * 100
+                    if refund_orders_label:
+                        refund_orders_label.setText(f"{refund_rate:.2f}%")
+                        refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                    max_refund_spec = None
+                    max_refund_rate_val = -1
+                    for spec_code, oc, rc in spec_data:
+                        if oc > 0 and rc > 0:
+                            sr = rc / oc
+                            if sr > max_refund_rate_val:
+                                max_refund_rate_val = sr
                                 max_refund_spec = spec_code
-                        if refund_ratio_label and max_refund_spec:
+                    if refund_ratio_label:
+                        if max_refund_spec:
                             refund_ratio_label.setText(str(max_refund_spec))
                             refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
-                    else:
-                        if refund_orders_label:
-                            refund_orders_label.setText("0.00%")
-                            refund_orders_label.setStyleSheet("color: #27ae60; font-size: 12px;")
-                        if refund_ratio_label:
+                        else:
                             refund_ratio_label.setText("无")
                             refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    match_success += 1
                 else:
                     if refund_orders_label:
                         refund_orders_label.setText("无")
@@ -3547,20 +3621,40 @@ class StoreMarginDialog(QDialog):
                     if refund_ratio_label:
                         refund_ratio_label.setText("无")
                         refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    match_fail_no_refund += 1
             else:
-                if order_label_widget:
-                    order_label = order_label_widget.layout().itemAt(0).widget()
-                    if order_label:
-                        order_label.setText("0单")
-                        order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
                 if refund_orders_label:
                     refund_orders_label.setText("无")
                     refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
                 if refund_ratio_label:
                     refund_ratio_label.setText("无")
                     refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-        
+                match_fail_no_data += 1
+
+        # 更新调试标签
+        if hasattr(self, 'lbl_debug_refund'):
+            first_table_prod_id = None
+            if self.table.rowCount() > 0:
+                item = self.table.item(0, 1)
+                if item:
+                    first_table_prod_id = item.data(Qt.UserRole)
+            first_refund_prod_id = None
+            if prod_refund_data:
+                first_refund_prod_id = list(prod_refund_data.keys())[0]
+            refund_info = (f"🔧 表:{len(current_data)}条,商品:{len(prod_refund_data)}个,退款:{total_refund_sum} | "
+                          f"匹配:成功{match_success},无数据{match_fail_no_data},无退款{match_fail_no_refund}")
+            self.lbl_debug_refund.setText(refund_info)
+            self.lbl_debug_refund.setToolTip(f"文件: store_margin.py\n类: StoreMarginDialog\n方法: update_orders_display()\n"
+                                            f"表格第1行prod_id={first_table_prod_id}\n"
+                                            f"imported第1个prod_id={first_refund_prod_id}\n"
+                                            f"两者相等={first_table_prod_id == first_refund_prod_id}")
+
         self.update_total_orders_label()
+
+        # 强制刷新表格显示
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QTimer
+        QApplication.processEvents()
     
     def update_current_history_label(self):
         """更新当前使用数据标签"""
@@ -3776,42 +3870,36 @@ class StoreMarginDialog(QDialog):
                 product_current[prod_id] = {"orders": 0, "specs": {}}
             product_current[prod_id]["orders"] += order_count
             product_current[prod_id]["specs"][spec_code] = order_count
-        
+
+        # 解析上一期快照数据的 key（使用商品ID字符串）
         product_last = {}
         for key, data in last_orders.items():
-            parts = key.split("_")
+            parts = key.split("_", 1)
             if len(parts) >= 2:
-                prod_id = int(parts[0])
-                spec_code = "_".join(parts[1:])
-                if prod_id not in product_last:
-                    product_last[prod_id] = {"orders": 0, "specs": {}}
-                product_last[prod_id]["orders"] += data["count"]
-                product_last[prod_id]["specs"][spec_code] = data["count"]
-        
+                user_product_id = parts[0]
+                spec_code = parts[1]
+                if user_product_id not in product_last:
+                    product_last[user_product_id] = {"orders": 0, "specs": {}}
+                product_last[user_product_id]["orders"] += data["count"]
+                product_last[user_product_id]["specs"][spec_code] = data["count"]
+
         # 更新表格中的对比列
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
                 continue
-            user_id = prod_id_item.data(Qt.UserRole)
-            if not user_id:
+            user_product_id = prod_id_item.data(Qt.UserRole)
+            if not user_product_id:
                 continue
-            
-            # 从 sys_id_to_user_id 反向查找 sys_id
-            sys_id = None
-            for sid, uid in self.sys_id_to_user_id.items():
-                if uid == user_id:
-                    sys_id = sid
-                    break
-            
+
             # 权重对比（百分比，2位小数）
             weight_compare_widget = self.table.cellWidget(row, 7)
             if not weight_compare_widget:
                 continue
             weight_label = weight_compare_widget.layout().itemAt(0).widget()
-            if sys_id and sys_id in product_current and sys_id in product_last:
-                current_total_orders = product_current[sys_id]["orders"]
-                last_total_orders = product_last[sys_id]["orders"]
+            if user_product_id and user_product_id in product_current and user_product_id in product_last:
+                current_total_orders = product_current[user_product_id]["orders"]
+                last_total_orders = product_last[user_product_id]["orders"]
 
                 order_change = current_total_orders - last_total_orders
                 if last_total_orders > 0:
@@ -3832,15 +3920,15 @@ class StoreMarginDialog(QDialog):
                 # 商品不在对比数据中，显示 "无"
                 weight_label.setText("无")
                 weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-            
+
             # 单量对比
             order_compare_widget = self.table.cellWidget(row, 9)
             if not order_compare_widget:
                 continue
             order_label = order_compare_widget.layout().itemAt(0).widget()
-            if sys_id and sys_id in product_current and sys_id in product_last:
-                current_orders = product_current[sys_id]["orders"]
-                last_orders_count = product_last[sys_id]["orders"]
+            if user_product_id and user_product_id in product_current and user_product_id in product_last:
+                current_orders = product_current[user_product_id]["orders"]
+                last_orders_count = product_last[user_product_id]["orders"]
                 order_change = current_orders - last_orders_count
 
                 if order_change > 0:
@@ -3933,6 +4021,12 @@ class ImportHistoryDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        debug_label = QLabel("🔧 调试: store_margin.py (ImportHistoryDialog)")
+        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        debug_label.setCursor(Qt.IBeamCursor)
+        layout.addWidget(debug_label)
+        
         # 标题
         title_label = QLabel(f"📊 {self.store_name} - 订单全部记录")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
@@ -3972,6 +4066,9 @@ class ImportHistoryDialog(QDialog):
     
     def load_history(self):
         """加载历史记录 - 按订单日期范围排序（最新日期排最上面）"""
+        # 调试：检查 snapshot_data 格式
+        self.db._check_and_migrate_snapshot_data()
+
         records = self.db.safe_fetchall("""
             SELECT id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data
             FROM import_history
@@ -4175,8 +4272,7 @@ class ImportHistoryDialog(QDialog):
                 self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
             
             self.load_history()
-            self.parent_window.update_product_avg_price()
-
+            
             # 气泡显示已删除
             self.parent_window.main_app.show_toast("✅ 已删除")
     
@@ -4227,10 +4323,10 @@ class ImportHistoryDialog(QDialog):
 
         # 恢复历史订单数据
         for key, data in orders_data.items():
-            parts = key.split("_")
+            parts = key.split("_", 1)
             if len(parts) >= 2:
-                prod_id = int(parts[0])
-                spec_code = "_".join(parts[1:])
+                user_product_id = parts[0]
+                spec_code = parts[1]
                 order_count = data.get("count", 0)
                 refund_count = data.get("refund_count", 0)
                 dates = data.get("dates", [])
@@ -4242,7 +4338,7 @@ class ImportHistoryDialog(QDialog):
                     INSERT OR REPLACE INTO imported_orders
                     (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (self.store_id, prod_id, spec_code, order_count,
+                """, (self.store_id, user_product_id, spec_code, order_count,
                       datetime.now().strftime("%Y-%m-%d %H:%M:%S"), date_range, 0, refund_count))
 
         # 关闭对话框
@@ -4252,5 +4348,4 @@ class ImportHistoryDialog(QDialog):
         if self.parent_window:
             self.parent_window.update_compare_columns()
             self.parent_window.update_orders_display()
-            self.parent_window.update_product_avg_price()
             self.parent_window.main_app.show_toast("✅ 已应用")
