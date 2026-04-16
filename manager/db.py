@@ -432,6 +432,16 @@ class SafeDatabaseManager:
             )''')
             print("✅ 手动毛利数据表已创建")
 
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS store_temp_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                slot_index INTEGER NOT NULL,
+                image_data BLOB NOT NULL,
+                created_time TEXT NOT NULL,
+                UNIQUE(store_id, slot_index)
+            )''')
+            print("✅ 店铺临时图片表已创建")
+
             # 每日任务表
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS daily_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

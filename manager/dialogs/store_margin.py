@@ -5,12 +5,12 @@ import json
 from datetime import datetime
 from PyQt5.QtWidgets import QHeaderView, QAbstractItemView
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
     QAbstractItemView, QFileDialog, QComboBox, QScrollArea, QHeaderView,
     QApplication
 )
-from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer
+from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator, QFont
 from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
 from PyQt5.QtGui import QClipboard
@@ -71,6 +71,101 @@ class ScalableTableWidget(QTableWidget):
                     font = item.font()
                     font.setPointSize(font_size)
                     item.setFont(font)
+
+
+class ImageCell(QWidget):
+    cell_hovered = pyqtSignal(int)
+    image_view_requested = pyqtSignal(int)
+    paste_requested = pyqtSignal(int)
+    clear_requested = pyqtSignal(int)
+
+    def __init__(self, index, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.image_label = None
+        self.clear_btn = None
+        self.current_pixmap = None
+        self.setStyleSheet("border: 2px dashed #cccccc; background-color: #f5f5f5; border-radius: 4px;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignCenter)
+        self.placeholder = QLabel("Ctrl+V\n粘贴图片")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setStyleSheet("color: #999999; font-size: 12px;")
+        layout.addWidget(self.placeholder)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def enterEvent(self, event):
+        self.cell_hovered.emit(self.index)
+        self.setFocus()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.clearFocus()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_V:
+            self.paste_requested.emit(self.index)
+            return
+        super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.current_pixmap:
+            self.image_view_requested.emit(self.index)
+        super().mouseDoubleClickEvent(event)
+
+    def set_image(self, pixmap):
+        self.current_pixmap = pixmap
+        self.placeholder.setVisible(False)
+
+        for child in self.children():
+            if isinstance(child, QWidget) and child != self.placeholder:
+                child.deleteLater()
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setAlignment(Qt.AlignCenter)
+
+        self.image_label = QLabel()
+        self.image_label.setPixmap(pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.image_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(self.image_label)
+
+        self.clear_btn = QPushButton("×")
+        self.clear_btn.setFixedSize(24, 24)
+        self.clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(231, 76, 60, 200);
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(192, 57, 43, 255);
+            }
+        """)
+        self.clear_btn.clicked.connect(lambda: self.clear_requested.emit(self.index))
+        container_layout.addWidget(self.clear_btn)
+
+        layout = self.layout()
+        layout.addWidget(container)
+
+    def clear_image(self):
+        for child in self.children():
+            if isinstance(child, QWidget) and child != self.placeholder:
+                child.deleteLater()
+        self.image_label = None
+        self.clear_btn = None
+        self.current_pixmap = None
+        self.placeholder.setVisible(True)
+
+    def has_image(self):
+        return self.current_pixmap is not None
 
 
 class LargeMarginDataDialog(QDialog):
@@ -542,6 +637,55 @@ class LargeMarginDataDialog(QDialog):
         
         main_layout.addWidget(bottom_btn_widget)
 
+        self.image_area = QWidget()
+        self.image_area.setMaximumHeight(0)
+        self.image_area.setVisible(False)
+        image_layout = QHBoxLayout(self.image_area)
+        image_layout.setContentsMargins(0, 5, 0, 0)
+
+        self.image_grid = QGridLayout()
+        self.image_grid.setSpacing(5)
+        image_layout.addLayout(self.image_grid)
+
+        self.temp_images = []
+        self.image_count = 6
+
+        for i in range(self.image_count):
+            cell = ImageCell(i)
+            cell.setFixedSize(150, 150)
+            cell.cell_hovered.connect(self.on_cell_hovered)
+            cell.paste_requested.connect(self.on_paste_requested)
+            cell.image_view_requested.connect(self.show_image_viewer)
+            cell.clear_requested.connect(self.clear_temp_image)
+            cell.setAcceptDrops(True)
+            self.image_grid.addWidget(cell, 0, i)
+            self.temp_images.append(cell)
+
+        self.btn_toggle_image_area = QPushButton("📷")
+        self.btn_toggle_image_area.setFixedHeight(35)
+        self.btn_toggle_image_area.setFixedWidth(45)
+        self.btn_toggle_image_area.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        self.btn_toggle_image_area.clicked.connect(self.toggle_image_area)
+
+        main_layout.addWidget(self.btn_toggle_image_area)
+        main_layout.addWidget(self.image_area)
+
+        self.temp_image_index = -1
+        self.installEventFilter(self)
+
         self.records = records
 
         for col in range(self.table.columnCount()):
@@ -556,9 +700,134 @@ class LargeMarginDataDialog(QDialog):
         window_height = min(max(200 + data_rows * 60 + comparison_rows * 12, 600), screen.height() - 100)
         self.resize(window_width, window_height)
 
+    def toggle_image_area(self):
+        if self.image_area.isVisible():
+            self.image_area.setVisible(False)
+            self.image_area.setMaximumHeight(0)
+        else:
+            self.image_area.setVisible(True)
+            self.image_area.setMaximumHeight(220)
+
+    def on_cell_hovered(self, index):
+        self.temp_image_index = index
+
+    def on_paste_requested(self, index):
+        clipboard = QApplication.clipboard()
+        mimeData = clipboard.mimeData()
+        if mimeData.hasImage():
+            pixmap = QPixmap.fromImage(clipboard.image())
+            self.temp_images[index].set_image(pixmap)
+            self.save_temp_image(index, pixmap)
+
+    def save_temp_image(self, index, pixmap):
+        try:
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            buffer.open(QIODevice.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            image_data = bytes(byte_array)
+            self.db.safe_execute(
+                """INSERT OR REPLACE INTO store_temp_images (store_id, slot_index, image_data, created_time)
+                VALUES (?, ?, ?, ?)""",
+                (self.store_id, index, image_data, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            )
+        except Exception as e:
+            print(f"保存临时图片失败: {e}")
+
+    def load_temp_images(self):
+        try:
+            print(f"[DEBUG] load_temp_images called, store_id={self.store_id}, image_count={self.image_count}")
+            rows = self.db.safe_fetchall(
+                "SELECT slot_index, image_data FROM store_temp_images WHERE store_id=? ORDER BY slot_index",
+                (self.store_id,)
+            )
+            print(f"[DEBUG] Found {len(rows)} images in DB")
+            for slot_index, image_data in rows:
+                print(f"[DEBUG] Loading image to slot {slot_index}")
+                if slot_index < self.image_count:
+                    byte_array = QByteArray(image_data)
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(byte_array, "PNG")
+                    self.temp_images[slot_index].set_image(pixmap)
+        except Exception as e:
+            print(f"加载临时图片失败: {e}")
+
+    def clear_temp_image(self, index):
+        self.temp_images[index].clear_image()
+        try:
+            self.db.safe_execute(
+                "DELETE FROM store_temp_images WHERE store_id=? AND slot_index=?",
+                (self.store_id, index)
+            )
+        except Exception as e:
+            print(f"删除临时图片失败: {e}")
+
+    def eventFilter(self, obj, event):
+        return super().eventFilter(obj, event)
+
+    def show_image_viewer(self, index):
+        cell = self.temp_images[index]
+        if not cell or not cell.has_image():
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"图片 {index + 1}")
+        dialog.resize(900, 700)
+        dialog.setStyleSheet("background-color: #1a1a1a;")
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        self.viewer_index = index
+        self.viewer_cells = [c for c in self.temp_images if c.has_image()]
+
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setScaledContents(False)
+        label.mouseDoubleClickEvent = lambda e: dialog.close()
+
+        pixmap = self.viewer_cells[self.viewer_index].current_pixmap
+        scaled = pixmap.scaled(880, 660, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+        layout.addWidget(label)
+
+        nav_layout = QHBoxLayout()
+        btn_prev = QPushButton("◀ 上一张")
+        btn_prev.setStyleSheet("background-color: #444; color: white; padding: 8px 20px; border-radius: 4px;")
+        btn_prev.clicked.connect(lambda: self.navigate_image(-1, label))
+        btn_next = QPushButton("下一张 ▶")
+        btn_next.setStyleSheet("background-color: #444; color: white; padding: 8px 20px; border-radius: 4px;")
+        btn_next.clicked.connect(lambda: self.navigate_image(1, label))
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("background-color: #e74c3c; color: white; padding: 8px 20px; border-radius: 4px;")
+        btn_close.clicked.connect(dialog.close)
+
+        nav_layout.addWidget(btn_prev)
+        nav_layout.addStretch()
+        nav_layout.addWidget(QLabel(f"{self.viewer_index + 1} / {len(self.viewer_cells)}"))
+        nav_layout.addStretch()
+        nav_layout.addWidget(btn_next)
+        layout.addLayout(nav_layout)
+
+        dialog.exec_()
+
+    def navigate_image(self, direction, label_widget):
+        if not self.viewer_cells:
+            return
+        self.viewer_index = (self.viewer_index + direction) % len(self.viewer_cells)
+        pixmap = self.viewer_cells[self.viewer_index].current_pixmap
+        scaled = pixmap.scaled(880, 660, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label_widget.setPixmap(scaled)
+        dialog = label_widget.parentWidget()
+        nav_layout = dialog.layout().itemAt(1).layout()
+        page_label = nav_layout.itemAt(2).widget()
+        if page_label:
+            page_label.setText(f"{self.viewer_index + 1} / {len(self.viewer_cells)}")
+
     def showEvent(self, event):
         super().showEvent(event)
         self.reload_data()
+        self.load_temp_images()
 
     def reload_data(self):
         records = self.load_all_data()
