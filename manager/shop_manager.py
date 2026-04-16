@@ -107,6 +107,24 @@ except ImportError:
 
 
 
+class TodayColumnDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None, today_col=-1):
+        super().__init__(parent)
+        self._today_col = today_col
+        self._today_bg = QColor("#ffe0b2")
+        self._today_text = QColor("#e65100")
+
+    def set_today_col(self, col):
+        self._today_col = col
+
+    def paint(self, painter, option, index):
+        if index.column() == self._today_col and self._today_col > 0:
+            painter.fillRect(option.rect, self._today_bg)
+            option.palette.setColor(QPalette.Text, self._today_text)
+            option.palette.setColor(QPalette.HighlightedText, self._today_text)
+        super().paint(painter, option, index)
+
+
 class ShopManagerApp(QMainWindow):
     
     def __init__(self):
@@ -128,6 +146,7 @@ class ShopManagerApp(QMainWindow):
         self.product_store_map = {}
 
         self.is_loading = False  # 防止重复加载
+        self._today_col = -1  # 今日列索引，-1表示不是当月
 
         # 初始化云同步管理器
         self.cloud_manager = None
@@ -472,6 +491,24 @@ class ShopManagerApp(QMainWindow):
         toolbar.addWidget(btn_prev)
         toolbar.addWidget(self.lbl_month)
         toolbar.addWidget(btn_next)
+
+        self.btn_today = QPushButton("📍 定位今天")
+        self.btn_today.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        self.btn_today.clicked.connect(self.go_to_today)
+        toolbar.addWidget(self.btn_today)
+
         toolbar.addStretch()
 
         # 状态栏左下角按钮区域
@@ -571,6 +608,10 @@ class ShopManagerApp(QMainWindow):
         
         # 2. 初始化表格属性
         self.setup_tables()
+        
+        # 2.5 设置今日列高亮代理
+        self.today_delegate = TodayColumnDelegate(self.table, -1)
+        self.table.setItemDelegate(self.today_delegate)
         
         # 3. 【关键】连接选中同步信号
         self.table.selectionModel().selectionChanged.connect(self.sync_frozen_selection)
@@ -1087,16 +1128,27 @@ class ShopManagerApp(QMainWindow):
             self.frozen_table.setColumnCount(1)
             
             headers = ["商品信息"]
+            today = datetime.now()
+            self._today_col = -1
             for i in range(1, days_in_month + 1):
                 dt = datetime(self.year, self.month, i)
                 weekday_idx = dt.weekday()
                 weekday_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][weekday_idx]
                 headers.append(f"{i}号 {weekday_name}")
+                if self.year == today.year and self.month == today.month and i == today.day:
+                    self._today_col = i
             self.table.setHorizontalHeaderLabels(headers)
             self.frozen_table.setHorizontalHeaderLabels(["商品信息"])
-            
-            # 恢复表头样式
-            self.table.horizontalHeader().setStyleSheet("QHeaderView::section { background-color: #f0f0f0; }")
+
+            if hasattr(self, 'today_delegate'):
+                self.today_delegate.set_today_col(self._today_col)
+
+            # 恢复表头样式，并给今日列设置高亮
+            header_style = "QHeaderView::section { background-color: #f0f0f0; }"
+            if self._today_col > 0:
+                header_style += f"QTableWidget::item:column({self._today_col}):selected, QHeaderView::section:column({self._today_col}) {{ background-color: #fff3e0; }}"
+                header_style += f"QHeaderView::section:column({self._today_col}) {{ background-color: #ffe0b2; font-weight: bold; }}"
+            self.table.horizontalHeader().setStyleSheet(header_style)
             
             col0_width = int(self.db.get_setting("col_0_width", 400))  # 调整宽度以容纳按钮
             self.table.setColumnWidth(0, col0_width)
@@ -1213,12 +1265,6 @@ class ShopManagerApp(QMainWindow):
                 
                 # 确保文字靠上对齐，方便多行显示
                 item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
-                
-                # 设置今日高亮
-                if self.year == datetime.now().year and self.month == datetime.now().month and day == datetime.now().day:
-                    item.setBackground(QColor("#fff3e0"))
-                else:
-                    item.setBackground(QColor("white")) 
 
                 # 【关键修复 3】更保守的行高计算
                 if display_text:
@@ -1265,13 +1311,7 @@ class ShopManagerApp(QMainWindow):
                 
                 item.setText(display_text)
                 item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
-                
-                # 与链接操作记录保持一致的背景色设置
-                if self.year == datetime.now().year and self.month == datetime.now().month and day == datetime.now().day:
-                    item.setBackground(QColor("#fff3e0"))
-                else:
-                    item.setBackground(QColor("white"))
-        
+
         except Exception as e:
             print(f"渲染店铺记录失败：{e}")
             import traceback
@@ -1416,6 +1456,23 @@ class ShopManagerApp(QMainWindow):
             self.load_data_safe()
         except Exception as e:
             print(f"切换下个月失败: {e}")
+
+    def go_to_today(self):
+        try:
+            today = datetime.now()
+            need_reload = self.year != today.year or self.month != today.month
+            if need_reload:
+                self.year = today.year
+                self.month = today.month
+                self.load_data_safe()
+            day = today.day
+            if 0 < day < self.table.columnCount():
+                target_index = self.table.model().index(0, day)
+                self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
+                self.table.setCurrentCell(0, day)
+                self.show_toast(f"已定位到今天: {today.month}月{today.day}日")
+        except Exception as e:
+            print(f"定位今天失败: {e}")
 
     def add_store(self):
         try:
