@@ -1292,18 +1292,18 @@ class StoreMarginDialog(QDialog):
 
         # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
-        historical_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px;")
+        historical_widget.setStyleSheet("border: 1px solid #dee2e6; border-radius: 8px;")
         historical_layout = QVBoxLayout(historical_widget)
         historical_layout.setContentsMargins(0, 0, 0, 0)
 
         # 板块标题栏（放在日期选择行上方）- 包含多个功能标签
         section_title_bar = QWidget()
-        section_title_bar.setStyleSheet("background-color: #ecf0f1; padding: 5px 10px; border-radius: 4px;")
+        section_title_bar.setStyleSheet("padding: 5px 10px; border-radius: 4px;")
         section_title_layout = QHBoxLayout(section_title_bar)
         section_title_layout.setContentsMargins(5, 5, 5, 5)
 
         section_label_1 = QLabel("📈 过往数据分析")
-        section_label_1.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 5px 10px; background-color: #d5dbdb; border-radius: 4px;")
+        section_label_1.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 5px 10px; border-radius: 4px;")
         section_title_layout.addWidget(section_label_1)
 
         section_label_2 = QLabel("📅 数据周期选择")
@@ -1577,15 +1577,8 @@ class StoreMarginDialog(QDialog):
 
         # 板块标题：商品规格毛利权重
         section_title_2 = QLabel("📦 订单规格毛利权重")
-        section_title_2.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 4px;")
+        section_title_2.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 5px 10px; border-radius: 4px;")
         historical_layout.addWidget(section_title_2)
-
-        # 调试标签：显示 imported_orders 数据情况
-        self.lbl_debug_refund = QLabel("🔧 imported_orders表: 待查询...")
-        self.lbl_debug_refund.setStyleSheet("font-size: 11px; color: #e74c3c; background-color: #fdf2f2; padding: 4px 8px; border: 1px solid #e74c3c; border-radius: 4px;")
-        self.lbl_debug_refund.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.lbl_debug_refund.setCursor(Qt.IBeamCursor)
-        historical_layout.addWidget(self.lbl_debug_refund)
 
         # 毛利明细表格
         self.table = QTableWidget()
@@ -1597,8 +1590,14 @@ class StoreMarginDialog(QDialog):
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.cellChanged.connect(self.on_cell_changed)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
-        for i, w in enumerate([70, 120, 150, 80, 80, 80, 120, 100, 60, 100, 80, 100, 80, 80, 80]):
-            self.table.setColumnWidth(i, w)
+        
+        # 设置列宽自适应填充
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setMinimumSectionSize(50)
+        # 商品标题列固定200像素
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(2, 200)
         self.table.setStyleSheet("""
             QTableWidget {
                 gridline-color: #cccccc;
@@ -1612,6 +1611,7 @@ class StoreMarginDialog(QDialog):
                 text-align: center;
                 border: 1px solid #cccccc;
                 font-size: 14px;
+                background-color: white;
             }
             QTableWidget::item:selected {
                 background-color: #e6f3ff;
@@ -1620,6 +1620,19 @@ class StoreMarginDialog(QDialog):
             }
             QTableWidget::item:hover {
                 background-color: #d4edda;
+            }
+            QHeaderView {
+                border: none;
+                background-color: white;
+            }
+            QHeaderView::section {
+                background-color: white;
+                padding: 0px;
+                margin: 0px;
+                border: 1px solid #cccccc;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 35px;
             }
         """)
         historical_layout.addWidget(self.table)
@@ -1803,10 +1816,10 @@ class StoreMarginDialog(QDialog):
                     img_label.setPixmap(pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     img_label.setText("❌")
-                    img_label.setStyleSheet("background-color: #f5f5f5; color: #999; border: 1px solid #ddd;")
+                    img_label.setStyleSheet("color: #999; border: 1px solid #ddd;")
             else:
                 img_label.setText("📷")
-                img_label.setStyleSheet("background-color: #f5f5f5; color: #999; border: 1px solid #ddd;")
+                img_label.setStyleSheet("color: #999; border: 1px solid #ddd;")
             img_layout.addWidget(img_label)
             self.table.setCellWidget(row, 0, img_widget)
             self.table.setRowHeight(row, 70)
@@ -1844,7 +1857,7 @@ class StoreMarginDialog(QDialog):
             weight_input.setFixedHeight(25)
             weight_input.setValidator(QDoubleValidator(0, 100, 1, weight_input))
             weight_input.setStyleSheet(
-                "QLineEdit { background-color: #e8f5e9; border: 1px solid #4caf50; border-radius: 3px; padding: 2px; font-weight: bold; color: #2e7d32; }"
+                "QLineEdit { background-color: white; border: 1px solid #4caf50; border-radius: 3px; padding: 2px; font-weight: bold; color: #2e7d32; }"
             )
             weight_input.installEventFilter(self)
             weight_input.setProperty("row", row)
@@ -1860,9 +1873,9 @@ class StoreMarginDialog(QDialog):
             lock_label.setAlignment(Qt.AlignCenter)
             lock_label.setFixedSize(25, 25)
             lock_label.setStyleSheet(
-                "QLabel { background-color: #ffe0b2; border: 1px solid #ff9800; border-radius: 3px; font-size: 14px; }"
+                "QLabel { background-color: white; border: 1px solid #ff9800; border-radius: 3px; font-size: 14px; }"
                 if is_locked
-                else "QLabel { background-color: #f5f5f5; border: 1px dashed #ccc; border-radius: 3px; font-size: 14px; }"
+                else "QLabel { background-color: white; border: 1px dashed #ccc; border-radius: 3px; font-size: 14px; }"
             )
             lock_label.installEventFilter(self)
             lock_label.setProperty("row", row)
@@ -2897,12 +2910,9 @@ class StoreMarginDialog(QDialog):
             weight_input.setToolTip("")
         refund_orders_label = self.table.cellWidget(row, 12)
         refund_ratio_label = self.table.cellWidget(row, 13)
-        # 调试
-        print(f"【调试 _update_order_label_for_row】行={row}, prod_id={prod_id}, spec_counts记录数={len(spec_counts) if spec_counts else 0}")
         if spec_counts:
             total_orders = sum(sc[1] or 0 for sc in spec_counts)
             total_refund = sum(sc[2] or 0 for sc in spec_counts)
-            print(f"  total_orders={total_orders}, total_refund={total_refund}")
             if total_orders > 0 and total_refund > 0:
                 refund_rate = total_refund / total_orders * 100
                 if refund_orders_label and hasattr(refund_orders_label, 'setText'):
@@ -3543,31 +3553,7 @@ class StoreMarginDialog(QDialog):
             prod_refund_data[prod_id].append((spec_code, order_count or 0, refund_count or 0))
             total_refund_sum += refund_count or 0
 
-        # 更新调试标签
-        if hasattr(self, 'lbl_debug_refund'):
-            # 获取表格中第一行的商品ID用于对比
-            first_table_prod_id = None
-            if self.table.rowCount() > 0:
-                item = self.table.item(0, 1)
-                if item:
-                    first_table_prod_id = item.data(Qt.UserRole)
-            # 获取prod_refund_data中第一个商品ID用于对比
-            first_refund_prod_id = None
-            if prod_refund_data:
-                first_refund_prod_id = list(prod_refund_data.keys())[0]
-            refund_info = (f"🔧 imported_orders表: {len(current_data)}条记录, {len(prod_refund_data)}个商品, "
-                          f"总退款数:{total_refund_sum} | 表第1行prod_id={first_table_prod_id}, "
-                          f"import第1个={first_refund_prod_id}")
-            self.lbl_debug_refund.setText(refund_info)
-            self.lbl_debug_refund.setToolTip(f"文件: store_margin.py\n类: StoreMarginDialog\n方法: update_orders_display()\n"
-                                            f"表格第1行prod_id={first_table_prod_id}\n"
-                                            f"imported_orders第1个prod_id={first_refund_prod_id}\n"
-                                            f"两者是否相等={first_table_prod_id == first_refund_prod_id}")
-
-        # 遍历表格行，统计匹配情况
-        match_success = 0
-        match_fail_no_data = 0
-        match_fail_no_refund = 0
+        # 遍历表格行
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
@@ -3613,7 +3599,6 @@ class StoreMarginDialog(QDialog):
                         else:
                             refund_ratio_label.setText("无")
                             refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                    match_success += 1
                 else:
                     if refund_orders_label:
                         refund_orders_label.setText("无")
@@ -3621,7 +3606,6 @@ class StoreMarginDialog(QDialog):
                     if refund_ratio_label:
                         refund_ratio_label.setText("无")
                         refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                    match_fail_no_refund += 1
             else:
                 if refund_orders_label:
                     refund_orders_label.setText("无")
@@ -3629,25 +3613,6 @@ class StoreMarginDialog(QDialog):
                 if refund_ratio_label:
                     refund_ratio_label.setText("无")
                     refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                match_fail_no_data += 1
-
-        # 更新调试标签
-        if hasattr(self, 'lbl_debug_refund'):
-            first_table_prod_id = None
-            if self.table.rowCount() > 0:
-                item = self.table.item(0, 1)
-                if item:
-                    first_table_prod_id = item.data(Qt.UserRole)
-            first_refund_prod_id = None
-            if prod_refund_data:
-                first_refund_prod_id = list(prod_refund_data.keys())[0]
-            refund_info = (f"🔧 表:{len(current_data)}条,商品:{len(prod_refund_data)}个,退款:{total_refund_sum} | "
-                          f"匹配:成功{match_success},无数据{match_fail_no_data},无退款{match_fail_no_refund}")
-            self.lbl_debug_refund.setText(refund_info)
-            self.lbl_debug_refund.setToolTip(f"文件: store_margin.py\n类: StoreMarginDialog\n方法: update_orders_display()\n"
-                                            f"表格第1行prod_id={first_table_prod_id}\n"
-                                            f"imported第1个prod_id={first_refund_prod_id}\n"
-                                            f"两者相等={first_table_prod_id == first_refund_prod_id}")
 
         self.update_total_orders_label()
 
