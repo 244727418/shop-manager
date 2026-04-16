@@ -64,12 +64,6 @@ class ProductSpecDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        debug_label = QLabel("🔧 调试: product_spec.py")
-        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_label.setCursor(Qt.IBeamCursor)
-        layout.addWidget(debug_label)
-
         # 顶部信息
         info_widget = QWidget()
         info_layout = QHBoxLayout(info_widget)
@@ -364,10 +358,7 @@ class ProductSpecDialog(QDialog):
         roi_widget.setStyleSheet("background-color: #f8f9fa; border-radius: 5px; border: 1px solid #dee2e6;")
         layout.addWidget(roi_widget)
 
-        debug_label = QLabel("【规格表格区】")
-        debug_label.setStyleSheet("background-color: #87CEEB; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(debug_label)
+        # 规格表格区
 
         # 2. 规格表格
         self.table = QTableWidget()
@@ -435,10 +426,7 @@ class ProductSpecDialog(QDialog):
         self.weight_delegate = WeightDelegate(self)
         self.table.setItemDelegateForColumn(7, self.weight_delegate)
 
-        debug_label = QLabel("【底部按钮操作区】")
-        debug_label.setStyleSheet("background-color: #DDA0DD; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(debug_label)
+        # 底部按钮操作区
 
         # 3. 底部按钮区
         btn_layout = QHBoxLayout()
@@ -479,10 +467,7 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
 
-        debug_label = QLabel("【底部数据显示区】")
-        debug_label.setStyleSheet("background-color: #F0E68C; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(debug_label)
+        # 底部数据显示区
 
         stats_container = QWidget()
         stats_layout = QVBoxLayout(stats_container)
@@ -542,7 +527,6 @@ class ProductSpecDialog(QDialog):
     def load_specs(self):
         """从数据库加载规格数据到表格，并初始化删除功能"""
         try:
-            print(f"[DEBUG] load_specs called for product_id={self.product_id}")
             # 0. 加载优惠券和新客立减金额
             discount_rows = self.db.safe_fetchall(
                 "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing FROM products WHERE id=?",
@@ -775,7 +759,6 @@ class ProductSpecDialog(QDialog):
                     self.table.item(self._saved_current_row, 0),
                     QAbstractItemView.PositionAtCenter
                 ))
-                print(f"尝试恢复选中第 {self._saved_current_row} 行")
             
         except Exception as e:
             import traceback
@@ -2087,14 +2070,11 @@ class ProductSpecDialog(QDialog):
 
     def _get_last_snapshot(self):
         """获取上一期导入的历史快照数据 - 直接取排序后的下一条记录"""
-        print(f"[DEBUG product_spec] _get_last_snapshot called for product_id={self.product_id}")
         try:
             store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
             if not store_rows or not store_rows[0][0]:
-                print(f"[DEBUG product_spec] No store_id found")
                 return None
             store_id = store_rows[0][0]
-            print(f"[DEBUG product_spec] store_id={store_id}")
 
             # 获取当前商品导入的订单日期范围
             current_data = self.db.safe_fetchall("""
@@ -2111,7 +2091,6 @@ class ProductSpecDialog(QDialog):
                             current_start_date = parts[0].strip()
                             current_end_date = parts[1].strip()
                             break
-            print(f"[DEBUG product_spec] current_start_date={current_start_date}, current_end_date={current_end_date}")
 
             # 获取所有历史记录（已按订单结束日期降序排序）
             all_history = self.db.safe_fetchall("""
@@ -2120,7 +2099,6 @@ class ProductSpecDialog(QDialog):
                 WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
                 ORDER BY import_time DESC
             """, (store_id,))
-            print(f"[DEBUG product_spec] all_history count={len(all_history)}")
 
             # 从快照中解析订单结束日期
             def get_end_date_from_snapshot(snapshot_data):
@@ -2153,8 +2131,7 @@ class ProductSpecDialog(QDialog):
             # 遍历历史记录，找到当前数据对应的下一条
             for i, (hist_id, snapshot_data) in enumerate(all_history):
                 prev_end_date = get_end_date_from_snapshot(snapshot_data)
-                print(f"[DEBUG product_spec] hist_id={hist_id}, prev_end_date={prev_end_date}")
-                
+
                 # 如果当前有数据，找结束日期小于当前结束日期的第一条
                 if current_end_date and prev_end_date:
                     # 比较日期 - 需要处理月份可能不同的情况
@@ -2162,19 +2139,16 @@ class ProductSpecDialog(QDialog):
                         curr_parts = current_end_date.split('/')
                         curr_m, curr_d = int(curr_parts[0]), int(curr_parts[1])
                         prev_m, prev_d = int(prev_end_date[0]), int(prev_end_date[1])
-                        
+
                         # 如果月份不同，用月份比较；如果月份相同，用日期比较
                         if prev_m < curr_m or (prev_m == curr_m and prev_d < curr_d):
-                            print(f"[DEBUG product_spec] Found previous record: hist_id={hist_id}")
                             return json.loads(snapshot_data).get("orders", {})
                     except:
                         pass
-            
+
             # 如果没找到，返回None
-            print(f"[DEBUG product_spec] No previous record found")
             return None
         except Exception as e:
-            print(f"[DEBUG product_spec] Exception in _get_last_snapshot: {e}")
             return None
 
     def _update_spec_compare_labels(self, row, current_count, last_count, current_total):
@@ -2594,7 +2568,6 @@ class ProductSpecDialog(QDialog):
         current_row = self.table.currentRow()
         if current_row >= 0:
             self._saved_current_row = current_row
-        print(f"保存当前选中行: {self._saved_current_row}")
         try:
             # 1. 获取旧数据（用于对比价格和检测删除）
             old_rows = self.db.safe_fetchall(

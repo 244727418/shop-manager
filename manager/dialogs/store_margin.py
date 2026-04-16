@@ -267,12 +267,6 @@ class LargeMarginDataDialog(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        debug_label = QLabel("🔧 调试: store_margin.py (LargeMarginDataDialog)")
-        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_label.setCursor(Qt.IBeamCursor)
-        main_layout.addWidget(debug_label)
-
         header_label = QLabel("📈 毛利数据明细 - 放大查看模式（点击右上角关闭按钮退出）")
         header_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
         main_layout.addWidget(header_label)
@@ -1283,12 +1277,6 @@ class StoreMarginDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        debug_label = QLabel("🔧 调试: store_margin.py")
-        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_label.setCursor(Qt.IBeamCursor)
-        layout.addWidget(debug_label)
 
         # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
@@ -3986,12 +3974,6 @@ class ImportHistoryDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        
-        debug_label = QLabel("🔧 调试: store_margin.py (ImportHistoryDialog)")
-        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_label.setCursor(Qt.IBeamCursor)
-        layout.addWidget(debug_label)
         
         # 标题
         title_label = QLabel(f"📊 {self.store_name} - 订单全部记录")

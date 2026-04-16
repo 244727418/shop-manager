@@ -125,6 +125,142 @@ class TodayColumnDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.setFixedSize(400, 200)
+        self.init_ui()
+        self.load_settings()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        title = QLabel("⚙️ 程序设置")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("<hr>"))
+
+        self.auto_start_checkbox = QCheckBox("开机自启")
+        self.auto_start_checkbox.setStyleSheet("""
+            QCheckBox {
+                spacing: 10px;
+                font-size: 14px;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+            }
+        """)
+        self.auto_start_checkbox.setToolTip("勾选后，程序将在Windows启动时自动运行")
+        layout.addWidget(self.auto_start_checkbox)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        btn_save = QPushButton("保存")
+        btn_save.setFixedSize(100, 35)
+        btn_save.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+        """)
+        btn_save.clicked.connect(self.save_settings)
+        btn_layout.addWidget(btn_save)
+        
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setFixedSize(100, 35)
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+        
+        layout.addLayout(btn_layout)
+
+    def load_settings(self):
+        is_enabled = self._is_auto_start_enabled()
+        self.auto_start_checkbox.setChecked(is_enabled)
+
+    def _is_auto_start_enabled(self):
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_READ
+            )
+            try:
+                value, _ = winreg.QueryValueEx(key, "ShopManager")
+                winreg.CloseKey(key)
+                return True
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return False
+        except Exception as e:
+            print(f"检查开机自启状态失败: {e}")
+            return False
+
+    def _set_auto_start(self, enabled):
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE
+            )
+            
+            if enabled:
+                app_path = sys.executable
+                winreg.SetValueEx(key, "ShopManager", 0, winreg.REG_SZ, app_path)
+            else:
+                try:
+                    winreg.DeleteValue(key, "ShopManager")
+                except FileNotFoundError:
+                    pass
+            
+            winreg.CloseKey(key)
+            return True
+        except Exception as e:
+            print(f"设置开机自启失败: {e}")
+            return False
+
+    def save_settings(self):
+        auto_start_enabled = self.auto_start_checkbox.isChecked()
+        
+        if self._set_auto_start(auto_start_enabled):
+            QMessageBox.information(self, "成功", "设置已保存！")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "错误", "设置保存失败，请以管理员权限运行程序！")
+            self.reject()
+
+
 class ShopManagerApp(QMainWindow):
     
     def __init__(self):
@@ -177,6 +313,12 @@ class ShopManagerApp(QMainWindow):
         self.show_action = QAction("⭐ 显示主窗口", self)
         self.show_action.triggered.connect(self.show_window)
         tray_menu.addAction(self.show_action)
+        
+        tray_menu.addSeparator()
+        
+        self.settings_action = QAction("⚙️ 设置", self)
+        self.settings_action.triggered.connect(self.show_settings_dialog)
+        tray_menu.addAction(self.settings_action)
         
         tray_menu.addSeparator()
         
@@ -244,6 +386,11 @@ class ShopManagerApp(QMainWindow):
         url = "https://mms.pinduoduo.com/login/?redirectUrl=https%3A%2F%2Fmms.pinduoduo.com%2F"
         webbrowser.open(url)
         self.statusBar().showMessage(f"已打开拼多多商家后台: {url}", 3000)
+
+    def show_settings_dialog(self):
+        """打开设置对话框"""
+        dialog = SettingsDialog(self)
+        dialog.exec_()
 
     def quit_application(self):
         """退出应用"""
