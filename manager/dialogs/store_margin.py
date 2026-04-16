@@ -1941,9 +1941,10 @@ class StoreMarginDialog(QDialog):
             self.refund_widgets[row]['ratio'] = refund_ratio_label
             btn_widget = QWidget()
             btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(0, 0, 0, 0)
-            btn_edit = QPushButton("📦")
-            btn_edit.setFixedSize(40, 25)
+            btn_layout.setContentsMargins(5, 2, 5, 2)
+            btn_edit = QPushButton("查看商品")
+            btn_edit.setFixedSize(60, 25)
+            btn_edit.setStyleSheet("QPushButton { padding: 1px; }")
             btn_edit.clicked.connect(lambda checked, sid=sys_id, pid=prod_id, pt=prod_title: self.open_spec_dialog(sid, pid, pt))
             btn_layout.addWidget(btn_edit)
             self.table.setCellWidget(row, 14, btn_widget)
