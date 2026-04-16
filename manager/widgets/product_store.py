@@ -32,14 +32,14 @@ class ProductWidget(QWidget):
         main_layout.setSpacing(6)
 
         img_container = QWidget()
-        img_container.setFixedWidth(60)
+        img_container.setFixedWidth(77)
         img_layout = QVBoxLayout(img_container)
         img_layout.setContentsMargins(0, 0, 0, 0)
         img_layout.setSpacing(2)
 
         self.img_label = QLabel()
-        self.img_label.setFixedSize(55, 55)
-        self.img_label.setStyleSheet("border: 1px solid #ddd; border-radius: 4px;")
+        self.img_label.setFixedSize(72, 72)
+        self.img_label.setStyleSheet("border: 1px solid #ddd; border-radius: 4px; padding: 0px;")
         self.img_label.setAlignment(Qt.AlignCenter)
         self.set_image_from_data(image_data)
 
@@ -48,21 +48,21 @@ class ProductWidget(QWidget):
         btn_layout.setContentsMargins(0, 0, 0, 0)
 
         btn_img = QPushButton("🔄")
-        btn_img.setFixedSize(16, 16)
+        btn_img.setFixedSize(22, 22)
         btn_img.setToolTip("换图")
-        btn_img.setStyleSheet("QPushButton { font-size: 9px; padding: 0px; background-color: #6c757d; color: white; border-radius: 2px; } QPushButton:hover { background-color: #5a6268; }")
+        btn_img.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #6c757d; color: white; border-radius: 2px; } QPushButton:hover { background-color: #5a6268; }")
         btn_img.clicked.connect(self.change_image)
 
         btn_copy = QPushButton("📋")
-        btn_copy.setFixedSize(16, 16)
+        btn_copy.setFixedSize(22, 22)
         btn_copy.setToolTip("复制ID")
-        btn_copy.setStyleSheet("QPushButton { font-size: 9px; padding: 0px; background-color: #17a2b8; color: white; border-radius: 2px; } QPushButton:hover { background-color: #138496; }")
+        btn_copy.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #17a2b8; color: white; border-radius: 2px; } QPushButton:hover { background-color: #138496; }")
         btn_copy.clicked.connect(self.copy_product_id)
 
         btn_del = QPushButton("🗑️")
-        btn_del.setFixedSize(16, 16)
+        btn_del.setFixedSize(22, 22)
         btn_del.setToolTip("删除")
-        btn_del.setStyleSheet("QPushButton { font-size: 9px; padding: 0px; background-color: #dc3545; color: white; border-radius: 2px; } QPushButton:hover { background-color: #c82333; }")
+        btn_del.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #dc3545; color: white; border-radius: 2px; } QPushButton:hover { background-color: #c82333; }")
         btn_del.clicked.connect(self.delete_product)
 
         btn_layout.addWidget(btn_img)
@@ -266,9 +266,9 @@ class ProductWidget(QWidget):
                 roi_multiple_text = ""
                 if current_roi > 0 and net_break_even_roi > 0:
                     roi_multiple = current_roi / net_break_even_roi
-                    roi_multiple_text = f"投产:{current_roi:.2f} 投产倍数:{roi_multiple:.2f}倍"
+                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">投产:</span><span style="color: #e74c3c; font-weight: bold;">{current_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">{roi_multiple:.2f}倍</span>'
                 elif current_roi > 0:
-                    roi_multiple_text = f"投产:{current_roi:.2f} 投产倍数:--"
+                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">投产:</span><span style="color: #e74c3c; font-weight: bold;">{current_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">--</span>'
                 else:
                     roi_multiple_text = ""
                 self.roi_label.setText(roi_multiple_text)
@@ -398,7 +398,7 @@ class ProductWidget(QWidget):
                 pixmap = QPixmap()
                 pixmap.loadFromData(image_data)
                 if not pixmap.isNull():
-                    container_size = 60
+                    container_size = 72
                     if pixmap.width() > container_size or pixmap.height() > container_size:
                         pixmap = pixmap.scaled(container_size, container_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     self.img_label.setPixmap(pixmap)

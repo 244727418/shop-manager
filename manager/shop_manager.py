@@ -447,10 +447,38 @@ class ShopManagerApp(QMainWindow):
 
         toolbar = QHBoxLayout()
         btn_prev = QPushButton("◀ 上个月")
+        btn_prev.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 1px 12px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
         btn_prev.clicked.connect(self.prev_month)
         self.lbl_month = QLabel(f"{self.year}年 {self.month}月")
         self.lbl_month.setFont(QFont("Arial", 14, QFont.Bold))
         btn_next = QPushButton("下个月 ▶")
+        btn_next.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 1px 12px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
         btn_next.clicked.connect(self.next_month)
         
         search_layout = QHBoxLayout()
@@ -459,6 +487,20 @@ class ShopManagerApp(QMainWindow):
         self.search_input.setPlaceholderText("输入商品ID或标题...")
         self.search_input.returnPressed.connect(self.perform_search)
         btn_search = QPushButton("🔍搜索")
+        btn_search.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
         btn_search.clicked.connect(self.perform_search)
         
         self.btn_tag_filter = QPushButton("🏷️ 筛选")
@@ -620,18 +662,57 @@ class ShopManagerApp(QMainWindow):
         
         btn_add_store = QPushButton()
         btn_add_store.setIcon(QIcon(os.path.join(icons_dir, "add_link.svg")))
-        btn_add_store.setIconSize(QSize(24, 24))
+        btn_add_store.setIconSize(QSize(20, 20))
         btn_add_store.setToolTip("添加链接")
         btn_add_store.setFixedSize(32, 32)
+        btn_add_store.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #229954;
+            }
+        """)
         btn_add_store.clicked.connect(self.add_store)
         toolbar.addWidget(btn_add_store)
         
         btn_daily_task = QPushButton("📋 每日任务")
-        btn_daily_task.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+        btn_daily_task.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
         btn_daily_task.clicked.connect(self.show_daily_task_dialog)
         toolbar.addWidget(btn_daily_task)
 
         btn_export = QPushButton("📊导出Excel")
+        btn_export.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #229954;
+            }
+        """)
         btn_export.clicked.connect(self.export_to_excel)
         toolbar.addWidget(btn_export)
 
@@ -646,8 +727,9 @@ class ShopManagerApp(QMainWindow):
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 12px;
+                padding: 1px 12px;
                 font-weight: bold;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #c82333;
@@ -665,40 +747,55 @@ class ShopManagerApp(QMainWindow):
         bottom_left_layout.setSpacing(5)
 
         self.btn_api_config = QPushButton("🔑 API配置")
-        self.btn_api_config.setFixedSize(80, 24)
+        self.btn_api_config.setFixedSize(80, 26)
         self.btn_api_config.setStyleSheet("""
-            background-color: #e67e22;
-            color: white;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 1px;
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #d35400;
+            }
         """)
         self.btn_api_config.clicked.connect(self.show_api_config_dialog)
         bottom_left_layout.addWidget(self.btn_api_config)
 
         self.btn_import_cost = QPushButton("📥 导入成本表")
-        self.btn_import_cost.setFixedSize(100, 24)
+        self.btn_import_cost.setFixedSize(100, 26)
         self.btn_import_cost.setStyleSheet("""
-            background-color: #17a2b8;
-            color: white;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 1px;
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
         """)
         self.btn_import_cost.clicked.connect(self.import_cost_data)
         bottom_left_layout.addWidget(self.btn_import_cost)
 
         self.btn_view_cost = QPushButton("📦 查看成本库")
-        self.btn_view_cost.setFixedSize(100, 24)
+        self.btn_view_cost.setFixedSize(100, 26)
         self.btn_view_cost.setStyleSheet("""
-            background-color: #6c757d;
-            color: white;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 1px;
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
         """)
         self.btn_view_cost.clicked.connect(self.show_cost_library)
         bottom_left_layout.addWidget(self.btn_view_cost)
@@ -716,28 +813,38 @@ class ShopManagerApp(QMainWindow):
         status_layout.addWidget(self.lbl_cloud_account)
 
         self.btn_pinduoduo = QPushButton("🛒 拼多多")
-        self.btn_pinduoduo.setFixedSize(80, 24)
+        self.btn_pinduoduo.setFixedSize(80, 26)
         self.btn_pinduoduo.setStyleSheet("""
-            background-color: #dc3545;
-            color: #ffffff;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 1px;
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
         """)
         self.btn_pinduoduo.clicked.connect(self.open_pinduoduo)
         self.btn_pinduoduo.setToolTip("打开拼多多商家后台")
         status_layout.addWidget(self.btn_pinduoduo)
 
         self.btn_cloud_login = QPushButton("☁️ 云同步")
-        self.btn_cloud_login.setFixedSize(80, 24)
+        self.btn_cloud_login.setFixedSize(80, 26)
         self.btn_cloud_login.setStyleSheet("""
-            background-color: #009688;
-            color: #ffffff;
-            font-weight: bold;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 1px;
+            QPushButton {
+                background-color: #009688;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #00796b;
+            }
         """)
         self.btn_cloud_login.clicked.connect(self.show_cloud_login_dialog)
         self.btn_cloud_login.setToolTip("云同步账号管理")
@@ -860,33 +967,48 @@ class ShopManagerApp(QMainWindow):
 
             if obj == self.frozen_table.viewport():
                 if delta_y != 0:
-                    step = delta_y / speed_factor
-                    self._accumulated_v = getattr(self, '_accumulated_v', 0) + step
-                    if abs(self._accumulated_v) >= 0.5:
-                        scroll_step = int(round(self._accumulated_v))
-                        self._accumulated_v -= scroll_step
-                        new_value = v_scroll.value() - scroll_step
-                        v_scroll.setValue(max(v_scroll.minimum(), min(v_scroll.maximum(), new_value)))
+                    current_value = v_scroll.value()
+                    if (current_value == v_scroll.minimum() and delta_y > 0) or \
+                       (current_value == v_scroll.maximum() and delta_y < 0):
+                        self._accumulated_v = 0
+                    else:
+                        step = delta_y / speed_factor
+                        self._accumulated_v = getattr(self, '_accumulated_v', 0) + step
+                        if abs(self._accumulated_v) >= 1.0:
+                            scroll_step = int(self._accumulated_v)
+                            self._accumulated_v -= scroll_step
+                            new_value = current_value - scroll_step
+                            v_scroll.setValue(max(v_scroll.minimum(), min(v_scroll.maximum(), new_value)))
                 return True
 
             if obj == self.table.viewport():
                 if delta_y != 0:
-                    step = delta_y / speed_factor
-                    self._accumulated_v = getattr(self, '_accumulated_v', 0) + step
-                    if abs(self._accumulated_v) >= 0.5:
-                        scroll_step = int(round(self._accumulated_v))
-                        self._accumulated_v -= scroll_step
-                        new_value_y = v_scroll.value() - scroll_step
-                        v_scroll.setValue(max(v_scroll.minimum(), min(v_scroll.maximum(), new_value_y)))
+                    current_value = v_scroll.value()
+                    if (current_value == v_scroll.minimum() and delta_y > 0) or \
+                       (current_value == v_scroll.maximum() and delta_y < 0):
+                        self._accumulated_v = 0
+                    else:
+                        step = delta_y / speed_factor
+                        self._accumulated_v = getattr(self, '_accumulated_v', 0) + step
+                        if abs(self._accumulated_v) >= 1.0:
+                            scroll_step = int(self._accumulated_v)
+                            self._accumulated_v -= scroll_step
+                            new_value_y = current_value - scroll_step
+                            v_scroll.setValue(max(v_scroll.minimum(), min(v_scroll.maximum(), new_value_y)))
 
                 if h_scroll and delta_x != 0:
-                    h_step = delta_x / speed_factor
-                    self._accumulated_h = getattr(self, '_accumulated_h', 0) + h_step
-                    if abs(self._accumulated_h) >= 0.5:
-                        h_scroll_step = int(round(self._accumulated_h))
-                        self._accumulated_h -= h_scroll_step
-                        new_value_x = h_scroll.value() - h_scroll_step
-                        h_scroll.setValue(max(h_scroll.minimum(), min(h_scroll.maximum(), new_value_x)))
+                    current_h_value = h_scroll.value()
+                    if (current_h_value == h_scroll.minimum() and delta_x > 0) or \
+                       (current_h_value == h_scroll.maximum() and delta_x < 0):
+                        self._accumulated_h = 0
+                    else:
+                        h_step = delta_x / speed_factor
+                        self._accumulated_h = getattr(self, '_accumulated_h', 0) + h_step
+                        if abs(self._accumulated_h) >= 1.0:
+                            h_scroll_step = int(self._accumulated_h)
+                            self._accumulated_h -= h_scroll_step
+                            new_value_x = current_h_value - h_scroll_step
+                            h_scroll.setValue(max(h_scroll.minimum(), min(h_scroll.maximum(), new_value_x)))
 
                 return True
 
@@ -1010,16 +1132,18 @@ class ShopManagerApp(QMainWindow):
         # 冻结表样式（和主表保持一致，但确保文字清晰可读）
         self.frozen_table.setStyleSheet("""
             QTableWidget {
-                border-right: 2px solid #555;
+                border: none;
+                border-right: 2px solid #000000;
                 background-color: white;
                 color: #333333;
                 font-weight: bold;
+                gridline-color: #000000;
             }
 
             QTableWidget::item {
                 color: #333333;
                 font-weight: bold;
-                padding: 0px;
+                padding: 5px;
                 border: none;
             }
 
@@ -1027,21 +1151,21 @@ class ShopManagerApp(QMainWindow):
             QTableWidget::item:selected {
                 background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
                 color: #333333;
-                padding: 0px;
+                padding: 5px;
             }
 
             /* 失焦时的选中行样式 */
             QTableWidget::item:selected:!active {
                 background-color: #d4edda;
                 color: #333333;
-                padding: 0px;
+                padding: 5px;
             }
 
             /* 悬停行样式 */
             QTableWidget::item:hover {
                 background-color: #e6f3ff;
                 color: #333333;
-                padding: 0px;
+                padding: 5px;
             }
         """)
     def _sync_frozen_from_main(self):
@@ -2668,8 +2792,8 @@ if __name__ == "__main__":
         margin-right: 8px;
     }
     QTableWidget {
-        gridline-color: #e0e0e0;
-        border: 1px solid #dcdcdc;
+        gridline-color: #000000;
+        border: 2px solid #000000;
     }
     QTableWidget::item {
         padding: 5px;
