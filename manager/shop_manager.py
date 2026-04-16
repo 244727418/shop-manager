@@ -1086,7 +1086,12 @@ class ShopManagerApp(QMainWindow):
             self.table.setColumnCount(total_cols)
             self.frozen_table.setColumnCount(1)
             
-            headers = ["商品信息"] + [f"{i}号" for i in range(1, days_in_month + 1)]
+            headers = ["商品信息"]
+            for i in range(1, days_in_month + 1):
+                dt = datetime(self.year, self.month, i)
+                weekday_idx = dt.weekday()
+                weekday_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][weekday_idx]
+                headers.append(f"{i}号 {weekday_name}")
             self.table.setHorizontalHeaderLabels(headers)
             self.frozen_table.setHorizontalHeaderLabels(["商品信息"])
             

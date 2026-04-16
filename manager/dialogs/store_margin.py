@@ -1933,6 +1933,7 @@ class StoreMarginDialog(QDialog):
         self.update_current_history_label()
         self.update_orders_display()
         self.update_compare_columns()
+        self.update_product_avg_price()
 
     def update_product_avg_price(self):
         """更新所有商品的客单价和销售额列"""
@@ -3354,6 +3355,7 @@ class StoreMarginDialog(QDialog):
                 )
             self.update_compare_columns()
             self.update_orders_display()
+            self.update_product_avg_price()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
@@ -4173,7 +4175,8 @@ class ImportHistoryDialog(QDialog):
                 self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
             
             self.load_history()
-            
+            self.parent_window.update_product_avg_price()
+
             # 气泡显示已删除
             self.parent_window.main_app.show_toast("✅ 已删除")
     
@@ -4249,4 +4252,5 @@ class ImportHistoryDialog(QDialog):
         if self.parent_window:
             self.parent_window.update_compare_columns()
             self.parent_window.update_orders_display()
+            self.parent_window.update_product_avg_price()
             self.parent_window.main_app.show_toast("✅ 已应用")
