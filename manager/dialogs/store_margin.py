@@ -22,6 +22,57 @@ except ImportError:
     OPENPYXL_AVAILABLE = False
 
 
+class ScalableTableWidget(QTableWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scale_factor = 1.0
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.scale_factor = min(2.0, self.scale_factor + 0.1)
+            else:
+                self.scale_factor = max(0.5, self.scale_factor - 0.1)
+            self.apply_scale()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def apply_scale(self):
+        base_row_height = 60
+        base_header_height = 50
+
+        row_height = int(base_row_height * self.scale_factor)
+        header_height = int(base_header_height * self.scale_factor)
+
+        for row in range(self.rowCount()):
+            if row == 0 or row % 2 != 0:
+                self.setRowHeight(row, row_height)
+            else:
+                self.setRowHeight(row, int(row_height * 0.4))
+
+        header = self.horizontalHeader()
+        header.setFixedHeight(header_height)
+
+        font_size = int(16 * self.scale_factor)
+        header_font = QFont()
+        header_font.setPointSize(max(10, int(16 * self.scale_factor)))
+        header.setFont(header_font)
+
+        table_font = QFont()
+        table_font.setPointSize(font_size)
+        self.setFont(table_font)
+
+        for row in range(self.rowCount()):
+            for col in range(self.columnCount()):
+                item = self.item(row, col)
+                if item:
+                    font = item.font()
+                    font.setPointSize(font_size)
+                    item.setFont(font)
+
+
 class LargeMarginDataDialog(QDialog):
     """放大版毛利数据表格窗口"""
     FORMULAS = {
@@ -271,7 +322,7 @@ class LargeMarginDataDialog(QDialog):
         header_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
         main_layout.addWidget(header_label)
 
-        self.table = QTableWidget()
+        self.table = ScalableTableWidget()
         self.table.setColumnCount(21)
         self.table.setHorizontalHeaderLabels([
             "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
@@ -1006,7 +1057,6 @@ class StoreMarginDialog(QDialog):
         self.is_balancing = False
         self.save_callback = save_callback
         self.is_reading_mode = False
-        self.reading_scale_factor = 1.0
         self.large_dialog = None
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
@@ -1039,23 +1089,6 @@ class StoreMarginDialog(QDialog):
         self.load_products()
         self.refresh_manual_data_display()
 
-        # 安装事件过滤器用于Ctrl+滚轮缩放
-        self.wheel_event_received = False
-        QApplication.instance().installEventFilter(self)
-
-    def eventFilter(self, obj, event):
-        """事件过滤器：处理Ctrl+滚轮缩放"""
-        if event.type() == QEvent.Wheel and event.modifiers() == Qt.ControlModifier:
-            if self.is_reading_mode:
-                delta = event.angleDelta().y()
-                if delta > 0:
-                    self.reading_scale_factor = min(2.0, self.reading_scale_factor + 0.1)
-                else:
-                    self.reading_scale_factor = max(0.5, self.reading_scale_factor - 0.1)
-                self.apply_reading_scale()
-                return True
-        return super().eventFilter(obj, event)
-
     def toggle_reading_mode(self):
         """切换阅览模式 - 弹出放大版数据表格窗口"""
         self.is_reading_mode = not self.is_reading_mode
@@ -1081,32 +1114,6 @@ class StoreMarginDialog(QDialog):
             self.btn_reading_mode.setStyleSheet("font-size: 11px; padding: 3px 5px; background-color: #3498db; color: white; border-radius: 3px;")
             self.show_toast("已退出阅览模式")
             self.is_reading_mode = False
-
-    def apply_reading_scale(self):
-        """应用阅览模式缩放"""
-        if self.is_reading_mode:
-            # 获取当前字体并放大
-            current_font = self.margin_data_table.font()
-            scaled_font = QFont(current_font.family(), int(14 * self.reading_scale_factor))
-            self.margin_data_table.setFont(scaled_font)
-            # 调整行高
-            base_height = int(60 * self.reading_scale_factor)
-            for row in range(self.margin_data_table.rowCount()):
-                self.margin_data_table.setRowHeight(row, base_height)
-            # 调整表头高度
-            header_height = int(45 * self.reading_scale_factor)
-            self.margin_data_table.horizontalHeader().setMinimumHeight(header_height)
-            # 缩放表格本身
-            self.margin_data_table.setMaximumHeight(int(600 * self.reading_scale_factor))
-        else:
-            # 恢复默认
-            default_font = QFont()
-            default_font.setPointSize(14)
-            self.margin_data_table.setFont(default_font)
-            for row in range(self.margin_data_table.rowCount()):
-                self.margin_data_table.setRowHeight(row, 60)
-            self.margin_data_table.horizontalHeader().setMinimumHeight(45)
-            self.margin_data_table.setMaximumHeight(600)
 
     def show_toast(self, message):
         """显示气泡提示（淡入淡出0.5秒，不透明度50%）"""
