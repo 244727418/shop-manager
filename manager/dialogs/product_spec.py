@@ -54,6 +54,10 @@ class ProductSpecDialog(QDialog):
         self._col_resize_timer.setSingleShot(True)
         self._col_resize_timer.timeout.connect(self._save_col_width_to_db)
         QTimer.singleShot(100, self.delayed_refresh)
+
+    def closeEvent(self, event):
+        self.load_specs()
+        super().closeEvent(event)
         
 
     def delayed_refresh(self):
@@ -68,6 +72,23 @@ class ProductSpecDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+
+        # 调试标签
+        debug_widget = QWidget()
+        debug_layout = QHBoxLayout(debug_widget)
+        debug_layout.setContentsMargins(5, 2, 5, 2)
+        debug_label = QLabel(f"[DEBUG] 文件: dialogs/product_spec.py")
+        debug_label.setStyleSheet("background-color: #ffeb3b; color: #000; font-size: 11px; padding: 2px 8px;")
+        debug_label.setCursor(Qt.PointingHandCursor)
+        debug_label.setToolTip("点击复制文件路径")
+        debug_layout.addWidget(debug_label)
+        debug_layout.addStretch()
+        layout.addWidget(debug_widget)
+
+        def copy_path():
+            clipboard = QApplication.clipboard()
+            clipboard.setText("e:/zhuomian/shop/manager/dialogs/product_spec.py")
+        debug_label.mousePressEvent = lambda e: copy_path()
 
         # 顶部信息
         info_widget = QWidget()
@@ -589,6 +610,25 @@ class ProductSpecDialog(QDialog):
             rows_with_final_price.sort(key=lambda x: x[1])
             rows = [r[0] for r in rows_with_final_price]
 
+            # 3. 检查是否有导入的订单数据
+            order_data_res = self.db.safe_fetchall(
+                "SELECT SUM(order_count) FROM imported_orders WHERE product_id=?",
+                (self.product_code,)
+            )
+            has_imported_orders = order_data_res and order_data_res[0][0] and order_data_res[0][0] > 0
+
+            # 3.1 如果有导入订单，计算基于订单数量的权重
+            spec_orders = {}
+            if has_imported_orders:
+                imported_data = self.db.safe_fetchall(
+                    "SELECT spec_code, order_count FROM imported_orders WHERE product_id=?",
+                    (self.product_code,)
+                )
+                spec_orders = {str(row[0]): row[1] for row in imported_data}
+                total_orders = sum(spec_orders.values())
+            else:
+                total_orders = 0
+
             # 4. 填充数据
             for row_idx, row_data in enumerate(rows):
                 spec_name = str(row_data[0]) if row_data[0] else ""
@@ -671,21 +711,29 @@ class ProductSpecDialog(QDialog):
                 margin_item.setFlags(margin_item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row_idx, 6, margin_item)
 
-                # 权重列 - 根据锁定状态显示锁图标
-                order_count_res = self.db.safe_fetchall(
-                    "SELECT order_count, refund_count FROM imported_orders WHERE product_id=? AND spec_code=?",
-                    (self.product_code, str(spec_code))
-                )
-                order_count = order_count_res[0][0] if order_count_res and order_count_res[0][0] else 0
-                refund_count = order_count_res[0][1] if order_count_res and len(order_count_res[0]) > 1 and order_count_res[0][1] else 0
-                if is_locked == 1:
-                    weight_text = f"🔒 {weight_percent:.2f}%"
+                # 权重列 - 根据锁定状态和订单数据显示
+                order_count = spec_orders.get(str(spec_code), 0) if has_imported_orders else 0
+                refund_count = 0
+                if has_imported_orders:
+                    refund_res = self.db.safe_fetchall(
+                        "SELECT refund_count FROM imported_orders WHERE product_id=? AND spec_code=?",
+                        (self.product_code, str(spec_code))
+                    )
+                    refund_count = refund_res[0][0] if refund_res and refund_res[0][0] else 0
+                if has_imported_orders and total_orders > 0:
+                    display_weight = (order_count / total_orders) * 100
                 else:
-                    weight_text = f"{weight_percent:.2f}%"
+                    display_weight = weight_percent
+                if is_locked == 1:
+                    weight_text = f"🔒 {display_weight:.2f}%"
+                else:
+                    weight_text = f"{display_weight:.2f}%"
                 weight_item = QTableWidgetItem(weight_text)
-                weight_item.setData(Qt.UserRole, order_count)
+                weight_item.setData(Qt.UserRole, display_weight)
                 if order_count > 0:
                     weight_item.setToolTip(f"订单数: {order_count}单")
+                elif has_imported_orders:
+                    weight_item.setToolTip("该规格无订单")
                 self.table.setItem(row_idx, 7, weight_item)
                 
                 # 第 8 列添加权重对比
@@ -944,53 +992,6 @@ class ProductSpecDialog(QDialog):
                 margin_item.setText(f"{margin:.2f}%")
         except:
             pass
-
-    def calculate_total_margin(self):
-        """计算综合加权毛利，并更新到界面标签"""
-        row_count = self.table.rowCount()
-        total_weighted_margin = 0.0
-        total_weight = 0.0
-        
-        coupon = float(self.coupon_input.text()) if self.coupon_input.text() else 0
-        new_customer = float(self.new_customer_input.text()) if self.new_customer_input.text() else 0
-        max_discount = max(coupon, new_customer)
-        
-        for r in range(row_count):
-            price_item = self.table.item(r, 4)
-            weight_item = self.table.item(r, 7)
-            code_item = self.table.item(r, 2)
-            
-            if not all([price_item, weight_item, code_item]):
-                continue
-            
-            try:
-                price = float(price_item.text())
-                w_text = weight_item.text().replace("🔒", "").strip()
-                weight = float(w_text) if w_text else 0.0
-                code = code_item.text()
-                
-                if price <= 0: continue
-                
-                cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (code,))
-                cost = float(cost_res[0][0]) if cost_res else 0.0
-                
-                final_price = price - max_discount
-                if final_price > 0 and cost > 0:
-                    margin = (final_price - cost) / final_price
-                    total_weighted_margin += margin * weight
-                    total_weight += weight
-            except:
-                continue
-        
-        final_margin = (total_weighted_margin / total_weight * 100) if total_weight > 0 else 0.0
-        
-        if hasattr(self, 'lbl_total_margin'):
-            self.lbl_total_margin.setText(f"当前综合毛利率：{final_margin:.2f}%")
-        else:
-            self.setWindowTitle(f"📦 规格管理 - {self.product_name} (综合毛利：{final_margin:.2f}%)")
-        
-        if hasattr(self, 'lbl_gross_break_even'):
-            self.calculate_roi_metrics()
 
     def calculate_roi_metrics(self):
         """计算投产比相关指标：毛保本投产、净保本投产、最佳投产"""
@@ -1258,13 +1259,30 @@ class ProductSpecDialog(QDialog):
         
         # 1. 如果是权重列变化，触发智能平衡
         if col == 7:
-            self.is_balancing = True  # 上锁
+            item = self.table.item(row, 7)
+            if not item:
+                return
+
+            try:
+                text = item.data(Qt.DisplayRole) or ""
+                new_val = float(text.replace("🔒", "").strip())
+            except:
+                return
+
+            original_val = item.data(Qt.UserRole)
+            print(f"[DEBUG on_cell_change] row={row}, new_val={new_val}, original_val={original_val}")
+            if original_val is not None and abs(new_val - original_val) < 0.001:
+                print(f"[DEBUG] 数值未变化，直接返回")
+                return
+
+            print(f"[DEBUG] 调用 auto_balance_weights")
+            self.is_balancing = True
             try:
                 self.auto_balance_weights(row)
+                item.setData(Qt.UserRole, new_val)
             finally:
                 self.is_balancing = False
-            
-            # 平衡后，重新计算所有行的单行毛利和总毛利
+
             self.calculate_all_margins()
             self.update_remaining_weight_label()
             
@@ -1318,20 +1336,25 @@ class ProductSpecDialog(QDialog):
 
     def auto_balance_weights(self, changed_row):
         """自动平衡权重：将剩余权重均分给其他未锁定的行"""
+        print(f"[DEBUG auto_balance_weights] called with changed_row={changed_row}")
         rows = self.table.rowCount()
         if rows <= 1:
             return
-        
+
         # 1. 获取当前修改行的新权重值
         item_changed = self.table.item(changed_row, 7)
         if not item_changed:
             return
-            
+
         try:
-            # 提取数值（去掉锁图标）
             text = item_changed.data(Qt.DisplayRole) or ""
             new_val = float(text.replace("🔒", "").strip())
         except:
+            return
+
+        # 检查权重是否真的发生了变化（对比 UserRole 中保存的原始值）
+        original_val = item_changed.data(Qt.UserRole)
+        if original_val is not None and abs(new_val - original_val) < 0.001:
             return
         
         # 2. 计算剩余可用权重
@@ -1490,61 +1513,51 @@ class ProductSpecDialog(QDialog):
         self.calculate_total_margin()
 
     def calculate_total_margin(self):
-        """计算综合毛利率（修复版：正确识别带锁权重的行）"""
+        """计算综合毛利率（使用表格显示的权重）"""
         total_weighted_margin = 0.0
         total_weight = 0.0
-        
+
+        coupon = float(self.coupon_input.text()) if self.coupon_input.text() else 0
+        new_customer = float(self.new_customer_input.text()) if self.new_customer_input.text() else 0
+        max_discount = max(coupon, new_customer)
+
         for r in range(self.table.rowCount()):
-            # 1. 获取毛利项 (第7列，索引6)
-            item_margin = self.table.item(r, 6)
-            # 2. 获取权重项 (第8列，可能带锁，索引7)
-            item_weight = self.table.item(r, 7)
-            
-            if not item_margin or not item_weight:
+            price_item = self.table.item(r, 4)
+            code_item = self.table.item(r, 2)
+            margin_item = self.table.item(r, 6)
+            weight_item = self.table.item(r, 7)
+
+            if not all([price_item, code_item, margin_item, weight_item]):
                 continue
-            
+
             try:
-                # --- 处理毛利 ---
-                margin_text = item_margin.text()
-                # 清理可能的错误提示
-                if "错误" in margin_text or "未找到" in margin_text:
-                    continue
-                # 提取数值 (去掉 % 号)
-                margin_val = float(margin_text.replace("%", "")) / 100.0
-                
-                # --- 处理权重 (关键修复：去掉锁图标和单量后缀) ---
-                weight_text = item_weight.data(Qt.DisplayRole) or ""
-                # 去掉锁图标和空格
-                clean_weight_text = weight_text.replace("🔒", "").strip()
-                # 去掉单量后缀如 "(20单)" 或 "(20)"
-                import re
-                match = re.match(r'^([\d.]+)', clean_weight_text)
-                if match:
-                    clean_weight_text = match.group(1)
-                else:
-                    clean_weight_text = ""
+                price = float(price_item.text())
+                code = code_item.text()
 
-                if not clean_weight_text:
+                margin_text = margin_item.text().replace("%", "").replace("％", "").strip()
+                margin_val = float(margin_text) if margin_text else 0.0
+
+                weight_text = weight_item.text().replace("🔒", "").replace("%", "").replace("％", "").strip()
+                weight_val = float(weight_text) if weight_text else 0.0
+
+                if price <= 0 or weight_val <= 0:
                     continue
 
-                weight_val = float(clean_weight_text)
-                
-                # --- 累加计算 ---
-                # 公式：毛利 * 权重
-                total_weighted_margin += margin_val * weight_val
-                total_weight += weight_val
-                
-            except ValueError:
-                # 如果转换失败（比如空字符串），跳过这一行
-                continue
+                cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (code,))
+                cost = float(cost_res[0][0]) if cost_res else 0.0
+
+                final_price = price - max_discount
+
+                if final_price > 0 and cost > 0:
+                    margin = (final_price - cost) / final_price
+                    total_weighted_margin += margin * weight_val
+                    total_weight += weight_val
             except Exception:
                 continue
-        
-        # 计算最终百分比
+
         if total_weight > 0:
-            # 综合毛利率 = (总加权毛利 / 总权重) * 100
-            final_margin_pct = (total_weighted_margin / total_weight) * 100
-            self.lbl_total_margin.setText(f"当前综合毛利率：{final_margin_pct:.2f}%")
+            final_margin = (total_weighted_margin / total_weight) * 100
+            self.lbl_total_margin.setText(f"当前综合毛利率：{final_margin:.2f}%")
         else:
             self.lbl_total_margin.setText("当前综合毛利率：0.00%")
 
@@ -3171,7 +3184,7 @@ class ProductSpecDialog(QDialog):
                 weight = (count / total_orders) * 100 if total_orders > 0 else 0
                 weight_text = f"🔒 {weight:.2f}%" if is_locked else f"{weight:.2f}%"
                 weight_item = QTableWidgetItem(weight_text)
-                weight_item.setData(Qt.UserRole, count)
+                weight_item.setData(Qt.UserRole, weight)
                 weight_item.setToolTip(f"订单数: {count}单")
                 self.table.setItem(row, 7, weight_item)
                 order_item = QTableWidgetItem(f"{count}单")
@@ -3180,7 +3193,7 @@ class ProductSpecDialog(QDialog):
             else:
                 weight_text = f"🔒 0.00%" if is_locked else "0.00%"
                 weight_item = QTableWidgetItem(weight_text)
-                weight_item.setData(Qt.UserRole, 0)
+                weight_item.setData(Qt.UserRole, 0.0)
                 self.table.setItem(row, 7, weight_item)
                 order_item = QTableWidgetItem("0单")
                 order_item.setTextAlignment(Qt.AlignCenter)

@@ -1554,6 +1554,23 @@ class StoreMarginDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # 调试标签
+        debug_widget = QWidget()
+        debug_layout = QHBoxLayout(debug_widget)
+        debug_layout.setContentsMargins(5, 2, 5, 2)
+        debug_label = QLabel(f"[DEBUG] 文件: dialogs/store_margin.py")
+        debug_label.setStyleSheet("background-color: #ffeb3b; color: #000; font-size: 11px; padding: 2px 8px;")
+        debug_label.setCursor(Qt.PointingHandCursor)
+        debug_label.setToolTip("点击复制文件路径")
+        debug_layout.addWidget(debug_label)
+        debug_layout.addStretch()
+        layout.addWidget(debug_widget)
+
+        def copy_path():
+            clipboard = QApplication.clipboard()
+            clipboard.setText("e:/zhuomian/shop/manager/dialogs/store_margin.py")
+        debug_label.mousePressEvent = lambda e: copy_path()
+
         # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
         historical_widget.setStyleSheet("border: 1px solid #dee2e6; border-radius: 8px;")
@@ -2598,6 +2615,7 @@ class StoreMarginDialog(QDialog):
                 self.margin_data_table.setRowCount(0)
                 QApplication.processEvents()
                 self.refresh_manual_data_display()
+                self.update_current_history_label()
                 self.show_toast("✅ 已删除数据")
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"删除失败: {e}")
@@ -2615,6 +2633,7 @@ class StoreMarginDialog(QDialog):
             data["end_date"] = end_date
             self.save_manual_data(data)
             self.refresh_manual_data_display()
+            self.update_current_history_label()
 
     def import_data(self):
         """导入Excel/CSV数据"""
@@ -2872,6 +2891,7 @@ class StoreMarginDialog(QDialog):
                     overwritten_count += 1
 
             self.refresh_manual_data_display()
+            self.update_current_history_label()
             if overwritten_count > 0:
                 self.show_toast(f"✅ 导入成功：新增 {imported_count - overwritten_count} 条，覆盖 {overwritten_count} 条")
             else:
@@ -3238,7 +3258,13 @@ class StoreMarginDialog(QDialog):
         for spec_code, sale_price, weight in specs:
             if not sale_price or sale_price <= 0:
                 continue
-            weight = weight or 0
+            user_id = self.get_user_id_by_sys_id(product_id)
+            order_res = self.db.safe_fetchall(
+                "SELECT order_count FROM imported_orders WHERE product_id=? AND spec_code=?",
+                (user_id, spec_code)
+            )
+            order_count = order_res[0][0] if order_res and order_res[0][0] else 0
+            weight = order_count if order_count > 0 else (weight or 0)
             cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
             cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
             final_price = sale_price - max_discount
@@ -3347,6 +3373,34 @@ class StoreMarginDialog(QDialog):
             if current.get("weight", 0) > remaining:
                 self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (remaining, sys_id))
         self.load_products()
+
+    def calculate_weights_from_orders(self):
+        order_data = self.db.safe_fetchall("""
+            SELECT product_id, SUM(order_count) as total_orders
+            FROM imported_orders WHERE store_id=? GROUP BY product_id
+        """, (self.store_id,))
+        if not order_data:
+            return
+        total_store_orders = sum(row[1] for row in order_data if row[1])
+        if total_store_orders <= 0:
+            return
+        product_orders = {row[0]: row[1] for row in order_data}
+        total_locked = sum(
+            data.get("weight", 0) for data in self.product_weights.values() if data.get("locked", 0)
+        )
+        unlocked_orders = 0
+        for prod_id, orders in product_orders.items():
+            if not self.product_weights.get(prod_id, {}).get("locked", 0):
+                unlocked_orders += orders
+        if unlocked_orders <= 0:
+            return
+        for prod_id, orders in product_orders.items():
+            if self.product_weights.get(prod_id, {}).get("locked", 0):
+                continue
+            weight = (orders / unlocked_orders) * (100 - total_locked)
+            sys_id = self.get_sys_id_by_user_id(prod_id)
+            if sys_id:
+                self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, sys_id))
 
     def auto_balance_weights(self):
         unlocked_rows = []
@@ -3608,8 +3662,8 @@ class StoreMarginDialog(QDialog):
                 if product_id_value not in product_codes_in_store:
                     continue
                 excel_product_codes_found.add(product_id_value)
-                prod_id = product_code_to_id.get(product_id_value)
-                if prod_id is None:
+                prod_db_id = product_code_to_id.get(product_id_value)
+                if prod_db_id is None:
                     continue
                 quantity = 1
                 if quantity_value is not None:
@@ -3632,7 +3686,7 @@ class StoreMarginDialog(QDialog):
                             order_date_str = f"{int(month)}/{int(day)}"
                         else:
                             order_date_str = date_str[:5]
-                spec_codes = all_store_specs.get(prod_id, set())
+                spec_codes = all_store_specs.get(prod_db_id, set())
                 spec_code_str = str(spec_code_value).strip() if spec_code_value else ""
                 if spec_code_str and spec_code_str != "None" and spec_code_str in spec_codes:
                     if status_col is not None and status_value:
@@ -3640,7 +3694,7 @@ class StoreMarginDialog(QDialog):
                         if not is_valid_order:
                             continue
                     matched_count += 1
-                    key = (prod_id, spec_code_str)
+                    key = (product_id_value, spec_code_str)
                     if key not in order_data:
                         order_data[key] = {"count": 0, "refund_count": 0, "dates": []}
                     order_data[key]["count"] += quantity
@@ -3676,16 +3730,21 @@ class StoreMarginDialog(QDialog):
             """, (self.store_id, import_time, os.path.basename(file_path), total_products, total_specs, total_orders, total_amount, snapshot_data))
             
             self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
-            for (prod_id, spec_code), data in order_data.items():
+            for (product_id_val, spec_code), data in order_data.items():
                 earliest_date = min(data["dates"]) if data["dates"] else None
                 latest_date = max(data["dates"]) if data["dates"] else None
                 date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
                 self.db.safe_execute(
                     "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.store_id, prod_id, spec_code, data["count"], import_time, date_range, 0, data.get("refund_count", 0))
+                    (self.store_id, product_id_val, spec_code, data["count"], import_time, date_range, 0, data.get("refund_count", 0))
                 )
+            self.load_products()
+            self.calculate_weights_from_orders()
             self.update_compare_columns()
             self.update_orders_display()
+            self.update_product_avg_price()
+            self.calculate_total_margin()
+            self.update_weight_inputs()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
@@ -4570,6 +4629,9 @@ class ImportHistoryDialog(QDialog):
 
         # 刷新界面显示
         if self.parent_window:
+            self.parent_window.load_products()
+            self.parent_window.calculate_weights_from_orders()
             self.parent_window.update_compare_columns()
-            self.parent_window.update_orders_display()
+            self.parent_window.update_product_avg_price()
+            self.parent_window.calculate_total_margin()
             self.parent_window.main_app.show_toast("✅ 已应用")
