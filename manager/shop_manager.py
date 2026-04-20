@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "2.9"
+VERSION = "3.1"
 
 # ================= 系统标准库 =================
 import sys
@@ -46,7 +46,7 @@ from PyQt5.QtWidgets import (
     QCalendarWidget, QDateEdit, QStatusBar, QProgressBar, QProgressDialog, QSplitter,
     QGroupBox, QRadioButton, QCheckBox, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QMenu, QAction, QToolBar, QSystemTrayIcon,
-    QGraphicsDropShadowEffect, QSizePolicy
+    QGraphicsDropShadowEffect, QSizePolicy, QShortcut
 )
 
 from PyQt5.QtCore import (
@@ -125,11 +125,74 @@ class TodayColumnDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class CloudSyncProgressDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("云同步")
+        self.setFixedSize(380, 140)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint & ~Qt.WindowCloseButtonHint)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 15, 20, 15)
+        layout.setSpacing(12)
+
+        self.status_label = QLabel("正在准备...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 13px; color: #333; font-weight: bold;")
+        layout.addWidget(self.status_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(22)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                background-color: #f0f0f0;
+                text-align: center;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db;
+                border-radius: 10px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+    def set_status(self, text, value=None):
+        self.status_label.setText(text)
+        if value is not None:
+            self.progress_bar.setValue(value)
+
+    def set_error(self, text):
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet("font-size: 13px; color: #e74c3c; font-weight: bold;")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                background-color: #f0f0f0;
+                text-align: center;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #e74c3c;
+                border-radius: 10px;
+            }
+        """)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedSize(400, 200)
+        self.setFixedSize(500, 450)
         self.init_ui()
         self.load_settings()
 
@@ -157,6 +220,53 @@ class SettingsDialog(QDialog):
         """)
         self.auto_start_checkbox.setToolTip("勾选后，程序将在Windows启动时自动运行")
         layout.addWidget(self.auto_start_checkbox)
+
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("<hr>"))
+
+        shortcuts_title = QLabel("⌨️ 快捷键说明")
+        shortcuts_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding-top: 5px;")
+        layout.addWidget(shortcuts_title)
+
+        shortcuts_table = QTableWidget()
+        shortcuts_table.setColumnCount(2)
+        shortcuts_table.setHorizontalHeaderLabels(["快捷键", "功能说明"])
+        shortcuts_table.setRowCount(2)
+        shortcuts_table.verticalHeader().setVisible(False)
+        shortcuts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        shortcuts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        
+        shortcuts_table.setItem(0, 0, QTableWidgetItem("Ctrl+F"))
+        shortcuts_table.setItem(0, 1, QTableWidgetItem("聚焦搜索框，快速搜索商品"))
+        shortcuts_table.setItem(1, 0, QTableWidgetItem("Ctrl+S"))
+        shortcuts_table.setItem(1, 1, QTableWidgetItem("快速云同步，自动上传数据到云端"))
+        
+        shortcuts_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        shortcuts_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        shortcuts_table.setColumnWidth(0, 100)
+        shortcuts_table.verticalHeader().setDefaultSectionSize(35)
+        shortcuts_table.setFixedHeight(100)
+        shortcuts_table.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: #f9f9f9;
+                gridline-color: #e0e0e0;
+            }
+            QTableWidget::item {
+                padding: 5px 10px;
+                font-size: 13px;
+            }
+            QHeaderView::section {
+                background-color: #3498db;
+                color: white;
+                font-weight: bold;
+                padding: 6px;
+                border: none;
+            }
+        """)
+        
+        layout.addWidget(shortcuts_table)
 
         layout.addStretch()
 
@@ -301,6 +411,9 @@ class ShopManagerApp(QMainWindow):
         # 初始化系统托盘
         self.init_system_tray()
         
+        # 初始化快捷键
+        self.init_shortcuts()
+        
         
 
     def init_system_tray(self):
@@ -315,6 +428,10 @@ class ShopManagerApp(QMainWindow):
         tray_menu.addAction(self.show_action)
         
         tray_menu.addSeparator()
+        
+        self.shortcuts_action = QAction("⌨️ 快捷键", self)
+        self.shortcuts_action.triggered.connect(self.show_shortcuts_dialog)
+        tray_menu.addAction(self.shortcuts_action)
         
         self.settings_action = QAction("⚙️ 设置", self)
         self.settings_action.triggered.connect(self.show_settings_dialog)
@@ -391,6 +508,87 @@ class ShopManagerApp(QMainWindow):
         """打开设置对话框"""
         dialog = SettingsDialog(self)
         dialog.exec_()
+
+    def show_shortcuts_dialog(self):
+        """打开快捷键说明对话框（复用设置对话框）"""
+        self.show_settings_dialog()
+
+    def init_shortcuts(self):
+        """初始化快捷键（仅在主界面激活时生效）"""
+        QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.focus_search)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.quick_cloud_sync)
+
+    def focus_search(self):
+        """聚焦搜索框，全选文本"""
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+    def quick_cloud_sync(self):
+        """快速云同步 - 弹窗进度条 + 完成后自动关闭并气泡提示"""
+        if not self.cloud_manager:
+            self.show_toast("❌ 云同步未初始化", 1000)
+            return
+
+        current = self.cloud_manager.get_current_account()
+        if not current:
+            self.show_toast("⚠️ 请先登录云同步账号", 1000)
+            return
+
+        progress_dialog = CloudSyncProgressDialog(self)
+        progress_dialog.set_status("⏳ 正在导出本地数据...", 10)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+        try:
+            data = self.cloud_manager.export_data_to_json()
+            if not data:
+                progress_dialog.set_error("❌ 数据导出失败")
+                progress_dialog.progress_bar.setValue(100)
+                QTimer.singleShot(800, progress_dialog.close)
+                QTimer.singleShot(1600, lambda: self.show_toast("❌ 数据导出失败", 1000))
+                return
+
+            progress_dialog.set_status("💾 正在保存本地备份...", 30)
+            QApplication.processEvents()
+            local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
+
+            progress_dialog.set_status("☁️ 正在上传到云端...", 50)
+            QApplication.processEvents()
+
+            try:
+                from manager.cloud_sync import TencentCOSUploader
+            except ImportError:
+                from cloud_sync import TencentCOSUploader
+
+            uploader = TencentCOSUploader(
+                current['secret_id'],
+                current['secret_key'],
+                current['bucket'],
+                current['region']
+            )
+
+            progress_dialog.set_status("☁️ 正在上传到云端...", 70)
+            QApplication.processEvents()
+
+            success, result = uploader.upload_json(data, current['folder'])
+            if success:
+                self.cloud_manager.update_last_upload_time(current['id'])
+                progress_dialog.set_status("✅ 上传完成", 100)
+                QApplication.processEvents()
+                QTimer.singleShot(500, progress_dialog.close)
+                QTimer.singleShot(1000, lambda: self.show_toast("✅ 已上传云同步", 1000))
+            else:
+                progress_dialog.set_error(f"❌ 上传失败: {result}")
+                progress_dialog.progress_bar.setValue(100)
+                QTimer.singleShot(1500, progress_dialog.close)
+                QTimer.singleShot(2000, lambda r=result: self.show_toast(f"❌ 上传失败: {r}", 1000))
+
+        except Exception as e:
+            print(f"快速云同步失败: {e}")
+            progress_dialog.set_error(f"❌ 上传异常")
+            progress_dialog.progress_bar.setValue(100)
+            QTimer.singleShot(1500, progress_dialog.close)
+            QTimer.singleShot(2000, lambda: self.show_toast(f"❌ 上传异常", 1000))
 
     def quit_application(self):
         """退出应用"""
@@ -1014,8 +1212,13 @@ class ShopManagerApp(QMainWindow):
 
         return super().eventFilter(obj, event)
 
-    def show_toast(self, message):
-        """显示悬浮提示"""
+    def show_toast(self, message, duration=3000):
+        """显示悬浮提示
+        
+        Args:
+            message: 提示消息
+            duration: 显示时长（毫秒），默认3000毫秒
+        """
         self.toast_label.setText(message)
         self.toast_label.adjustSize() # 根据文字调整大小
         
@@ -1026,8 +1229,8 @@ class ShopManagerApp(QMainWindow):
         self.toast_label.move(x, y)
         self.toast_label.show()
         
-        # 3000 毫秒 (3秒) 后自动隐藏
-        self.toast_timer.start(3000)
+        # 指定时长后自动隐藏
+        self.toast_timer.start(duration)
 
     def hide_toast(self):
         """隐藏提示"""
@@ -1738,9 +1941,12 @@ class ShopManagerApp(QMainWindow):
                 self.load_data_safe()
             day = today.day
             if 0 < day < self.table.columnCount():
+                v_scroll = self.table.verticalScrollBar()
+                saved_y = v_scroll.value()
                 target_index = self.table.model().index(0, day)
                 self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
                 self.table.setCurrentCell(0, day)
+                v_scroll.setValue(saved_y)
                 self.show_toast(f"已定位到今天: {today.month}月{today.day}日")
         except Exception as e:
             print(f"定位今天失败: {e}")

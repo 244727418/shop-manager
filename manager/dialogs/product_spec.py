@@ -25,6 +25,11 @@ try:
 except ImportError:
     from profit import ProfitCalculatorDialog
 
+try:
+    from .api_config import SpecPromptEditorDialog, ProductPromptEditorDialog
+except ImportError:
+    from api_config import SpecPromptEditorDialog, ProductPromptEditorDialog
+
 class ProductSpecDialog(QDialog):
     """商品规格管理与毛利计算器"""
     def __init__(self, db_manager, product_id, product_code, product_name, parent=None):
@@ -392,11 +397,13 @@ class ProductSpecDialog(QDialog):
             QTableWidget::item {
                 text-align: center;
                 font-weight: normal;
+                padding: 0px;
             }
             QTableWidget::item:selected {
                 background-color: #e6f3ff;
                 color: black;
                 outline: none;
+                padding: 0px;
             }
             QHeaderView::section {
                 font-size: 13px;
@@ -1589,7 +1596,22 @@ class ProductSpecDialog(QDialog):
                 background-color: #219a52;
             }
         """)
-        
+
+        btn_high_preview = QPushButton("👁️ 预览")
+        btn_high_preview.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+        """)
+        btn_high_preview.clicked.connect(lambda: self._show_optimization_preview_dialog(original_name, "high", dialog))
+
         btn_low = QPushButton("⚠️ 低转化（降低购买意愿）")
         btn_low.setStyleSheet("""
             QPushButton {
@@ -1604,14 +1626,29 @@ class ProductSpecDialog(QDialog):
                 background-color: #c0392b;
             }
         """)
-        
-        def start_optimize(prompt_type):
+
+        btn_low_preview = QPushButton("👁️ 预览")
+        btn_low_preview.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        btn_low_preview.clicked.connect(lambda: self._show_optimization_preview_dialog(original_name, "low", dialog))
+
+        def start_optimize(prompt_type, row):
             dialog.close()
-            self._do_ai_optimize(row, original_name, prompt_type)
-        
-        btn_high.clicked.connect(lambda: start_optimize("high"))
-        btn_low.clicked.connect(lambda: start_optimize("low"))
-        
+            self._show_optimization_preview_dialog(original_name, prompt_type, row=row)
+
+        btn_high.clicked.connect(lambda: start_optimize("high", row))
+        btn_low.clicked.connect(lambda: start_optimize("low", row))
+
         btn_common_rules = QPushButton("📋 通用规则设置")
         btn_common_rules.setStyleSheet("""
             QPushButton {
@@ -1625,20 +1662,506 @@ class ProductSpecDialog(QDialog):
             }
         """)
         btn_common_rules.clicked.connect(lambda: self._show_common_rules_dialog(dialog))
-        
-        layout.addWidget(btn_high)
-        layout.addWidget(btn_low)
+
+        high_layout = QHBoxLayout()
+        high_layout.addWidget(btn_high)
+        high_layout.addWidget(btn_high_preview)
+        layout.addLayout(high_layout)
+
+        low_layout = QHBoxLayout()
+        low_layout.addWidget(btn_low)
+        low_layout.addWidget(btn_low_preview)
+        layout.addLayout(low_layout)
+
         layout.addWidget(btn_common_rules)
-        
+
         dialog.exec_()
-    
+
+    def _show_optimization_preview_dialog(self, original_name, prompt_type, parent_dialog=None, row=None):
+        """显示优化预览窗口：展示条件、选择的提示词、生成预览"""
+        dialog = QDialog(parent_dialog or self)
+        dialog.setWindowTitle("🤖 规格优化预览")
+        dialog.resize(800, 650)
+        main_layout = QVBoxLayout(dialog)
+
+        header = QLabel("🤖 规格优化预览")
+        header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        main_layout.addWidget(header)
+
+        mode_color = "#27ae60" if prompt_type == "high" else "#e74c3c"
+        mode_icon = "🎯 高转化" if prompt_type == "high" else "⚠️ 低转化"
+        mode_label = QLabel(f"当前模式：{mode_icon}")
+        mode_label.setStyleSheet(f"font-size: 13px; color: {mode_color}; font-weight: bold; padding: 5px;")
+        main_layout.addWidget(mode_label)
+
+        separator_top = QFrame()
+        separator_top.setFrameShape(QFrame.HLine)
+        separator_top.setStyleSheet("color: #dee2e6;")
+        main_layout.addWidget(separator_top)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(12)
+
+        spec_info = self._get_spec_info_by_name(original_name)
+        margin_rate = spec_info.get("margin_rate", 0)
+        sale_price = spec_info.get("sale_price", "0")
+        cost_price = spec_info.get("cost_price", "0")
+        margin_value = spec_info.get("margin_value", "0")
+
+        condition_card = QWidget()
+        condition_card.setStyleSheet(f"""
+            QWidget {{
+                background-color: #f8f9fa;
+                border-left: 4px solid #3498db;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+        """)
+        cond_layout = QVBoxLayout(condition_card)
+        cond_layout.setContentsMargins(10, 6, 10, 6)
+        cond_layout.setSpacing(6)
+
+        cond_title = QLabel("📊 当前规格条件")
+        cond_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+        cond_layout.addWidget(cond_title)
+
+        row1 = QWidget()
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(20, 2, 20, 2)
+        row1_layout.setSpacing(15)
+
+        for label_text, value_text in [("规格名称", original_name), ("售价", sale_price), ("成本", cost_price)]:
+            label = QLabel(f"{label_text}：")
+            label.setStyleSheet("font-size: 11px; color: #6c757d; font-weight: bold; min-width: 60px;")
+            row1_layout.addWidget(label)
+            value = QLabel(value_text)
+            value.setStyleSheet("font-size: 11px; color: #2c3e50;")
+            row1_layout.addWidget(value)
+
+        row1_layout.addStretch()
+        cond_layout.addWidget(row1)
+
+        row2 = QWidget()
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(20, 2, 20, 2)
+        row2_layout.setSpacing(15)
+
+        for label_text, value_text in [("毛利", margin_value), ("毛利率", f"{margin_rate:.2f}%")]:
+            label = QLabel(f"{label_text}：")
+            label.setStyleSheet("font-size: 11px; color: #6c757d; font-weight: bold; min-width: 60px;")
+            row2_layout.addWidget(label)
+            value = QLabel(value_text)
+            value.setStyleSheet("font-size: 11px; color: #2c3e50;")
+            row2_layout.addWidget(value)
+
+        row2_layout.addStretch()
+        cond_layout.addWidget(row2)
+
+        scroll_layout.addWidget(condition_card)
+
+        if margin_rate >= 25:
+            margin_level = "高毛利(≥25%)"
+            margin_color = "#27ae60"
+        else:
+            margin_level = "低毛利(<25%)"
+            margin_color = "#e74c3c"
+
+        margin_level_label = QLabel(f"📈 当前毛利等级：{margin_level}")
+        margin_level_label.setStyleSheet(f"font-size: 12px; color: {margin_color}; font-weight: bold; padding: 8px; background-color: #f8f9fa; border-radius: 4px;")
+        scroll_layout.addWidget(margin_level_label)
+
+        if prompt_type == "high" and margin_rate >= 25:
+            strategy_name = "高转化+高毛利"
+            strategy_key = "ai_high_high_margin_prompt"
+        elif prompt_type == "high" and margin_rate < 25:
+            strategy_name = "高转化+低毛利"
+            strategy_key = "ai_high_low_margin_prompt"
+        elif prompt_type == "low" and margin_rate >= 25:
+            strategy_name = "低转化+高毛利"
+            strategy_key = "ai_low_high_margin_prompt"
+        else:
+            strategy_name = "低转化+低毛利"
+            strategy_key = "ai_low_low_margin_prompt"
+
+        tags_card = QWidget()
+        tags_layout = QVBoxLayout(tags_card)
+        tags_layout.setContentsMargins(10, 8, 10, 8)
+        tags_layout.setSpacing(8)
+
+        tags_title = QLabel("🏷️ 当前调用的提示词")
+        tags_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+        tags_layout.addWidget(tags_title)
+
+        tags_flow = QWidget()
+        tags_flow_layout = QHBoxLayout(tags_flow)
+        tags_flow_layout.setContentsMargins(5, 0, 5, 0)
+        tags_flow_layout.setSpacing(6)
+
+        tag_configs = []
+
+        store_memo = ""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            if store_rows and store_rows[0]:
+                store_id = store_rows[0][0]
+                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
+                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
+        except Exception:
+            pass
+
+        forbidden = self.db.get_setting("ai_spec_forbidden_words", "")
+        if forbidden:
+            tag_configs.append(("🚫 违禁词", "#e74c3c"))
+
+        product_info = self.db.get_setting("ai_product_info_prompt", "")
+        if product_info:
+            tag_configs.append(("🛒 产品信息", "#3498db"))
+
+        product_attr = self.db.get_setting("ai_spec_attr_prompt", "")
+        if product_attr:
+            tag_configs.append(("📦 商品属性", "#9b59b6"))
+
+        spec_prompt = self.db.get_setting("ai_spec_high_prompt" if prompt_type == "high" else "ai_spec_low_prompt", "")
+        if spec_prompt:
+            tag_configs.append((mode_icon, mode_color))
+
+        strategy_prompt = self.db.get_setting(strategy_key, "")
+        if strategy_prompt:
+            tag_configs.append(("💰 " + strategy_name, margin_color))
+
+        if store_memo:
+            tag_configs.append(("📋 店铺大纲", "#6c757d"))
+
+        for tag_text, color in tag_configs:
+            tag = QLabel(tag_text)
+            tag.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {color};
+                    color: white;
+                    padding: 6px 12px;
+                    border-radius: 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+            """)
+            tags_flow_layout.addWidget(tag)
+
+        tags_flow_layout.addStretch()
+        tags_layout.addWidget(tags_flow)
+
+        btn_view_prompts = QPushButton("📋 查看提示词详情")
+        btn_view_prompts.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 8px 15px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        btn_view_prompts.clicked.connect(lambda: self._show_prompt_detail_dialog(dialog, prompt_type, strategy_name, margin_rate))
+        tags_layout.addWidget(btn_view_prompts)
+
+        scroll_layout.addWidget(tags_card)
+
+        full_prompt = self._build_full_prompt_text_optimized(original_name, prompt_type)
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            token_count = len(enc.encode(full_prompt))
+            token_hint = f"📊 预计Token数量：约 {token_count} tokens"
+        except ImportError:
+            estimated_tokens = len(full_prompt) // 4
+            token_hint = f"📊 预计Token数量：约 {estimated_tokens} tokens（粗略估算）"
+
+        token_card = QWidget()
+        token_card.setStyleSheet("""
+            QWidget {
+                background-color: #f3e5f5;
+                border: 1px solid #ce93d8;
+                border-radius: 6px;
+                padding: 8px;
+            }
+        """)
+        token_layout = QVBoxLayout(token_card)
+        token_layout.setContentsMargins(10, 6, 10, 6)
+        token_label = QLabel(token_hint)
+        token_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #9b59b6;")
+        token_layout.addWidget(token_label)
+        saved_label = QLabel("💡 已优化：仅调用1个毛利策略，节省Tokens")
+        saved_label.setStyleSheet("font-size: 11px; color: #27ae60;")
+        token_layout.addWidget(saved_label)
+        scroll_layout.addWidget(token_card)
+
+        preview_card = self._create_card("📤 预期生成的规格名称", [
+            ("数量", "10个不同风格的规格名称"),
+            ("格式", "保留原规格核心词，约30字左右"),
+            ("风格", "不同命名风格，不重复原规格名称"),
+        ], "#f39c12")
+        scroll_layout.addWidget(preview_card)
+
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+
+        separator_bottom = QFrame()
+        separator_bottom.setFrameShape(QFrame.HLine)
+        separator_bottom.setStyleSheet("color: #dee2e6;")
+        main_layout.addWidget(separator_bottom)
+
+        btn_layout = QHBoxLayout()
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                padding: 12px 25px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+        """)
+        btn_cancel.clicked.connect(dialog.accept)
+        btn_layout.addWidget(btn_cancel)
+
+        btn_layout.addStretch()
+
+        btn_generate = QPushButton("🚀 生成规格名称")
+        btn_generate.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {mode_color};
+                color: white;
+                padding: 12px 30px;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {mode_color.replace('27ae60', '219a52').replace('e74c3c', 'c0392b')};
+            }}
+        """)
+        btn_generate.clicked.connect(lambda: self._start_optimize_from_preview(original_name, prompt_type, dialog, row))
+        btn_layout.addWidget(btn_generate)
+
+        main_layout.addLayout(btn_layout)
+
+        dialog.exec_()
+
+    def _start_optimize_from_preview(self, original_name, prompt_type, parent_dialog=None, row=None):
+        """从预览窗口确认并开始优化"""
+        if parent_dialog:
+            parent_dialog.accept()
+        if row is None:
+            row = self.table.currentRow()
+        if row >= 0:
+            self._do_ai_optimize(row, original_name, prompt_type)
+
+    def _create_card(self, title, items, color):
+        card = QWidget()
+        card.setStyleSheet(f"""
+            QWidget {{
+                background-color: #f8f9fa;
+                border-left: 4px solid {color};
+                border-radius: 4px;
+                padding: 8px;
+            }}
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 6, 10, 6)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title_label)
+        for key, value in items:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(20, 2, 10, 2)
+            key_label = QLabel(key + "：")
+            key_label.setStyleSheet("font-size: 11px; color: #6c757d; font-weight: bold; min-width: 80px;")
+            row_layout.addWidget(key_label)
+            value_label = QLabel(value)
+            value_label.setStyleSheet("font-size: 11px; color: #2c3e50;")
+            value_label.setWordWrap(True)
+            row_layout.addWidget(value_label)
+            row_layout.addStretch()
+            layout.addWidget(row)
+        return card
+
+    def _get_spec_info_by_name(self, spec_name):
+        specs = self._get_specs_with_margin_details()
+        for spec in specs:
+            if spec.get("spec_name", "") == spec_name:
+                return spec
+        return {"spec_name": spec_name, "sale_price": "0", "cost_price": "0",
+                "margin_value": "0", "margin_rate": 0}
+
+    def _get_specs_with_margin_details(self):
+        try:
+            rows = self.db.safe_fetchall(
+                "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
+                (self.product_id,)
+            )
+        except Exception:
+            return []
+
+        if not rows:
+            return []
+
+        store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+        store_id = store_rows[0][0] if store_rows and store_rows[0] else None
+
+        results = []
+        for row in rows:
+            spec_name, spec_code, sale_price = row
+            cost_price = 0.0
+            if spec_code:
+                cost_res = self.db.safe_fetchall(
+                    "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                    (spec_code,)
+                )
+                if cost_res and cost_res[0][0]:
+                    cost_price = float(cost_res[0][0])
+
+            try:
+                sale_price_float = float(sale_price) if sale_price else 0
+                cost_price_float = float(cost_price)
+                if sale_price_float > 0 and cost_price_float > 0:
+                    margin_value = sale_price_float - cost_price_float
+                    margin_rate = margin_value / sale_price_float
+                else:
+                    margin_value = 0
+                    margin_rate = 0
+            except (ValueError, TypeError, ZeroDivisionError):
+                margin_value = 0
+                margin_rate = 0
+
+            results.append({
+                "spec_name": spec_name,
+                "sale_price": f"{sale_price_float:.2f}" if sale_price_float > 0 else "--",
+                "cost_price": f"{cost_price:.2f}" if cost_price > 0 else "--",
+                "margin_value": f"{margin_value:.2f}" if margin_value != 0 else "--",
+                "margin_rate": margin_rate,
+            })
+
+        return results
+
+    def _build_full_prompt_text_optimized(self, original_name, prompt_type):
+        """构建优化后的完整API提示词文本（仅使用一个毛利策略）"""
+        lines = []
+        lines.append("=" * 60)
+        lines.append("【API调用完整提示词预览】")
+        lines.append("=" * 60)
+        lines.append("")
+
+        lines.append("【1. 违禁词过滤规则】")
+        forbidden_words = self.db.get_setting("ai_spec_forbidden_words", "")
+        if forbidden_words:
+            forbidden_list = [w.strip() for w in forbidden_words.split(",") if w.strip()]
+            lines.append(f"禁止出现：{', '.join(forbidden_list)}")
+        else:
+            lines.append("（未设置违禁词）")
+        lines.append("")
+
+        lines.append("【2. 商品属性提示词】")
+        lines.append("-" * 40)
+        product_attr = self.db.get_setting("ai_product_info_prompt", "") or "（未设置）"
+        lines.append(product_attr)
+        lines.append("")
+
+        lines.append("【3. 当前链接信息】")
+        lines.append("-" * 40)
+        lines.append(f"商品标题：{self.product_name}")
+        lines.append("")
+
+        lines.append("【4. 所有规格信息】")
+        lines.append("-" * 40)
+        specs_layout = self._get_specs_with_margin()
+        lines.append(specs_layout)
+        lines.append("")
+
+        lines.append("【5. 当前优化规格】")
+        lines.append("-" * 40)
+        lines.append(f"正在优化：{original_name}")
+        lines.append("")
+
+        margin_rate = self.get_current_margin_rate() * 100
+        if prompt_type == "high" and margin_rate >= 25:
+            setting_key = "ai_high_high_margin_prompt"
+            strategy_name = "高转化+高毛利(≥25%)"
+        elif prompt_type == "high" and margin_rate < 25:
+            setting_key = "ai_high_low_margin_prompt"
+            strategy_name = "高转化+低毛利(<25%)"
+        elif prompt_type == "low" and margin_rate >= 25:
+            setting_key = "ai_low_high_margin_prompt"
+            strategy_name = "低转化+高毛利(≥25%)"
+        else:
+            setting_key = "ai_low_low_margin_prompt"
+            strategy_name = "低转化+低毛利(<25%)"
+
+        margin_strategy = self.db.get_setting(setting_key, "")
+
+        lines.append(f"【6. 毛利策略：{strategy_name}】")
+        lines.append("-" * 40)
+        lines.append(margin_strategy.strip())
+        lines.append("")
+
+        lines.append("【7. 店铺运营大纲】")
+        lines.append("-" * 40)
+        store_memo = ""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            if store_rows and store_rows[0]:
+                store_id = store_rows[0][0]
+                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
+                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
+        except Exception:
+            pass
+        if store_memo:
+            lines.append(store_memo)
+        else:
+            lines.append("（未设置店铺运营大纲）")
+        lines.append("")
+
+        if prompt_type == "high":
+            lines.append("【8. 高转化规格优化提示词】")
+            lines.append("-" * 40)
+            spec_prompt = self.db.get_setting("ai_spec_high_prompt", "")
+            if spec_prompt:
+                lines.append(spec_prompt)
+            else:
+                lines.append("（使用默认高转化提示词）")
+        else:
+            lines.append("【8. 低转化规格优化提示词】")
+            lines.append("-" * 40)
+            spec_prompt = self.db.get_setting("ai_spec_low_prompt", "")
+            if spec_prompt:
+                lines.append(spec_prompt)
+            else:
+                lines.append("（使用默认低转化提示词）")
+
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("【User Prompt（用户输入）】")
+        lines.append("=" * 60)
+        lines.append(f"商品标题：{self.product_name}")
+        lines.append("")
+        lines.append(f"原规格名称：{original_name}")
+
+        return "\n".join(lines)
+
     def _do_ai_optimize(self, row, original_name, prompt_type):
         """执行AI优化"""
         api_key = self.db.get_setting("ai_api_key", "")
         if not api_key:
             QMessageBox.warning(self, "⚠️ 提示", "请先在API配置中设置API Key！")
             return
-        
+
         store_memo = ""
         try:
             store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
@@ -1648,99 +2171,62 @@ class ProductSpecDialog(QDialog):
                 store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
         except Exception as e:
             print(f"获取店铺备注失败: {e}")
-        
-        common_prompt = self._get_common_prompt()
-        
-        saved_titles = self.db.get_setting("selected_knowledge_titles", "")
-        knowledge_prompt = ""
-        if saved_titles:
-            title_list = [t.strip() for t in saved_titles.split(",") if t.strip()]
-            if title_list:
-                knowledge_items = self.db.get_knowledge_items_by_titles(title_list)
-                if knowledge_items:
-                    knowledge_prompt = "\n\n【本地知识库参考】\n"
-                    for item in knowledge_items:
-                        knowledge_prompt += f"【{item['title']}】\n{item['content']}\n"
-        else:
-            # RAG功能已分离到独立项目，主项目不再支持RAG检索
-            use_rag = False  # 强制禁用RAG检索
-            if use_rag:
-                rag_query = f"SKU规格名称优化 {original_name} {self.product_name}"
-                rag_results = self.db.rag_retrieve(rag_query, top_k=3)
-                if rag_results:
-                    knowledge_prompt = "\n\n【本地知识库参考（RAG检索）】\n"
-                    for item in rag_results:
-                        knowledge_prompt += f"【{item['title']}】(相似度:{item['similarity']:.2f})\n{item['content']}\n"
-        
+
+        forbidden_words = self.db.get_setting("ai_spec_forbidden_words", "")
+        forbidden_rule = ""
+        if forbidden_words:
+            forbidden_list = [w.strip() for w in forbidden_words.split(",") if w.strip()]
+            if forbidden_list:
+                forbidden_rule = f"""【违禁词过滤规则 - 最高优先级，必须严格遵守】
+禁止在生成的任何规格名称中出现以下词汇：{', '.join(forbidden_list)}
+如果生成的内容包含违禁词，必须替换为合规表达。
+绝对不能在规格名称中出现"·"符号。
+
+"""
+
+        product_attr_prompt = self._build_product_attr_prompt(original_name)
+        product_info = self._build_product_info_prompt(original_name)
+
         priority_prompt = ""
         if store_memo:
             priority_prompt = f"""【店铺运营指导大纲 - 最高优先级】
 {store_memo}
 
 """
-        
-        if prompt_type == "high":
-            prompt_text = priority_prompt + common_prompt + knowledge_prompt + "\n\n" + """【SKU规格名称生成提示词模板 - 高转化优化版】
-你是一个电商SKU命名专家，擅长通过规格名称提升顾客购买意愿。请根据用户输入的原规格名称，生成1个新的规格名称。
 
-【核心逻辑】
-不是让顾客"快买"，而是让顾客觉得"这个选项最划算最适合我"：
-强调性价比高、量大实惠
-突出热销、多人选择
-暗示赠品多、套餐划算
-制造紧迫感（限时、限量）
-让顾客主动认为"买这个最聪明"
-
-【示例】
-原规格：1本装
-新规格：1本装丨爆款热销丨限时包邮
-原规格：S码
-新规格：S码丨修身显瘦丨百搭爆款
-原规格：基础款
-新规格：基础款丨限时送赠品丨性价比之王
-原规格：体验装
-新规格：体验装丨新人专享丨买就送试用
-原规格：单支装
-新规格：单支装丨人手一支丨回购TOP1
-原规格：标准版
-新规格：标准版丨加量不加价丨赠运费险
-
-【要求】
-只能用括号：（）、【】、-、丨
-总字数控制在40字以内
-保留原规格的核心词（如数量、尺码、款式等）
-从消费者视角出发，让他们自己觉得"这个值"
-禁止使用"·"符号
-直接输出5个新规格名，一行一个，不要解释"""
+        margin_rate = self.get_current_margin_rate() * 100
+        if prompt_type == "high" and margin_rate >= 25:
+            setting_key = "ai_high_high_margin_prompt"
+            strategy_name = "高转化+高毛利(≥25%)"
+        elif prompt_type == "high" and margin_rate < 25:
+            setting_key = "ai_high_low_margin_prompt"
+            strategy_name = "高转化+低毛利(<25%)"
+        elif prompt_type == "low" and margin_rate >= 25:
+            setting_key = "ai_low_high_margin_prompt"
+            strategy_name = "低转化+高毛利(≥25%)"
         else:
-            prompt_text = priority_prompt + common_prompt + knowledge_prompt + "\n\n" + """【SKU规格名称生成提示词模板 - 低转化优化版】
-你是一个电商SKU命名专家，擅长通过规格名称降低顾客购买意愿。请根据用户输入的原规格名称，生成1个新的规格名称。
+            setting_key = "ai_low_low_margin_prompt"
+            strategy_name = "低转化+低毛利(<25%)"
 
-【核心逻辑】
-不是让顾客"别买"，而是让顾客觉得"这个选项不适合我"：
-强调数量少、规格小、性价比低
-暗示产品有瑕疵或风险
-突出使用周期短、不够用
-让顾客主动选择其他更划算的规格
+        margin_strategy = self.db.get_setting(setting_key, "")
 
-【示例】
-原规格：1本装
-新规格：1本装丨页数少使用短丨不划算
-原规格：S码
-新规格：S码丨偏小紧身丨瘦子专属
-原规格：基础款
-新规格：基础款丨无赠品简装丨不如套餐划算
-原规格：体验装
-新规格：体验装丨量少只够试丨想好用买正装
+        output_format = """【输出格式要求】
+必须生成10个不同的规格名称。
+每个规格名称必须有明显差异（使用不同的风格、卖点、词汇组合）。
+每个规格名称必须包含风格标记，格式为：【风格名】，例如：【热销爆款】、【限时优惠】、【性价比之王】、【品质保障】、【新品首发】等。
+每个规格名称的总字数（包括风格标记）必须达到40个字符左右。
+保留原规格的核心词（如数量、尺码、款式等），并在基础上扩展描述。
+直接输出10个新规格名，一行一个，不要解释。
 
-【要求】
-只能用括号：（）、【】、-、丨
-总字数控制在40字以内
-保留原规格的核心词（如数量、尺码、款式等）
-从消费者视角出发，让他们自己觉得"这个不划算"
-禁止使用"·"符号
-直接输出5个新规格名，一行一个，不要解释"""
-        
+"""
+
+        if prompt_type == "high":
+            spec_prompt = self.db.get_setting("ai_spec_high_prompt", "")
+            prompt_text = forbidden_rule + product_attr_prompt + margin_strategy + priority_prompt + output_format + spec_prompt
+        else:
+            spec_prompt = self.db.get_setting("ai_spec_low_prompt", "")
+            prompt_text = forbidden_rule + product_attr_prompt + margin_strategy + priority_prompt + output_format + spec_prompt
+
         user_prompt = f"商品标题：{self.product_name}\n\n原规格名称：{original_name}"
         
         progress = QProgressDialog("正在调用AI优化...", "取消", 0, 0, self)
@@ -1765,7 +2251,7 @@ class ProductSpecDialog(QDialog):
                     {"role": "system", "content": prompt_text},
                     {"role": "user", "content": user_prompt}
                 ],
-                "max_tokens": 800,
+                "max_tokens": 4096,
                 "temperature": 0.9
             }
             
@@ -1786,35 +2272,113 @@ class ProductSpecDialog(QDialog):
             QMessageBox.warning(self, "❌ 错误", f"发生错误：{str(e)}")
     
     def show_ai_result_dialog(self, row, original_name, optimized_name, prompt_type="high"):
-        """显示AI优化结果对话框（5条选项供选择）"""
+        """显示AI优化结果对话框（10条选项供选择）"""
         options = self._parse_ai_options(optimized_name)
-        
+        options = self._filter_forbidden_words(options)
+
+        if not options:
+            QMessageBox.warning(self, "⚠️ 提示", f"AI生成的所有规格名称都包含违禁词，请重新生成或调整违禁词设置！")
+            return
+
         self._current_row = row
         self._current_original_name = original_name
         self._current_prompt_type = prompt_type
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle("🤖 AI优化结果（选择1个）")
-        dialog.setMinimumWidth(500)
+        dialog.setMinimumWidth(800)
+        dialog.setMinimumHeight(600)
         layout = QVBoxLayout(dialog)
-        
-        layout.addWidget(QLabel(f"原规格名称：{original_name}"))
-        layout.addWidget(QLabel("请选择优化后的规格名称："))
-        
+
+        mode_text = "🎯 高转化" if prompt_type == "high" else "⚠️ 低转化"
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel(f"当前模式：{mode_text}"))
+        header_layout.addWidget(QLabel(f"原规格名称：{original_name}"))
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
+        layout.addWidget(QLabel("请选择优化后的规格名称（风格标记仅供观看，选择时不会复制到规格）："))
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(250)
+        scroll.setMinimumHeight(450)
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
-        
+        scroll_layout.setSpacing(8)
+
+        style_names = [
+            "热销爆款", "限时优惠", "赠品福利", "性价比之王", "品质保障",
+            "新品首发", "实用推荐", "环保健康", "明星同款", "回头客",
+            "容量太小", "性价比低", "限时缺货", "质量问题", "适用范围窄",
+            "赠品少", "寿命短", "回头率低", "替代品", "谨慎购买"
+        ]
+
+        import re
+
         for i, option in enumerate(options):
-            option_layout = QHBoxLayout()
-            
-            option_label = QLabel(f"{i+1}. {option}")
-            option_label.setWordWrap(True)
-            option_label.setStyleSheet("padding: 8px; background-color: #f8f9fa; border-radius: 3px;")
-            option_layout.addWidget(option_label)
-            
+            style_text = ""
+            style_match = re.search(r'【([^】]+)】', option)
+            if style_match:
+                style_text = style_match.group(1)
+
+            spec_name = re.sub(r'^【[^】]+】\s*', '', option)
+
+            container = QWidget()
+            container.setStyleSheet("""
+                QWidget {
+                    background-color: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                    border-radius: 5px;
+                    padding: 8px;
+                }
+            """)
+            container_layout = QHBoxLayout(container)
+            container_layout.setContentsMargins(10, 8, 10, 8)
+
+            number_label = QLabel(f"{i+1}.")
+            number_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; min-width: 30px;")
+            container_layout.addWidget(number_label)
+
+            style_label = QLabel(style_text if style_text else "未知")
+            if style_text:
+                style_label.setStyleSheet("""
+                    QLabel {
+                        background-color: #9b59b6;
+                        color: white;
+                        padding: 5px 10px;
+                        border-radius: 12px;
+                        font-size: 11px;
+                        font-weight: bold;
+                    }
+                """)
+            else:
+                style_label.setStyleSheet("""
+                    QLabel {
+                        background-color: #95a5a6;
+                        color: white;
+                        padding: 5px 10px;
+                        border-radius: 12px;
+                        font-size: 11px;
+                    }
+                """)
+            style_label.setMinimumWidth(100)
+            style_label.setAlignment(Qt.AlignCenter)
+            container_layout.addWidget(style_label)
+
+            spec_label = QLabel(spec_name)
+            spec_label.setWordWrap(True)
+            spec_label.setStyleSheet("""
+                QLabel {
+                    padding: 5px 10px;
+                    font-size: 12px;
+                    color: #2c3e50;
+                }
+            """)
+            container_layout.addWidget(spec_label)
+            container_layout.setStretch(2, 1)
+
+            container_layout.addSpacing(10)
+
             btn_select = QPushButton("✅ 选择")
             btn_select.setStyleSheet("""
                 QPushButton {
@@ -1823,27 +2387,27 @@ class ProductSpecDialog(QDialog):
                     font-weight: bold;
                     padding: 8px 15px;
                     border-radius: 3px;
-                    min-width: 60px;
+                    min-width: 70px;
                 }
                 QPushButton:hover {
                     background-color: #219a52;
                 }
             """)
-            
+
             def select_option(opt_text, r=row):
-                final_name = opt_text[:40] if len(opt_text) > 40 else opt_text
+                final_name = opt_text
                 self.table.item(r, 1).setText(final_name)
-                
+
                 clipboard = QApplication.clipboard()
                 clipboard.setText(final_name)
-                
+
                 QMessageBox.information(dialog, "✅ 成功", f"已选择并复制：{final_name}")
                 dialog.accept()
-            
+
             btn_select.clicked.connect(lambda checked, opt=option: select_option(opt))
-            option_layout.addWidget(btn_select)
-            
-            scroll_layout.addLayout(option_layout)
+            container_layout.addWidget(btn_select)
+
+            scroll_layout.addWidget(container)
         
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
@@ -1884,29 +2448,355 @@ class ProductSpecDialog(QDialog):
     def _parse_ai_options(self, text):
         """解析AI返回的多条规格选项"""
         if not text:
+            print("AI返回内容为空")
             return []
-        
-        lines = text.strip().split('\n')
+
+        import re
+
+        print(f"=== AI原始返回内容 ===")
+        print(text[:500])
+        print("=" * 50)
+
+        text = text.strip()
+        lines = text.split('\n')
         options = []
-        
+
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
-            import re
-            line = re.sub(r'^\d+[.、、]\s*', '', line)
+
+            line = re.sub(r'^\d+[.、、\.]\s*', '', line)
             line = re.sub(r'^(优化后[：:]\s*)', '', line)
             line = re.sub(r'^(规格名称[：:]\s*)', '', line)
-            line = line.replace('·', '')
-            
-            if line and len(line) <= 40:
+            line = re.sub(r'^(新规格[：:]\s*)', '', line)
+            line = re.sub(r'^(新规格\d+[.、\.]\s*)', '', line)
+            line = re.sub(r'^[-*]\s*', '', line)
+            line = line.replace('·', '').replace('•', '')
+
+            if line and len(line) >= 2:
                 options.append(line)
+            elif line:
+                print(f"跳过过短的行: {line}")
+
+        if not options and text:
+            print("解析失败，返回原始文本")
+            options = [text.strip()]
+
+        unique_options = []
+        for opt in options:
+            if opt not in unique_options:
+                unique_options.append(opt)
+
+        print(f"解析结果: {len(unique_options)} 个选项")
+        return unique_options
+
+    def _filter_forbidden_words(self, options):
+        """过滤包含违禁词的选项"""
+        forbidden_words = self.db.get_setting("ai_spec_forbidden_words", "")
+        if not forbidden_words:
+            return options
         
-        if not options:
-            options = [text.strip()[:40]]
+        forbidden_list = [w.strip().lower() for w in forbidden_words.split(",") if w.strip()]
+        if not forbidden_list:
+            return options
         
-        return options[:5]
+        filtered = []
+        for option in options:
+            option_lower = option.lower()
+            has_forbidden = False
+            for word in forbidden_list:
+                if word in option_lower:
+                    has_forbidden = True
+                    break
+            if not has_forbidden:
+                filtered.append(option)
+        
+        return filtered
+    
+    def _build_product_info_prompt(self, original_name):
+        """构建产品信息提示词（用户上传的产品属性）"""
+        product_attr = self.db.get_setting("ai_product_info_prompt", "") or ""
+        if product_attr:
+            return product_attr + "\n\n"
+        return ""
+
+    def _build_product_attr_prompt(self, original_name):
+        """构建商品属性提示词（包含规格布局等信息）"""
+        attr_template = self.db.get_setting("ai_spec_attr_prompt", "")
+        if not attr_template:
+            attr_template = """【商品属性信息】
+{product_attr}
+
+【当前链接标题】
+{product_name}
+
+【所有规格信息】（每个规格的名称、毛利率、价格）
+{specs_layout}
+
+【当前正在优化的规格】
+{current_spec_name}
+
+请结合以上商品属性和规格信息，生成最适合该规格的优化名称。"""
+
+        try:
+            product_attr = self.db.get_setting("ai_product_info_prompt", "") or ""
+            specs_layout = self._get_specs_with_margin()
+
+            attr_prompt = attr_template.format(
+                product_attr=product_attr,
+                product_name=self.product_name,
+                specs_layout=specs_layout,
+                current_spec_name=original_name
+            )
+        except Exception as e:
+            print(f"构建商品属性提示词失败: {e}")
+            attr_prompt = f"【当前链接标题】\n{self.product_name}\n\n【当前正在优化的规格】\n{original_name}"
+
+        return attr_prompt + "\n\n"
+
+    def _get_specs_with_margin(self):
+        """获取所有规格的布局信息（名称、毛利率、价格）"""
+        rows = self.db.safe_fetchall(
+            "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
+            (self.product_id,)
+        )
+        if not rows:
+            return "暂无规格数据"
+
+        layout_lines = []
+        for i, (spec_name, spec_code, sale_price) in enumerate(rows, 1):
+            sale_price_str = f"{sale_price:.2f}" if sale_price else "--"
+
+            cost_price = 0.0
+            if spec_code:
+                cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
+                if cost_res and cost_res[0][0]:
+                    cost_price = float(cost_res[0][0])
+
+            if sale_price and cost_price > 0:
+                margin_rate = ((sale_price - cost_price) / sale_price * 100) if sale_price > 0 else 0
+                margin_str = f"{margin_rate:.2f}%"
+            else:
+                margin_str = "--"
+            layout_lines.append(f"规格{i}: {spec_name} - 毛利率:{margin_str} - 价格:{sale_price_str}元")
+
+        return "\n".join(layout_lines)
+
+    def _get_specs_layout(self):
+        """获取所有规格的布局信息"""
+        rows = self.db.safe_fetchall(
+            "SELECT spec_name, spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+            (self.product_id,)
+        )
+        if not rows:
+            return "暂无规格数据"
+
+        layout_lines = []
+        for i, (spec_name, spec_code, sale_price, weight) in enumerate(rows, 1):
+            sale_price_str = f"{sale_price:.2f}" if sale_price else "--"
+            weight_str = f"{weight:.2f}%" if weight else "0%"
+            layout_lines.append(f"{i}. {spec_name} - 价格:{sale_price_str}元 - 权重:{weight_str}")
+
+        return "\n".join(layout_lines)
+
+    def _get_total_orders(self):
+        """获取总订单数"""
+        res = self.db.safe_fetchall(
+            "SELECT SUM(order_count) FROM imported_orders WHERE product_id=?",
+            (self.product_code,)
+        )
+        return res[0][0] if res and res[0][0] else 0
+
+    def _get_current_roi(self):
+        """获取当前投产比"""
+        res = self.db.safe_fetchall(
+            "SELECT current_roi FROM products WHERE id=?",
+            (self.product_id,)
+        )
+        return res[0][0] if res and res[0][0] else None
+
+    def _get_gross_break_even(self):
+        """获取毛保本投产"""
+        res = self.db.safe_fetchall(
+            "SELECT gross_break_even_roi FROM products WHERE id=?",
+            (self.product_id,)
+        )
+        return res[0][0] if res and res[0][0] else None
+
+    def _get_net_break_even(self):
+        """获取净保本投产"""
+        res = self.db.safe_fetchall(
+            "SELECT net_break_even_roi FROM products WHERE id=?",
+            (self.product_id,)
+        )
+        return res[0][0] if res and res[0][0] else None
+
+    def _get_margin_strategy_prompt(self, prompt_type):
+        """根据高/低转化类型和毛利率获取策略提示词"""
+        margin_rate = self.get_current_margin_rate() * 100
+
+        if prompt_type == "high":
+            if margin_rate >= 25:
+                prompt = self.db.get_setting("ai_high_high_margin_prompt", "")
+                if not prompt:
+                    prompt = """【毛利策略：高转化 + 高毛利(≥25%)
+
+当前产品毛利率较高，选择高转化模式。
+
+【核心策略】
+1. 以产品质量、功能、耐用性为卖点
+2. 强调品质上乘、经久耐用
+3. 突出产品的核心功能和独特卖点
+4. 暗示使用寿命长、性价比高（单位使用成本低）
+5. 适合追求品质的顾客群体
+
+请结合产品本身的特点和功能，生成能体现产品价值的规格名称。"""
+            else:
+                prompt = self.db.get_setting("ai_high_low_margin_prompt", "")
+                if not prompt:
+                    prompt = """【毛利策略：高转化 + 低毛利(<25%)
+
+当前产品毛利率较低，选择高转化模式。
+
+【核心策略】
+1. 以低价优势、实惠、性价比为卖点
+2. 强调价格优惠、促销力度大
+3. 制造紧迫感，促进快速下单
+4. 暗示赠品多、套餐划算
+5. 适合价格敏感的顾客群体
+
+请结合产品的价格优势，生成能促进快速下单的规格名称。"""
+        else:
+            if margin_rate >= 25:
+                prompt = self.db.get_setting("ai_low_high_margin_prompt", "")
+                if not prompt:
+                    prompt = """【毛利策略：低转化 + 高毛利(≥25%)
+
+当前产品毛利率较高，选择低转化模式。
+目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
+
+【核心策略】
+1. 强调价格偏高、不实惠
+2. 暗示性价比低、不值得
+3. 突出产品可能存在的缺点或局限
+4. 让顾客觉得"买这个不划算"
+
+请生成让顾客觉得"不适合我"的规格名称。"""
+            else:
+                prompt = self.db.get_setting("ai_low_low_margin_prompt", "")
+                if not prompt:
+                    prompt = """【毛利策略：低转化 + 低毛利(<25%)
+
+当前产品毛利率较低，选择低转化模式。
+目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
+
+【核心策略】
+1. 强调价格看似便宜但实际不优惠
+2. 暗示"便宜没好货"
+3. 突出产品可能偷工减料或质量一般
+4. 让顾客觉得"买这个不明智"
+
+请生成让顾客觉得"不适合我"的规格名称。"""
+
+        return prompt + "\n\n"
+    
+    def _show_prompt_detail_dialog(self, parent_dialog, prompt_type, strategy_name, margin_rate):
+        dialog = QDialog(parent_dialog)
+        dialog.setWindowTitle("📋 当前调用的提示词详情")
+        dialog.resize(700, 600)
+        layout = QVBoxLayout(dialog)
+
+        header = QLabel("📋 当前调用的提示词详情")
+        header.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(10)
+
+        prompt_items = [
+            ("🚫 违禁词过滤", "ai_spec_forbidden_words", True),
+            ("🛒 产品信息", "ai_product_info_prompt", False),
+            ("📦 商品属性提示词", "ai_spec_attr_prompt", False),
+            ("🎯 高转化提示词" if prompt_type == "high" else "⚠️ 低转化提示词",
+             "ai_spec_high_prompt" if prompt_type == "high" else "ai_spec_low_prompt", False),
+            ("💰 毛利策略: " + strategy_name,
+             "ai_high_high_margin_prompt" if prompt_type == "high" and margin_rate >= 25 else
+             "ai_high_low_margin_prompt" if prompt_type == "high" and margin_rate < 25 else
+             "ai_low_high_margin_prompt" if prompt_type == "low" and margin_rate >= 25 else
+             "ai_low_low_margin_prompt", False),
+        ]
+
+        store_memo = ""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            if store_rows and store_rows[0]:
+                store_id = store_rows[0][0]
+                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
+                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
+        except Exception:
+            pass
+
+        if store_memo:
+            prompt_items.append(("📋 店铺运营大纲", store_memo, True))
+
+        for title, content_or_key, is_content in prompt_items:
+            card = QWidget()
+            card.setStyleSheet("""
+                QWidget {
+                    background-color: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                    border-radius: 5px;
+                    padding: 8px;
+                }
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 6, 10, 6)
+
+            title_label = QLabel(title)
+            title_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+            card_layout.addWidget(title_label)
+
+            if is_content and not isinstance(content_or_key, str) == False:
+                content_text = content_or_key if is_content else self.db.get_setting(content_or_key, "")
+            else:
+                content_text = content_or_key if is_content else self.db.get_setting(content_or_key, "")
+
+            if not content_text:
+                content_text = "（未设置）"
+
+            content_display = QTextEdit()
+            content_display.setPlainText(content_text)
+            content_display.setReadOnly(True)
+            content_display.setMaximumHeight(150)
+            content_display.setStyleSheet("""
+                QTextEdit {
+                    background-color: white;
+                    border: 1px solid #dee2e6;
+                    border-radius: 3px;
+                    padding: 8px;
+                    font-size: 11px;
+                    font-family: Consolas, monospace;
+                    color: #495057;
+                }
+            """)
+            card_layout.addWidget(content_display)
+            content_layout.addWidget(card)
+
+        scroll.setWidget(content_widget)
+        layout.addWidget(scroll)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(dialog.accept)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+        dialog.exec_()
     
     def _get_default_common_prompt(self):
         return """【通用规则 - 拼多多平台】
@@ -1939,84 +2829,118 @@ class ProductSpecDialog(QDialog):
         return self._get_default_common_prompt()
     
     def _show_common_rules_dialog(self, parent=None):
-        """显示通用规则配置对话框"""
+        """显示当前调用的提示词概览"""
         dialog = QDialog(parent or self)
-        dialog.setWindowTitle("📋 通用规则配置")
+        dialog.setWindowTitle("📋 当前调用的提示词")
         dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(400)
         layout = QVBoxLayout(dialog)
-        
-        saved_prompt = self.db.get_setting("ai_common_prompt", "")
-        if not saved_prompt:
-            saved_prompt = self._get_default_common_prompt()
-        
-        layout.addWidget(QLabel("通用提示词规则（将自动添加到所有规格优化提示词最前面）："))
-        
-        text_edit = QTextEdit()
-        text_edit.setPlainText(saved_prompt)
-        text_edit.setMinimumHeight(150)
-        layout.addWidget(text_edit)
-        
-        template_label = QLabel("💡 预设模板：")
-        layout.addWidget(template_label)
-        
-        template_layout = QHBoxLayout()
-        
-        btn_template1 = QPushButton("拼多多默认")
-        btn_template1.clicked.connect(lambda: text_edit.setPlainText(self._get_default_common_prompt()))
-        
-        btn_template2 = QPushButton("京东风格")
-        btn_template2.clicked.connect(lambda: text_edit.setPlainText(self._get_jd_common_prompt()))
-        
-        btn_template3 = QPushButton("淘宝风格")
-        btn_template3.clicked.connect(lambda: text_edit.setPlainText(self._get_taobao_common_prompt()))
-        
-        btn_template4 = QPushButton("抖音风格")
-        btn_template4.clicked.connect(lambda: text_edit.setPlainText(self._get_douyin_common_prompt()))
-        
-        template_layout.addWidget(btn_template1)
-        template_layout.addWidget(btn_template2)
-        template_layout.addWidget(btn_template3)
-        template_layout.addWidget(btn_template4)
-        template_layout.addStretch()
-        layout.addLayout(template_layout)
-        
+
+        header = QLabel("📋 AI规格优化 - 当前调用的提示词")
+        header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
+        layout.addWidget(header)
+
+        info = QLabel("💡 以下是AI优化规格名称时调用的所有提示词。点击对应按钮可跳转到编辑页面。")
+        info.setStyleSheet("color: #6c757d; font-size: 12px; padding: 5px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        prompt_list_widget = QWidget()
+        prompt_list_layout = QVBoxLayout(prompt_list_widget)
+        prompt_list_layout.setSpacing(8)
+        prompt_list_layout.setContentsMargins(0, 5, 0, 5)
+
+        prompt_items = [
+            ("🛒 产品信息（用户上传）", "ai_product_info_prompt", "产品提示词配置 → 产品信息标签页"),
+            ("📦 商品属性提示词", "ai_spec_attr_prompt", "规格优化提示词配置 → 商品属性标签页"),
+            ("🎯 高转化提示词", "ai_spec_high_prompt", "规格优化提示词配置 → 高转化标签页"),
+            ("⚠️ 低转化提示词", "ai_spec_low_prompt", "规格优化提示词配置 → 低转化标签页"),
+            ("🚫 违禁词过滤", "ai_spec_forbidden_words", "规格优化提示词配置 → 违禁词设置按钮"),
+            ("💰 高转化+高毛利策略", "ai_high_high_margin_prompt", "产品提示词配置 → 高转化+高毛利标签页"),
+            ("💰 高转化+低毛利策略", "ai_high_low_margin_prompt", "产品提示词配置 → 高转化+低毛利标签页"),
+            ("💰 低转化+高毛利策略", "ai_low_high_margin_prompt", "产品提示词配置 → 低转化+高毛利标签页"),
+            ("💰 低转化+低毛利策略", "ai_low_low_margin_prompt", "产品提示词配置 → 低转化+低毛利标签页"),
+        ]
+
+        for title, setting_key, location in prompt_items:
+            item_widget = QWidget()
+            item_widget.setStyleSheet("""
+                QWidget {
+                    background-color: #f8f9fa;
+                    border-radius: 5px;
+                    border: 1px solid #dee2e6;
+                    padding: 8px;
+                }
+            """)
+            item_layout = QHBoxLayout(item_widget)
+            item_layout.setContentsMargins(10, 5, 10, 5)
+
+            info_layout = QVBoxLayout()
+            title_label = QLabel(title)
+            title_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #2c3e50;")
+            info_layout.addWidget(title_label)
+
+            location_label = QLabel(f"【位置】{location}")
+            location_label.setStyleSheet("font-size: 11px; color: #6c757d;")
+            info_layout.addWidget(location_label)
+
+            current_value = self.db.get_setting(setting_key, "")
+            if current_value:
+                value_label = QLabel(f"当前内容：{current_value[:40]}{'...' if len(current_value) > 40 else ''}")
+                value_label.setStyleSheet("font-size: 10px; color: #95a5a6;")
+                value_label.setWordWrap(True)
+                info_layout.addWidget(value_label)
+
+            info_layout.addStretch()
+            item_layout.addLayout(info_layout)
+
+            btn_edit = QPushButton("编辑")
+            btn_edit.setStyleSheet("""
+                QPushButton {
+                    background-color: #3498db;
+                    color: white;
+                    padding: 5px 15px;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #2980b9;
+                }
+            """)
+            btn_edit.clicked.connect(lambda checked, key=setting_key: self._open_prompt_editor(key))
+            item_layout.addWidget(btn_edit)
+
+            prompt_list_layout.addWidget(item_widget)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(prompt_list_widget)
+        layout.addWidget(scroll)
+
         btn_layout = QHBoxLayout()
-        
-        btn_reset = QPushButton("恢复默认")
-        btn_reset.clicked.connect(lambda: text_edit.setPlainText(self._get_default_common_prompt()))
-        
-        btn_save = QPushButton("保存配置")
-        btn_save.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                font-weight: bold;
-                padding: 8px 20px;
-                border-radius: 3px;
-            }
-        """)
-        
-        btn_cancel = QPushButton("取消")
-        
-        def save_prompt():
-            new_prompt = text_edit.toPlainText().strip()
-            if not new_prompt:
-                QMessageBox.warning(dialog, "⚠️ 警告", "提示词内容不能为空！")
-                return
-            self.db.set_setting("ai_common_prompt", new_prompt)
-            QMessageBox.information(dialog, "✅ 成功", "通用规则配置已保存！")
-            dialog.accept()
-        
-        btn_save.clicked.connect(save_prompt)
-        btn_cancel.clicked.connect(dialog.reject)
-        
-        btn_layout.addWidget(btn_reset)
         btn_layout.addStretch()
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_save)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(dialog.accept)
+        btn_layout.addWidget(btn_close)
         layout.addLayout(btn_layout)
-        
+
         dialog.exec_()
+
+    def _open_prompt_editor(self, setting_key):
+        if setting_key == "ai_spec_attr_prompt":
+            dialog = SpecPromptEditorDialog(self.db, self)
+            dialog.exec_()
+        elif setting_key == "ai_spec_high_prompt":
+            dialog = SpecPromptEditorDialog(self.db, self)
+            dialog.exec_()
+        elif setting_key == "ai_spec_low_prompt":
+            dialog = SpecPromptEditorDialog(self.db, self)
+            dialog.exec_()
+        elif setting_key == "ai_spec_forbidden_words":
+            dialog = SpecPromptEditorDialog(self.db, self)
+            dialog.exec_()
+        else:
+            dialog = ProductPromptEditorDialog(self.db, self)
+            dialog.exec_()
 
     def _save_col_width_to_db(self):
         """延迟保存列宽到数据库"""

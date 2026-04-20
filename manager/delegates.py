@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """表格列代理：规格名、居中、权重（含锁定图标）"""
-from PyQt5.QtWidgets import QStyledItemDelegate, QLineEdit
+from PyQt5.QtWidgets import QStyledItemDelegate, QPlainTextEdit, QLineEdit
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QDoubleValidator
 
@@ -9,12 +9,50 @@ class SpecNameDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.max_length = 40
+        self._editing_index = None
+
+    def paint(self, painter, option, index):
+        painter.save()
+        if index != self._editing_index:
+            super().paint(painter, option, index)
+        else:
+            painter.fillRect(option.rect, option.backgroundBrush)
+        painter.restore()
 
     def createEditor(self, parent, option, index):
-        editor = QLineEdit(parent)
-        editor.setMaxLength(self.max_length)
-        editor.setFixedHeight(option.rect.height() - 4)
+        self._editing_index = index
+        editor = QPlainTextEdit(parent)
+        editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor.setFrameStyle(0)
+        editor.setStyleSheet(
+            "QPlainTextEdit { "
+            "border: none; "
+            "margin: 0px; "
+            "padding: 0px; "
+            "background-color: white; "
+            "font-size: 13px; "
+            "font-weight: normal; "
+            "text-align: center; "
+            "}"
+        )
+        editor.document().setDocumentMargin(0)
         return editor
+
+    def setEditorData(self, editor, index):
+        text = index.data(Qt.DisplayRole) or ""
+        editor.setPlainText(text)
+
+    def setModelData(self, editor, model, index):
+        text = editor.toPlainText()
+        if len(text) > self.max_length:
+            text = text[:self.max_length]
+        model.setData(index, text, Qt.EditRole)
+
+    def destroyEditor(self, editor, index):
+        self._editing_index = None
+        super().destroyEditor(editor, index)
 
 
 class CenterAlignDelegate(QStyledItemDelegate):

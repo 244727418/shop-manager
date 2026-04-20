@@ -333,6 +333,7 @@ class CloudSyncManager:
             self.db.safe_execute("DELETE FROM profit_records")
             self.db.safe_execute("DELETE FROM historical_data")
             self.db.safe_execute("DELETE FROM manual_margin_data")
+            self.db.safe_execute("DELETE FROM store_temp_images")
             self.db.safe_execute("DELETE FROM settings")
 
             if data.get('stores'):
@@ -450,9 +451,20 @@ class CloudSyncManager:
                     columns = [col for col in m.keys() if col != 'id']
                     placeholders = ','.join(['?'] * (len(columns) + 1))
                     cols_with_id = ['id'] + columns
-                    vals = [m.get('id')] + [m.get(col) for col in columns]
+                    vals = [m.get('id')] + [self._safe_deserialize_value(m.get(col), col) for col in columns]
                     self.db.safe_execute(
                         f"INSERT OR REPLACE INTO manual_margin_data ({','.join(cols_with_id)}) VALUES ({placeholders})",
+                        vals
+                    )
+
+            if data.get('store_temp_images'):
+                for img in data['store_temp_images']:
+                    columns = [col for col in img.keys() if col != 'id']
+                    placeholders = ','.join(['?'] * (len(columns) + 1))
+                    cols_with_id = ['id'] + columns
+                    vals = [img.get('id')] + [self._safe_deserialize_value(img.get(col), col) for col in columns]
+                    self.db.safe_execute(
+                        f"INSERT OR REPLACE INTO store_temp_images ({','.join(cols_with_id)}) VALUES ({placeholders})",
                         vals
                     )
 
