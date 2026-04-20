@@ -84,12 +84,17 @@ class CloudSyncManager:
             result.append(CloudSyncManager._safe_deserialize_value(val, col))
         return result
 
+    def _get_base_dir(self):
+        """获取基础目录"""
+        if getattr(sys, 'frozen', False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        return base
+
     def _get_accounts_file_path(self):
         """获取账号配置文件路径"""
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = self._get_base_dir()
         return os.path.join(base_dir, "cloud_accounts.json")
 
     def _load_accounts(self):
@@ -157,13 +162,6 @@ class CloudSyncManager:
         self.accounts.append(account)
         self._save_accounts()
         return account
-
-    def _get_base_dir(self):
-        """获取基础目录"""
-        if getattr(sys, 'frozen', False):
-            return os.path.dirname(sys.executable)
-        else:
-            return os.path.dirname(os.path.abspath(__file__))
 
     def get_last_used_credentials(self):
         """从cloud_accounts.json获取最近使用过的凭证"""
@@ -653,10 +651,10 @@ class CloudSyncDialog(QDialog):
         }
     """
 
-    def __init__(self, db_manager, parent=None):
+    def __init__(self, db_manager, cloud_manager=None, parent=None):
         super().__init__(parent)
         self.db = db_manager
-        self.cloud_manager = CloudSyncManager(db_manager)
+        self.cloud_manager = cloud_manager if cloud_manager else CloudSyncManager(db_manager)
         self.parent_window = parent
         self.setWindowTitle("☁️ 云同步 - 账号管理")
         self.resize(700, 500)

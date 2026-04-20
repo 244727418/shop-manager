@@ -1625,7 +1625,7 @@ class ShopManagerApp(QMainWindow):
                 header_style += f"QHeaderView::section:column({self._today_col}) {{ background-color: #ffe0b2; font-weight: bold; }}"
             self.table.horizontalHeader().setStyleSheet(header_style)
             
-            col0_width = int(self.db.get_setting("col_0_width", 400))  # 调整宽度以容纳按钮
+            col0_width = int(self.db.get_setting("col_0_width", 278))  # 调整宽度以容纳按钮
             self.table.setColumnWidth(0, col0_width)
             self.frozen_table.setColumnWidth(0, col0_width)
             for i in range(1, total_cols):
@@ -1944,9 +1944,30 @@ class ShopManagerApp(QMainWindow):
             if 0 < day < self.table.columnCount():
                 v_scroll = self.table.verticalScrollBar()
                 saved_y = v_scroll.value()
+                h_scroll = self.table.horizontalScrollBar()
+                has_filter = bool(self.current_store_filter)
+                if has_filter:
+                    for row in range(self.table.rowCount()):
+                        self.table.setRowHidden(row, False)
+                        self.frozen_table.setRowHidden(row, False)
                 target_index = self.table.model().index(0, day)
                 self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
                 self.table.setCurrentCell(0, day)
+                if has_filter:
+                    for row in range(self.table.rowCount()):
+                        prod_id = self.row_data_map.get(row)
+                        store_id_at_row = self.row_store_map.get(row)
+                        should_hide = True
+                        if row in self.row_store_map:
+                            if self.row_store_map[row] in self.current_store_filter:
+                                should_hide = False
+                        elif prod_id:
+                            product_store_id = self.product_store_map.get(prod_id)
+                            if product_store_id and product_store_id in self.current_store_filter:
+                                should_hide = False
+                        if should_hide:
+                            self.table.setRowHidden(row, True)
+                            self.frozen_table.setRowHidden(row, True)
                 v_scroll.setValue(saved_y)
                 self.show_toast(f"已定位到今天: {today.month}月{today.day}日")
         except Exception as e:
@@ -2225,9 +2246,16 @@ class ShopManagerApp(QMainWindow):
 
         self.store_checkboxes = {}
         stores = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order")
+        saved_filter_ids = self.db.get_setting("store_filter_ids", "")
+        if saved_filter_ids:
+            saved_filter_set = set(int(x) for x in saved_filter_ids.split(",") if x)
+        else:
+            saved_filter_set = set()
         for store_id, store_name in stores:
             cb = QCheckBox(store_name)
             cb.setCheckable(True)
+            if store_id in saved_filter_set:
+                cb.setChecked(True)
             cb.stateChanged.connect(lambda state, sid=store_id: self.apply_store_filter(sid))
             self.store_checkboxes[store_id] = cb
             filter_layout.addWidget(cb)
@@ -2251,7 +2279,7 @@ class ShopManagerApp(QMainWindow):
         btn_layout.addWidget(btn_clear_filter)
         filter_layout.addLayout(btn_layout)
 
-        self.current_store_filter = set()
+        self.current_store_filter = saved_filter_set.copy()
         self.store_filter_menu_selected_store = None
 
         btn_rect = self.btn_store_filter.rect()
@@ -2309,6 +2337,7 @@ class ShopManagerApp(QMainWindow):
 
             filtered_count = self.table.rowCount() - hidden_count
             self.btn_store_filter.setText(f"🏪 店铺 ({filtered_count})")
+            self.db.set_setting("store_filter_ids", ",".join(map(str, self.current_store_filter)) if self.current_store_filter else "")
             self.show_toast(f"店铺筛选: 显示 {filtered_count} 个商品")
 
         except Exception as e:
@@ -2322,6 +2351,7 @@ class ShopManagerApp(QMainWindow):
         for cb in self.store_checkboxes.values():
             cb.setChecked(False)
         self.current_store_filter.clear()
+        self.db.set_setting("store_filter_ids", "")
 
     def clear_store_filter(self):
         """清除店铺筛选，显示所有商品"""
@@ -2865,7 +2895,7 @@ class ShopManagerApp(QMainWindow):
         """打开云同步登录窗口"""
         try:
             from manager.cloud_sync import CloudSyncDialog
-            dialog = CloudSyncDialog(self.db, self)
+            dialog = CloudSyncDialog(self.db, self.cloud_manager, self)
             dialog.exec_()
             self.update_cloud_account_label()
         except Exception as e:
