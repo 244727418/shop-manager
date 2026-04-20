@@ -1882,7 +1882,6 @@ class StoreMarginDialog(QDialog):
         self.table.setStyleSheet("""
             QTableWidget {
                 gridline-color: #cccccc;
-                font-size: 14px;
                 border: 1px solid #cccccc;
                 border-radius: 4px;
                 background-color: white;
@@ -1891,7 +1890,6 @@ class StoreMarginDialog(QDialog):
                 padding: 0px;
                 text-align: center;
                 border: 1px solid #cccccc;
-                font-size: 14px;
                 background-color: white;
             }
             QTableWidget::item:selected {
@@ -1911,9 +1909,9 @@ class StoreMarginDialog(QDialog):
                 padding: 0px;
                 margin: 0px;
                 border: 1px solid #cccccc;
-                font-size: 14px;
                 font-weight: bold;
                 min-height: 35px;
+                text-align: center;
             }
         """)
         historical_layout.addWidget(self.table)
@@ -2008,6 +2006,11 @@ class StoreMarginDialog(QDialog):
             "font-size: 14px; font-weight: bold; color: #3498db; background-color: #e8f4fc; padding: 6px 12px; border-radius: 6px;"
         )
 
+        self.lbl_order_range = QLabel("当前订单时间范围: --")
+        self.lbl_order_range.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #8e44ad; background-color: #f5eef8; padding: 6px 12px; border-radius: 6px;"
+        )
+
         self.btn_save = QPushButton("💾 保存")
         self.btn_save.setStyleSheet("""
             QPushButton {
@@ -2053,6 +2056,7 @@ class StoreMarginDialog(QDialog):
         btn_layout.addSpacing(10)
         btn_layout.addWidget(self.lbl_total_margin)
         btn_layout.addWidget(self.lbl_total_orders)
+        btn_layout.addWidget(self.lbl_order_range)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_close)
@@ -2106,18 +2110,28 @@ class StoreMarginDialog(QDialog):
             self.table.setRowHeight(row, 70)
             item_id = QTableWidgetItem(str(prod_id))
             item_id.setFlags(item_id.flags() & ~Qt.ItemIsEditable)
+            item_id.setFont(QFont("Microsoft YaHei", 14))
             self.table.setItem(row, 1, item_id)
             item_title = QTableWidgetItem(prod_title or "")
             item_title.setFlags(item_title.flags() & ~Qt.ItemIsEditable)
+            item_title.setFont(QFont("Microsoft YaHei", 14))
             self.table.setItem(row, 2, item_title)
             cost, price, margin = self.get_product_margin(sys_id)
-            self.table.setItem(row, 3, QTableWidgetItem(f"{cost:.2f}" if cost else "0.00"))
-            item_price = QTableWidgetItem(f"{price:.2f}" if price else "0.00")
+            cost_item = QTableWidgetItem(f"¥{cost:.2f}" if cost else "¥0.00")
+            cost_item.setFlags(cost_item.flags() & ~Qt.ItemIsEditable)
+            cost_item.setTextAlignment(Qt.AlignCenter)
+            cost_item.setFont(QFont("Microsoft YaHei", 19))
+            self.table.setItem(row, 3, cost_item)
+            item_price = QTableWidgetItem(f"¥{price:.2f}" if price else "¥0.00")
             item_price.setFlags(item_price.flags() & ~Qt.ItemIsEditable)
+            item_price.setTextAlignment(Qt.AlignCenter)
+            item_price.setFont(QFont("Microsoft YaHei", 19))
             self.table.setItem(row, 4, item_price)
             margin_text = f"{margin:.2f}%" if margin else "0.00%"
             item_margin = QTableWidgetItem(margin_text)
             item_margin.setFlags(item_margin.flags() & ~Qt.ItemIsEditable)
+            item_margin.setTextAlignment(Qt.AlignCenter)
+            item_margin.setFont(QFont("Microsoft YaHei", 19))
             if margin and margin < 10:
                 item_margin.setBackground(QColor("#ffcccc"))
             elif margin and margin > 30:
@@ -2154,9 +2168,9 @@ class StoreMarginDialog(QDialog):
             lock_label.setAlignment(Qt.AlignCenter)
             lock_label.setFixedSize(25, 25)
             lock_label.setStyleSheet(
-                "QLabel { background-color: white; border: 1px solid #ff9800; border-radius: 3px; font-size: 14px; }"
+                "QLabel { background-color: white; border: 1px solid #ff9800; border-radius: 3px; font-size: 19px; }"
                 if is_locked
-                else "QLabel { background-color: white; border: 1px dashed #ccc; border-radius: 3px; font-size: 14px; }"
+                else "QLabel { background-color: white; border: 1px dashed #ccc; border-radius: 3px; font-size: 19px; }"
             )
             lock_label.installEventFilter(self)
             lock_label.setProperty("row", row)
@@ -2172,7 +2186,7 @@ class StoreMarginDialog(QDialog):
             weight_compare_layout.setContentsMargins(0, 0, 0, 0)
             weight_compare_label = QLabel("-")
             weight_compare_label.setAlignment(Qt.AlignCenter)
-            weight_compare_label.setStyleSheet("color: black; font-size: 12px;")
+            weight_compare_label.setStyleSheet("color: black; font-size: 19px;")
             weight_compare_layout.addWidget(weight_compare_label)
             self.table.setCellWidget(row, 7, weight_compare_widget)
             
@@ -2181,7 +2195,7 @@ class StoreMarginDialog(QDialog):
             order_label_layout.setContentsMargins(0, 0, 0, 0)
             order_label = QLabel("")
             order_label.setAlignment(Qt.AlignCenter)
-            order_label.setStyleSheet("color: black; font-size: 12px;")
+            order_label.setStyleSheet("color: black; font-size: 19px;")
             order_label_layout.addWidget(order_label)
             self.table.setCellWidget(row, 8, order_label_widget)
             
@@ -2191,7 +2205,7 @@ class StoreMarginDialog(QDialog):
             order_compare_layout.setContentsMargins(0, 0, 0, 0)
             order_compare_label = QLabel("-")
             order_compare_label.setAlignment(Qt.AlignCenter)
-            order_compare_label.setStyleSheet("color: black; font-size: 12px;")
+            order_compare_label.setStyleSheet("color: black; font-size: 19px;")
             order_compare_layout.addWidget(order_compare_label)
             self.table.setCellWidget(row, 9, order_compare_widget)
             
@@ -2200,7 +2214,7 @@ class StoreMarginDialog(QDialog):
             main_spec_layout.setContentsMargins(0, 0, 0, 0)
             main_spec_label = QLabel("-")
             main_spec_label.setAlignment(Qt.AlignCenter)
-            main_spec_label.setStyleSheet("color: black; font-size: 12px;")
+            main_spec_label.setStyleSheet("color: black; font-size: 19px;")
             main_spec_layout.addWidget(main_spec_label)
             self.table.setCellWidget(row, 11, main_spec_widget)
             if prod_id in self.product_weights:
@@ -2212,12 +2226,12 @@ class StoreMarginDialog(QDialog):
                     main_spec_label.setText("无")
             refund_orders_label = QLabel("无")
             refund_orders_label.setAlignment(Qt.AlignCenter)
-            refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             self.table.setCellWidget(row, 12, refund_orders_label)
             self.refund_widgets[row] = {'orders': refund_orders_label}
             refund_ratio_label = QLabel("无")
             refund_ratio_label.setAlignment(Qt.AlignCenter)
-            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             self.table.setCellWidget(row, 13, refund_ratio_label)
             self.refund_widgets[row]['ratio'] = refund_ratio_label
             btn_widget = QWidget()
@@ -2230,6 +2244,8 @@ class StoreMarginDialog(QDialog):
             btn_layout.addWidget(btn_edit)
             self.table.setCellWidget(row, 14, btn_widget)
             self.table.setItem(row, 10, QTableWidgetItem("-"))
+            self.table.item(row, 10).setFont(QFont("Microsoft YaHei", 19))
+            self.table.item(row, 10).setTextAlignment(Qt.AlignCenter)
             self.table.item(row, 1).setData(Qt.UserRole, prod_id)
             order_label.setProperty("prod_id", prod_id)
             self._update_order_label_for_row(row, weight_input, order_label, prod_id)
@@ -3202,7 +3218,7 @@ class StoreMarginDialog(QDialog):
                 refund_rate = total_refund / total_orders * 100
                 if refund_orders_label and hasattr(refund_orders_label, 'setText'):
                     refund_orders_label.setText(f"{refund_rate:.2f}%")
-                    refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                    refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
                 max_refund_spec = None
                 max_refund_rate = -1
                 for spec_code, oc, rc in spec_counts:
@@ -3216,31 +3232,31 @@ class StoreMarginDialog(QDialog):
                 if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
                     if max_refund_spec:
                         refund_ratio_label.setText(str(max_refund_spec))
-                        refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                        refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
                     else:
                         refund_ratio_label.setText("无")
-                        refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                        refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             elif total_orders > 0 and total_refund == 0:
                 if refund_orders_label and hasattr(refund_orders_label, 'setText'):
                     refund_orders_label.setText("0.00%")
-                    refund_orders_label.setStyleSheet("color: #27ae60; font-size: 12px;")
+                    refund_orders_label.setStyleSheet("color: #27ae60; font-size: 19px;")
                 if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
                     refund_ratio_label.setText("无")
-                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             else:
                 if refund_orders_label and hasattr(refund_orders_label, 'setText'):
                     refund_orders_label.setText("无")
-                    refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                 if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
                     refund_ratio_label.setText("无")
-                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
         else:
             if refund_orders_label and hasattr(refund_orders_label, 'setText'):
                 refund_orders_label.setText("无")
-                refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             if refund_ratio_label and hasattr(refund_ratio_label, 'setText'):
                 refund_ratio_label.setText("无")
-                refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
     def get_product_margin(self, product_id):
         specs = self.db.safe_fetchall(
@@ -3745,6 +3761,8 @@ class StoreMarginDialog(QDialog):
             self.update_product_avg_price()
             self.calculate_total_margin()
             self.update_weight_inputs()
+            self.update_total_orders_label()
+            self.update_order_range_label()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
@@ -3892,10 +3910,10 @@ class StoreMarginDialog(QDialog):
                 if order_label:
                     if user_product_id in prod_order_totals:
                         order_label.setText(f"{prod_order_totals[user_product_id]}单")
-                        order_label.setStyleSheet("color: black; font-size: 12px;")
+                        order_label.setStyleSheet("color: black; font-size: 19px;")
                     else:
                         order_label.setText("0单")
-                        order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                        order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
             refund_orders_label = self.refund_widgets.get(row, {}).get('orders')
             refund_ratio_label = self.refund_widgets.get(row, {}).get('ratio')
@@ -3907,7 +3925,7 @@ class StoreMarginDialog(QDialog):
                     refund_rate = total_refund / total_orders * 100
                     if refund_orders_label:
                         refund_orders_label.setText(f"{refund_rate:.2f}%")
-                        refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                        refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
                     max_refund_spec = None
                     max_refund_rate_val = -1
                     for spec_code, oc, rc in spec_data:
@@ -3919,26 +3937,27 @@ class StoreMarginDialog(QDialog):
                     if refund_ratio_label:
                         if max_refund_spec:
                             refund_ratio_label.setText(str(max_refund_spec))
-                            refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                            refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
                         else:
                             refund_ratio_label.setText("无")
-                            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                            refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                 else:
                     if refund_orders_label:
                         refund_orders_label.setText("无")
-                        refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                        refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                     if refund_ratio_label:
                         refund_ratio_label.setText("无")
-                        refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                        refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             else:
                 if refund_orders_label:
                     refund_orders_label.setText("无")
-                    refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                 if refund_ratio_label:
                     refund_ratio_label.setText("无")
-                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
         self.update_total_orders_label()
+        self.update_order_range_label()
 
         # 强制刷新表格显示
         from PyQt5.QtWidgets import QApplication
@@ -4014,7 +4033,45 @@ class StoreMarginDialog(QDialog):
         """, (self.store_id,))
         total = total_data[0][0] if total_data and total_data[0][0] else 0
         self.lbl_total_orders.setText(f"总单量: {total}")
-    
+
+    def update_order_range_label(self):
+        """更新当前订单时间范围标签"""
+        date_data = self.db.safe_fetchall("""
+            SELECT order_date FROM imported_orders WHERE store_id=? AND order_date IS NOT NULL
+        """, (self.store_id,))
+        if not date_data:
+            self.lbl_order_range.setText("当前订单时间范围: --")
+            return
+        all_dates = []
+        for (date_range,) in date_data:
+            if date_range and '~' in date_range:
+                parts = date_range.split('~')
+                all_dates.extend(parts)
+            elif date_range:
+                all_dates.append(date_range)
+        if not all_dates:
+            self.lbl_order_range.setText("当前订单时间范围: --")
+            return
+        try:
+            parsed_dates = []
+            for d in all_dates:
+                if '/' in d:
+                    m, day = d.split('/')
+                    parsed_dates.append((int(m), int(day)))
+            if parsed_dates:
+                parsed_dates.sort()
+                min_d = parsed_dates[0]
+                max_d = parsed_dates[-1]
+                if min_d != max_d:
+                    range_str = f"{min_d[0]}/{min_d[1]}-{max_d[0]}/{max_d[1]}"
+                else:
+                    range_str = f"{min_d[0]}/{min_d[1]}"
+                self.lbl_order_range.setText(f"当前订单时间范围: {range_str}")
+            else:
+                self.lbl_order_range.setText("当前订单时间范围: --")
+        except:
+            self.lbl_order_range.setText("当前订单时间范围: --")
+
     def update_compare_columns(self):
         """更新对比列数据 - 按订单时间范围与上一期对比"""
         # 获取当前导入的数据
@@ -4031,13 +4088,13 @@ class StoreMarginDialog(QDialog):
                 if weight_compare_widget:
                     weight_label = weight_compare_widget.layout().itemAt(0).widget()
                     weight_label.setText("-")
-                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                     
                 order_compare_widget = self.table.cellWidget(row, 9)
                 if order_compare_widget:
                     order_label = order_compare_widget.layout().itemAt(0).widget()
                     order_label.setText("-")
-                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             return
         
         # 获取当前订单的日期范围（用于找上一期）
@@ -4124,13 +4181,13 @@ class StoreMarginDialog(QDialog):
                 if weight_compare_widget:
                     weight_label = weight_compare_widget.layout().itemAt(0).widget()
                     weight_label.setText("无")
-                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                     
                 order_compare_widget = self.table.cellWidget(row, 9)
                 if order_compare_widget:
                     order_label = order_compare_widget.layout().itemAt(0).widget()
                     order_label.setText("无")
-                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             return
         
         # 解析上一期的快照数据
@@ -4143,13 +4200,13 @@ class StoreMarginDialog(QDialog):
                 if weight_compare_widget:
                     weight_label = weight_compare_widget.layout().itemAt(0).widget()
                     weight_label.setText("无")
-                    weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    weight_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
                     
                 order_compare_widget = self.table.cellWidget(row, 9)
                 if order_compare_widget:
                     order_label = order_compare_widget.layout().itemAt(0).widget()
                     order_label.setText("无")
-                    order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                    order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             return
         
         # 计算每个商品的总订单数
@@ -4198,17 +4255,17 @@ class StoreMarginDialog(QDialog):
 
                 if order_change_percent > 0:
                     weight_label.setText(f"🟢 ↑{order_change_percent:.2f}%")
-                    weight_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                    weight_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
                 elif order_change_percent < 0:
                     weight_label.setText(f"🔴 ↓{abs(order_change_percent):.2f}%")
-                    weight_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+                    weight_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
                 else:
                     weight_label.setText("⚪ 0.00%")
-                    weight_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+                    weight_label.setStyleSheet("color: #7f8c8d; font-size: 19px;")
             else:
                 # 商品不在对比数据中，显示 "无"
                 weight_label.setText("无")
-                weight_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                weight_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
             # 单量对比
             order_compare_widget = self.table.cellWidget(row, 9)
@@ -4222,22 +4279,24 @@ class StoreMarginDialog(QDialog):
 
                 if order_change > 0:
                     order_label.setText(f"🟢 ↑{order_change}")
-                    order_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                    order_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
                 elif order_change < 0:
                     order_label.setText(f"🔴 ↓{abs(order_change)}")
-                    order_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
+                    order_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
                 else:
                     order_label.setText("⚪ 0")
-                    order_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+                    order_label.setStyleSheet("color: #7f8c8d; font-size: 19px;")
             else:
                 # 商品不在对比数据中，显示 "无"
                 order_label.setText("无")
-                order_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+                order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
     def show_import_history(self):
         """显示导入历史记录对话框"""
         dialog = ImportHistoryDialog(self.store_id, self.store_name, self.db, self)
         dialog.exec_()
+        self.update_total_orders_label()
+        self.update_order_range_label()
 
 
 # ==================== 导入历史记录对话框类 ====================
@@ -4553,10 +4612,11 @@ class ImportHistoryDialog(QDialog):
             # 如果删除的是最新记录或者没有任何历史记录了，清空 imported_orders
             if is_latest or (remaining_history and remaining_history[0][0] == 0):
                 self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
-            
+
             self.load_history()
-            
-            # 气泡显示已删除
+
+            self.parent_window.update_total_orders_label()
+            self.parent_window.update_order_range_label()
             self.parent_window.main_app.show_toast("✅ 已删除")
     
     def delete_selected(self):
@@ -4634,4 +4694,6 @@ class ImportHistoryDialog(QDialog):
             self.parent_window.update_compare_columns()
             self.parent_window.update_product_avg_price()
             self.parent_window.calculate_total_margin()
+            self.parent_window.update_total_orders_label()
+            self.parent_window.update_order_range_label()
             self.parent_window.main_app.show_toast("✅ 已应用")

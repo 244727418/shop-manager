@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "3.1"
+VERSION = "3.2"
 
 # ================= 系统标准库 =================
 import sys
@@ -1550,6 +1550,7 @@ class ShopManagerApp(QMainWindow):
     def open_product_spec_dialog(self, db, product_id, product_code, product_title, parent):
         """打开规格与毛利对话框（供 StoreMarginDialog 等调用，避免 dialogs 依赖本模块）"""
         dialog = ProductSpecDialog(db, product_id, product_code, product_title, parent)
+        dialog.main_app = self
         dialog.show()
 
     def open_profit_calculator_dialog(self, margin_rate, avg_price, store_id, store_name, scope, parent, db):
