@@ -1559,6 +1559,17 @@ class ShopManagerApp(QMainWindow):
         dialog = ProfitCalculatorDialog(margin_rate, avg_price, store_id, store_name, scope, parent, db)
         dialog.show()
 
+    def _get_product_order_count(self, prod_code):
+        """获取商品的单量（从 imported_orders 表汇总）"""
+        try:
+            spec_counts = self.db.safe_fetchall(
+                "SELECT order_count FROM imported_orders WHERE product_id=?",
+                (prod_code,)
+            )
+            return sum(sc[0] for sc in spec_counts) if spec_counts else 0
+        except:
+            return 0
+
     def load_data_safe(self, restore_position=True):
         """安全加载数据，防止闪退"""
         if self.is_loading:
@@ -1663,7 +1674,8 @@ class ShopManagerApp(QMainWindow):
                 self.frozen_table.setRowHeight(row_idx, 120)
                 row_idx += 1
                 
-                products = self.db.safe_fetchall("SELECT id, name, title, image_data FROM products WHERE store_id=? ORDER BY sort_order", (store_id,))
+                products_raw = self.db.safe_fetchall("SELECT id, name, title, image_data FROM products WHERE store_id=?", (store_id,))
+                products = sorted(products_raw, key=lambda p: self._get_product_order_count(p[1]), reverse=True)
                 for prod in products:
                     p_id, p_code, p_title, p_img = prod  # 注意这里：p_code是商品ID，p_title是商品标题
                     self.table.insertRow(row_idx)

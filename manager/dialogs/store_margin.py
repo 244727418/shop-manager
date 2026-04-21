@@ -3763,6 +3763,7 @@ class StoreMarginDialog(QDialog):
             self.update_weight_inputs()
             self.update_total_orders_label()
             self.update_order_range_label()
+            self.main_app.load_data_safe()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
@@ -4696,4 +4697,5 @@ class ImportHistoryDialog(QDialog):
             self.parent_window.calculate_total_margin()
             self.parent_window.update_total_orders_label()
             self.parent_window.update_order_range_label()
+            self.parent_window.main_app.load_data_safe()
             self.parent_window.main_app.show_toast("✅ 已应用")
