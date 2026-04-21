@@ -4136,22 +4136,7 @@ class StoreMarginDialog(QDialog):
                 except:
                     pass
 
-        # 如果没找到按日期的对比，取最新的历史记录
-        if not last_history_data:
-            last_history = self.db.safe_fetchall("""
-                SELECT snapshot_data
-                FROM import_history
-                WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
-                ORDER BY import_time DESC
-                LIMIT 1
-            """, (self.store_id,))
-            if last_history and last_history[0][0]:
-                try:
-                    last_history_data = (last_history[0][0], None)
-                except:
-                    pass
-        
-        # 如果还是没有可对比的历史，显示 "无"
+        # 如果没找到按日期的对比，说明没有更早的历史，显示 "无"
         if not last_history_data:
             for row in range(self.table.rowCount()):
                 weight_compare_widget = self.table.cellWidget(row, 7)
