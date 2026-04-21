@@ -724,11 +724,16 @@ class ProductSpecDialog(QDialog):
                     display_weight = (order_count / total_orders) * 100
                 else:
                     display_weight = weight_percent
-                if is_locked == 1:
-                    weight_text = f"🔒 {display_weight:.2f}%"
-                else:
+                if has_imported_orders:
                     weight_text = f"{display_weight:.2f}%"
-                weight_item = QTableWidgetItem(weight_text)
+                    weight_item = QTableWidgetItem(weight_text)
+                    weight_item.setFlags(weight_item.flags() & ~Qt.ItemIsEditable)
+                else:
+                    if is_locked == 1:
+                        weight_text = f"🔒 {display_weight:.2f}%"
+                    else:
+                        weight_text = f"{display_weight:.2f}%"
+                    weight_item = QTableWidgetItem(weight_text)
                 weight_item.setData(Qt.UserRole, display_weight)
                 if order_count > 0:
                     weight_item.setToolTip(f"订单数: {order_count}单")
@@ -3079,7 +3084,7 @@ class ProductSpecDialog(QDialog):
 
                         # 如果月份不同，用月份比较；如果月份相同，用日期比较
                         if prev_m < curr_m or (prev_m == curr_m and prev_d < curr_d):
-                            return json.loads(snapshot_data).get("orders", {})
+                            return json.loads(snapshot_data)
                     except:
                         pass
 
@@ -3088,7 +3093,7 @@ class ProductSpecDialog(QDialog):
         except Exception as e:
             return None
 
-    def _update_spec_compare_labels(self, row, current_count, last_count, current_total):
+    def _update_spec_compare_labels(self, row, current_count, last_count, current_total, current_weight, last_weight):
         """更新指定行的对比列标签"""
         weight_compare_widget = self.table.cellWidget(row, 8)
         order_compare_widget = self.table.cellWidget(row, 10)
@@ -3106,22 +3111,21 @@ class ProductSpecDialog(QDialog):
             order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
             return
 
-        current_weight = (current_count / current_total * 100) if current_total > 0 else 0
-        last_total = sum(self._get_last_snapshot_values().values()) if self._get_last_snapshot_values() else 0
-        last_weight = (last_count / last_total * 100) if last_total > 0 else 0
+        if last_weight is None:
+            last_weight = 0
 
         weight_change = current_weight - last_weight
         order_change = current_count - last_count
 
-        if weight_change > 0:
-            weight_compare_label.setText(f"🟢 ↑{weight_change:.2f}%")
-            weight_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
-        elif weight_change < 0:
-            weight_compare_label.setText(f"🔴 ↓{abs(weight_change):.2f}%")
-            weight_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
-        else:
+        if abs(weight_change) < 0.001:
             weight_compare_label.setText("⚪ 0.00%")
             weight_compare_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        elif weight_change > 0:
+            weight_compare_label.setText(f"🟢 ↑{weight_change:.2f}%")
+            weight_compare_label.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+        else:
+            weight_compare_label.setText(f"🔴 ↓{abs(weight_change):.2f}%")
+            weight_compare_label.setStyleSheet("color: #c0392b; font-size: 12px; font-weight: bold;")
 
         if order_change > 0:
             order_compare_label.setText(f"🟢 ↑{order_change}")
@@ -3139,7 +3143,8 @@ class ProductSpecDialog(QDialog):
         if not snapshot:
             return {}
         result = {}
-        for key, data in snapshot.items():
+        orders_data = snapshot.get("orders", {})
+        for key, data in orders_data.items():
             parts = key.split("_")
             if len(parts) >= 2:
                 user_product_id = parts[0]
@@ -3170,20 +3175,19 @@ class ProductSpecDialog(QDialog):
         
         spec_order_counts = {str(row[0]): row[1] for row in imported_data}
         total_orders = sum(spec_order_counts.values())
-        
+
         for row in range(self.table.rowCount()):
             spec_code_item = self.table.item(row, 2)
             if not spec_code_item:
                 continue
             spec_code = str(spec_code_item.text()).strip()
-            is_locked_item = self.table.item(row, 7)
-            is_locked = is_locked_item and "🔒" in is_locked_item.text() if is_locked_item else False
             
             if spec_code in spec_order_counts:
                 count = spec_order_counts[spec_code]
                 weight = (count / total_orders) * 100 if total_orders > 0 else 0
-                weight_text = f"🔒 {weight:.2f}%" if is_locked else f"{weight:.2f}%"
+                weight_text = f"{weight:.2f}%"
                 weight_item = QTableWidgetItem(weight_text)
+                weight_item.setFlags(weight_item.flags() & ~Qt.ItemIsEditable)
                 weight_item.setData(Qt.UserRole, weight)
                 weight_item.setToolTip(f"订单数: {count}单")
                 self.table.setItem(row, 7, weight_item)
@@ -3191,8 +3195,9 @@ class ProductSpecDialog(QDialog):
                 order_item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, 9, order_item)
             else:
-                weight_text = f"🔒 0.00%" if is_locked else "0.00%"
+                weight_text = "0.00%"
                 weight_item = QTableWidgetItem(weight_text)
+                weight_item.setFlags(weight_item.flags() & ~Qt.ItemIsEditable)
                 weight_item.setData(Qt.UserRole, 0.0)
                 self.table.setItem(row, 7, weight_item)
                 order_item = QTableWidgetItem("0单")
@@ -3294,31 +3299,23 @@ class ProductSpecDialog(QDialog):
 
         last_snapshot = self._get_last_snapshot()
         last_spec_counts = {}
+        last_spec_weights = {}
+        last_total_orders = 0
         if last_snapshot:
-            for key, data in last_snapshot.items():
+            last_orders_data = last_snapshot.get("orders", {})
+            for key, data in last_orders_data.items():
                 parts = key.split("_")
                 if len(parts) >= 2:
                     prod_id_part = parts[0]
                     spec_code_part = "_".join(parts[1:])
                     if prod_id_part == self.product_code:
                         last_spec_counts[spec_code_part] = data.get("count", 0)
+                        last_total_orders += data.get("count", 0)
+        
+        last_snapshot_weights = last_snapshot.get("weights", {}) if last_snapshot else {}
 
         current_spec_counts = {str(row[0]): row[1] for row in imported_data} if imported_data else {}
         current_total = sum(current_spec_counts.values())
-
-        if not last_snapshot or not last_spec_counts:
-            for row in range(self.table.rowCount()):
-                weight_compare_widget = self.table.cellWidget(row, 8)
-                order_compare_widget = self.table.cellWidget(row, 10)
-                if weight_compare_widget:
-                    label = weight_compare_widget.layout().itemAt(0).widget()
-                    label.setText("无")
-                    label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-                if order_compare_widget:
-                    label = order_compare_widget.layout().itemAt(0).widget()
-                    label.setText("无")
-                    label.setStyleSheet("color: #95a5a6; font-size: 12px;")
-            return
 
         for row in range(self.table.rowCount()):
             spec_code_item = self.table.item(row, 2)
@@ -3327,8 +3324,17 @@ class ProductSpecDialog(QDialog):
             spec_code = str(spec_code_item.text()).strip()
             current_count = current_spec_counts.get(spec_code, 0)
             last_count = last_spec_counts.get(spec_code, None)
+            
+            weight_item = self.table.item(row, 7)
+            current_weight = weight_item.data(Qt.UserRole) if weight_item else 0
+            
+            last_spec_weight = 0
+            if last_count is not None and last_total_orders > 0:
+                last_spec_weight = (last_count / last_total_orders) * 100
+            elif last_count is None:
+                last_spec_weight = None
 
-            self._update_spec_compare_labels(row, current_count, last_count, current_total)
+            self._update_spec_compare_labels(row, current_count, last_count, current_total, current_weight, last_spec_weight)
 
     def calculate_weighted_avg_price(self):
         """根据权重计算加权平均客单价"""

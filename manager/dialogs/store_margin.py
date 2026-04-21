@@ -3705,15 +3705,34 @@ class StoreMarginDialog(QDialog):
                     return
             import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
+            # 先计算当前权重（用于保存到快照）
+            order_data_for_weight = self.db.safe_fetchall("""
+                SELECT product_id, SUM(order_count) as total_orders
+                FROM imported_orders WHERE store_id=? GROUP BY product_id
+            """, (self.store_id,))
+            temp_product_orders = {row[0]: row[1] for row in order_data_for_weight if row[1]}
+            temp_total_orders = sum(temp_product_orders.values())
+            temp_product_weights = {}
+            for prod_id in self.product_weights:
+                locked = self.product_weights[prod_id].get("locked", 0)
+                weight = self.product_weights[prod_id].get("weight", 0)
+                if locked:
+                    temp_product_weights[prod_id] = weight
+                elif prod_id in temp_product_orders and temp_total_orders > 0:
+                    temp_product_weights[prod_id] = (temp_product_orders[prod_id] / temp_total_orders) * 100
+                else:
+                    temp_product_weights[prod_id] = 0
+
             # 保存历史快照
             total_products = len(set(prod_id for prod_id, spec_code in order_data.keys()))
             total_specs = len(order_data)
             total_orders = sum(data["count"] for data in order_data.values())
             total_amount = 0  # 不再导入实收金额
             
-            # 保存快照数据到 import_history 表
+            # 保存快照数据到 import_history 表（包含权重信息）
             snapshot_data = json.dumps({
-                "orders": {f"{prod_id}_{spec_code}": data for (prod_id, spec_code), data in order_data.items()}
+                "orders": {f"{prod_id}_{spec_code}": data for (prod_id, spec_code), data in order_data.items()},
+                "weights": temp_product_weights
             })
             
             self.db.safe_execute("""
@@ -4200,34 +4219,38 @@ class StoreMarginDialog(QDialog):
             if not user_product_id:
                 continue
 
-            # 权重对比（百分比，2位小数）
+            # 权重对比（基于权重数值变化）
             weight_compare_widget = self.table.cellWidget(row, 7)
             if not weight_compare_widget:
                 continue
             weight_label = weight_compare_widget.layout().itemAt(0).widget()
-            if user_product_id and user_product_id in product_current and user_product_id in product_last:
-                current_total_orders = product_current[user_product_id]["orders"]
-                last_total_orders = product_last[user_product_id]["orders"]
-
-                order_change = current_total_orders - last_total_orders
-                if last_total_orders > 0:
-                    order_change_percent = (order_change / last_total_orders * 100)
+            
+            current_weight = self.product_weights.get(user_product_id, {}).get("weight", 0)
+            
+            last_weights = last_snapshot.get("weights", {})
+            last_weight = last_weights.get(user_product_id, None)
+            
+            if last_weight is None:
+                if user_product_id in product_last:
+                    last_total_orders = sum(pdata["orders"] for pdata in product_last.values())
+                    if last_total_orders > 0:
+                        last_weight = (product_last[user_product_id]["orders"] / last_total_orders) * 100
+                    else:
+                        last_weight = 0
                 else:
-                    order_change_percent = 0
-
-                if order_change_percent > 0:
-                    weight_label.setText(f"🟢 ↑{order_change_percent:.2f}%")
-                    weight_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
-                elif order_change_percent < 0:
-                    weight_label.setText(f"🔴 ↓{abs(order_change_percent):.2f}%")
-                    weight_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
-                else:
-                    weight_label.setText("⚪ 0.00%")
-                    weight_label.setStyleSheet("color: #7f8c8d; font-size: 19px;")
+                    last_weight = 0
+            
+            weight_change = current_weight - last_weight
+            
+            if abs(weight_change) < 0.001:
+                weight_label.setText("⚪ 0.00%")
+                weight_label.setStyleSheet("color: #7f8c8d; font-size: 19px;")
+            elif weight_change > 0:
+                weight_label.setText(f"🟢 ↑{weight_change:.2f}%")
+                weight_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
             else:
-                # 商品不在对比数据中，显示 "无"
-                weight_label.setText("无")
-                weight_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
+                weight_label.setText(f"🔴 ↓{abs(weight_change):.2f}%")
+                weight_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
 
             # 单量对比
             order_compare_widget = self.table.cellWidget(row, 9)
