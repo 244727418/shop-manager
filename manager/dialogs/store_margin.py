@@ -1433,12 +1433,6 @@ class StoreMarginDialog(QDialog):
                 prod_id = obj.property("prod_id")
                 if row is not None and prod_id is not None:
                     return super().eventFilter(obj, event)
-            elif isinstance(obj, QLabel):
-                row = obj.property("row")
-                prod_id = obj.property("prod_id")
-                if row is not None and prod_id is not None:
-                    self.toggle_lock(row, prod_id)
-                    return True
         return super().eventFilter(obj, event)
 
     def on_weight_changed(self, user_id, text):
@@ -2150,34 +2144,15 @@ class StoreMarginDialog(QDialog):
             weight_input = QLineEdit(weight_str)
             weight_input.setAlignment(Qt.AlignCenter)
             weight_input.setFixedHeight(25)
-            weight_input.setValidator(QDoubleValidator(0, 100, 1, weight_input))
+            weight_input.setReadOnly(True)
             weight_input.setStyleSheet(
-                "QLineEdit { background-color: white; border: 1px solid #4caf50; border-radius: 3px; padding: 2px; font-weight: bold; color: #2e7d32; }"
+                "QLineEdit { background-color: #f5f5f5; border: 1px solid #4caf50; border-radius: 3px; padding: 2px; font-weight: bold; color: #2e7d32; }"
             )
             weight_input.installEventFilter(self)
             weight_input.setProperty("row", row)
             weight_input.setProperty("prod_id", prod_id)
-            weight_input.textChanged.connect(lambda text, pid=prod_id: self.on_weight_changed(pid, text))
-            weight_input.editingFinished.connect(lambda pid=prod_id: self.on_weight_editing_finished(pid))
             left_layout.addWidget(weight_input)
-            right_widget = QWidget()
-            right_layout = QVBoxLayout(right_widget)
-            right_layout.setContentsMargins(0, 0, 0, 0)
-            right_layout.setAlignment(Qt.AlignCenter)
-            lock_label = QLabel("🔒" if is_locked else "")
-            lock_label.setAlignment(Qt.AlignCenter)
-            lock_label.setFixedSize(25, 25)
-            lock_label.setStyleSheet(
-                "QLabel { background-color: white; border: 1px solid #ff9800; border-radius: 3px; font-size: 19px; }"
-                if is_locked
-                else "QLabel { background-color: white; border: 1px dashed #ccc; border-radius: 3px; font-size: 19px; }"
-            )
-            lock_label.installEventFilter(self)
-            lock_label.setProperty("row", row)
-            lock_label.setProperty("prod_id", prod_id)
-            right_layout.addWidget(lock_label)
-            weight_layout.addWidget(left_widget, 3)
-            weight_layout.addWidget(right_widget, 1)
+            weight_layout.addWidget(left_widget, 1)
             self.table.setCellWidget(row, 6, weight_widget)
             
             # 新增：权重对比列（第 8 列）
@@ -2250,6 +2225,7 @@ class StoreMarginDialog(QDialog):
             order_label.setProperty("prod_id", prod_id)
             self._update_order_label_for_row(row, weight_input, order_label, prod_id)
         self.table.cellChanged.connect(self.on_cell_changed)
+        self.update_weight_inputs()
         self.calculate_total_margin()
         self.update_current_history_label()
         self.update_orders_display()
@@ -3395,12 +3371,15 @@ class StoreMarginDialog(QDialog):
             SELECT product_id, SUM(order_count) as total_orders
             FROM imported_orders WHERE store_id=? GROUP BY product_id
         """, (self.store_id,))
-        if not order_data:
-            return
-        total_store_orders = sum(row[1] for row in order_data if row[1])
+        product_orders = {row[0]: row[1] for row in order_data if row[1]}
+        total_store_orders = sum(product_orders.values())
         if total_store_orders <= 0:
+            for prod_id in self.product_weights:
+                self.product_weights[prod_id]["weight"] = 0
+                sys_id = self.product_weights[prod_id].get("sys_id")
+                if sys_id:
+                    self.db.safe_execute("UPDATE products SET store_weight=0 WHERE id=?", (sys_id,))
             return
-        product_orders = {row[0]: row[1] for row in order_data}
         total_locked = sum(
             data.get("weight", 0) for data in self.product_weights.values() if data.get("locked", 0)
         )
@@ -3410,13 +3389,18 @@ class StoreMarginDialog(QDialog):
                 unlocked_orders += orders
         if unlocked_orders <= 0:
             return
-        for prod_id, orders in product_orders.items():
+        for prod_id in self.product_weights:
+            orders = product_orders.get(prod_id, 0)
             if self.product_weights.get(prod_id, {}).get("locked", 0):
                 continue
-            weight = (orders / unlocked_orders) * (100 - total_locked)
-            sys_id = self.get_sys_id_by_user_id(prod_id)
+            if orders <= 0:
+                weight = 0
+            else:
+                weight = (orders / unlocked_orders) * (100 - total_locked)
+            sys_id = self.product_weights[prod_id].get("sys_id")
             if sys_id:
                 self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, sys_id))
+            self.product_weights[prod_id]["weight"] = weight
 
     def auto_balance_weights(self):
         unlocked_rows = []
@@ -3467,15 +3451,7 @@ class StoreMarginDialog(QDialog):
         action_edit.triggered.connect(lambda: self.open_spec_dialog_by_id(prod_id))
         menu.addAction(action_edit)
         if col == 6 and prod_id:
-            is_locked = self.product_weights.get(prod_id, {}).get("locked", 0)
-            if is_locked:
-                action_unlock = QAction("🔓 解锁权重", self)
-                action_unlock.triggered.connect(lambda: self.toggle_lock(row, prod_id))
-                menu.addAction(action_unlock)
-            else:
-                action_lock = QAction("🔒 锁定权重", self)
-                action_lock.triggered.connect(lambda: self.toggle_lock(row, prod_id))
-                menu.addAction(action_lock)
+            pass
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def show_margin_data_context_menu(self, pos):
@@ -4690,8 +4666,8 @@ class ImportHistoryDialog(QDialog):
 
         # 刷新界面显示
         if self.parent_window:
-            self.parent_window.load_products()
             self.parent_window.calculate_weights_from_orders()
+            self.parent_window.load_products()
             self.parent_window.update_compare_columns()
             self.parent_window.update_product_avg_price()
             self.parent_window.calculate_total_margin()

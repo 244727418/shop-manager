@@ -360,20 +360,21 @@ class DailyTaskDialog(QDialog):
             else:
                 net_profit_rate = -100
 
-            if net_profit_rate < -5:
+            if net_profit_rate < -2:
                 loss_count += 1
                 self.detail_text.append(f"❌ {name}: 净利{net_profit_rate:.1f}% 投产{current_roi:.1f} (亏损)")
-            elif net_profit_rate <= 5:
+            elif net_profit_rate < 1:
                 break_even_count += 1
                 self.detail_text.append(f"🟡 {name}: 净利{net_profit_rate:.1f}% 投产{current_roi:.1f} (保本)")
             else:
                 profit_count += 1
+                self.detail_text.append(f"✅ {name}: 净利{net_profit_rate:.1f}% 投产{current_roi:.1f} (盈利)")
 
         self.detail_text.append("")
         self.detail_text.append("=" * 70)
         self.detail_text.append(f"📊 统计结果:")
-        self.detail_text.append(f"  - 亏损链接: {loss_count} 个 (净利率 < -5%)")
-        self.detail_text.append(f"  - 保本链接: {break_even_count} 个 (-5% <= 净利率 <= 5%)")
-        self.detail_text.append(f"  - 盈利链接: {profit_count} 个 (净利率 > 5%)")
+        self.detail_text.append(f"  - 亏损链接: {loss_count} 个 (净利率 < -2%)")
+        self.detail_text.append(f"  - 保本链接: {break_even_count} 个 (-2% <= 净利率 < 1%)")
+        self.detail_text.append(f"  - 盈利链接: {profit_count} 个 (净利率 >= 1%)")
         self.detail_text.append(f"  - 未填写投产: {no_roi_count} 个")
         self.detail_text.append(f"  - 总链接数: {loss_count + break_even_count + profit_count + no_roi_count} 个")

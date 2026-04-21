@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "3.3"
+VERSION = "3.4"
 
 # ================= 系统标准库 =================
 import sys
@@ -783,13 +783,13 @@ class ShopManagerApp(QMainWindow):
         profit_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #2c3e50;")
         filter_layout.addWidget(profit_label)
         
-        self.btn_filter_profit = self._create_filter_button("赚钱 (≥5%)", None, "#27ae60")
+        self.btn_filter_profit = self._create_filter_button("赚钱 (≥1%)", None, "#27ae60")
         self.btn_filter_profit.setCheckable(True)
-        
-        self.btn_filter_loss = self._create_filter_button("亏钱 (<5%)", None, "#e74c3c")
+
+        self.btn_filter_loss = self._create_filter_button("亏钱 (<-2%)", None, "#e74c3c")
         self.btn_filter_loss.setCheckable(True)
-        
-        self.btn_filter_break_even = self._create_filter_button("保本 (-5%~5%)", None, "#f39c12")
+
+        self.btn_filter_break_even = self._create_filter_button("保本 (-2%~1%)", None, "#f39c12")
         self.btn_filter_break_even.setCheckable(True)
         
         filter_layout.addWidget(self.btn_filter_coupon)
@@ -2430,13 +2430,13 @@ class ShopManagerApp(QMainWindow):
                 avg_profit = total_profit / total_weight
                 avg_final_price = total_final_price / total_weight
                 net_margin_rate = (avg_profit / avg_final_price) * 100 if avg_final_price > 0 else 0
-                
-                if net_margin_rate > 5:
+
+                if net_margin_rate >= 1:
                     return 1
-                elif net_margin_rate < 5:
-                    return -1
-                else:
+                elif net_margin_rate >= -2:
                     return 0
+                else:
+                    return -1
             
             return 0
         except Exception as e:
@@ -2499,9 +2499,9 @@ class ShopManagerApp(QMainWindow):
                     margin_rate_decimal = final_margin_pct / 100
                     final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
                 
-                if final_net_margin_pct >= 5:
+                if final_net_margin_pct >= 1:
                     return 'profit'
-                elif final_net_margin_pct >= -5:
+                elif final_net_margin_pct >= -2:
                     return 'break_even'
                 else:
                     return 'loss'
