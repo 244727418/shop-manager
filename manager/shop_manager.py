@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "3.2"
+VERSION = "3.3"
 
 # ================= 系统标准库 =================
 import sys
@@ -393,6 +393,7 @@ class ShopManagerApp(QMainWindow):
 
         self.is_loading = False  # 防止重复加载
         self._today_col = -1  # 今日列索引，-1表示不是当月
+        self.current_store_filter = set()  # 店铺筛选状态
 
         # 初始化云同步管理器
         self.cloud_manager = None

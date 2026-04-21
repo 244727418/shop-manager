@@ -6,7 +6,7 @@ import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
-    QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit
+    QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit, QLayout
 )
 from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate
 from PyQt5.QtGui import QPixmap, QIcon
@@ -123,22 +123,39 @@ class ProductWidget(QWidget):
         self.original_name = prod_code
         self.original_title = prod_title
 
-        margin_layout = QVBoxLayout()
-        margin_layout.setSpacing(1)
-        margin_layout.setContentsMargins(0, 0, 0, 0)
+        margin_row1_layout = QHBoxLayout()
+        margin_row1_layout.setSpacing(10)
+        margin_row1_layout.setContentsMargins(0, 0, 0, 0)
 
         self.margin_label = QLabel("毛利: -")
         self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 12px;")
+
+        self.link_order_label = QLabel("单量：0单")
+        self.link_order_label.setStyleSheet("color: #8b4513; font-size: 12px; font-weight: bold;")
+
+        margin_row1_layout.addWidget(self.margin_label)
+        margin_row1_layout.addWidget(self.link_order_label)
+        margin_row1_layout.addStretch()
+
+        self.margin_left_layout = QVBoxLayout()
+        self.margin_left_layout.setSpacing(1)
+        self.margin_left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.net_profit_label = QLabel("净利: -")
         self.net_profit_label.setStyleSheet("color: #28a745; font-weight: bold; font-size: 13px;")
 
         self.roi_label = QLabel("")
         self.roi_label.setStyleSheet("font-family: Microsoft YaHei; color: blue; font-size: 13px;")
+        self.roi_label.setTextFormat(Qt.RichText)
 
-        margin_layout.addWidget(self.margin_label)
-        margin_layout.addWidget(self.net_profit_label)
-        margin_layout.addWidget(self.roi_label)
+        self.margin_left_layout.addWidget(self.net_profit_label)
+        self.margin_left_layout.addWidget(self.roi_label)
+
+        margin_layout = QVBoxLayout()
+        margin_layout.setSpacing(1)
+        margin_layout.setContentsMargins(0, 0, 0, 0)
+        margin_layout.addLayout(margin_row1_layout)
+        margin_layout.addLayout(self.margin_left_layout)
 
         info_layout.addLayout(top_layout)
         info_layout.addWidget(self.title_label)
@@ -149,6 +166,7 @@ class ProductWidget(QWidget):
 
         self.update_margin_display()
         self.update_promo_badges()
+        self.update_link_order_count()
 
     def update_promo_badges(self):
         try:
@@ -221,6 +239,7 @@ class ProductWidget(QWidget):
                 self.net_profit_label.setText("净利: -")
                 self.margin_label.hide()
                 self.net_profit_label.hide()
+                self.link_order_label.setText("单量：0单")
                 return
             product_rows = self.main_app.db.safe_fetchall(
                 "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi FROM products WHERE id=?",
@@ -291,6 +310,7 @@ class ProductWidget(QWidget):
                 self.net_profit_label.setText("净利: -")
                 self.net_profit_label.show()
                 self.roi_label.setText("")
+            self.update_link_order_count()
         except Exception as e:
             print(f"更新毛利显示失败：{e}")
             self.margin_label.setText("毛利: 错误")
@@ -298,6 +318,19 @@ class ProductWidget(QWidget):
             self.net_profit_label.setText("净利: 错误")
             self.net_profit_label.show()
             self.roi_label.setText("")
+            self.link_order_label.setText("单量：0单")
+
+    def update_link_order_count(self):
+        try:
+            spec_counts = self.main_app.db.safe_fetchall(
+                "SELECT spec_code, order_count, refund_count FROM imported_orders WHERE product_id=?",
+                (self.prod_code,)
+            )
+            total = sum(sc[1] for sc in spec_counts) if spec_counts else 0
+            self.link_order_label.setText(f"单量：{total}单")
+        except Exception as e:
+            print(f"更新链接单量失败: {e}")
+            self.link_order_label.setText("单量：0单")
 
     def _get_net_profit_status(self, net_margin_pct):
         if net_margin_pct > 5:
