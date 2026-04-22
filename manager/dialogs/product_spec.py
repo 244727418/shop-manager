@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
-from PyQt5.QtGui import QColor, QPixmap, QIcon
+from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator
 
 try:
     from ..delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
@@ -152,6 +152,7 @@ class ProductSpecDialog(QDialog):
         self.coupon_input.setPlaceholderText("金额...")
         self.coupon_input.setFixedWidth(70)
         self.coupon_input.setStyleSheet("padding: 3px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px;")
+        self.coupon_input.setValidator(QIntValidator(0, 99999, self))
         self.coupon_input.textChanged.connect(self.on_discount_changed)
         
         coupon_h.addWidget(cp_icon)
@@ -177,6 +178,7 @@ class ProductSpecDialog(QDialog):
         self.new_customer_input.setPlaceholderText("金额...")
         self.new_customer_input.setFixedWidth(70)
         self.new_customer_input.setStyleSheet("padding: 3px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px;")
+        self.new_customer_input.setValidator(QIntValidator(0, 99999, self))
         self.new_customer_input.textChanged.connect(self.on_discount_changed)
         
         nc_h.addWidget(nc_icon)
@@ -568,8 +570,8 @@ class ProductSpecDialog(QDialog):
                 is_limited_time = discount_rows[0][4] if discount_rows[0][4] else 0
                 is_marketing = discount_rows[0][5] if discount_rows[0][5] else 0
                 
-                self.coupon_input.setText(str(coupon_amount) if coupon_amount > 0 else "")
-                self.new_customer_input.setText(str(new_customer_discount) if new_customer_discount > 0 else "")
+                self.coupon_input.setText(str(int(round(coupon_amount))) if coupon_amount > 0 else "")
+                self.new_customer_input.setText(str(int(round(new_customer_discount))) if new_customer_discount > 0 else "")
                 self.current_roi_input.setText(str(saved_roi) if saved_roi > 0 else "")
                 self.return_rate_input.setText(str(saved_return_rate) if saved_return_rate > 0 else "")
                 self.update_max_discount_label()
@@ -644,12 +646,13 @@ class ProductSpecDialog(QDialog):
                 # 获取成本价
                 cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
                 cost_price = float(cost_res[0][0]) if cost_res else 0.0
-                
-                # 计算单行毛利
+
+                # 计算单行毛利（使用券后价）
                 margin_pct = 0.0
-                if sale_price > 0:
-                    margin_pct = (sale_price - cost_price) / sale_price * 100
-                
+                final_price = sale_price - max_discount
+                if final_price > 0 and cost_price > 0:
+                    margin_pct = (final_price - cost_price) / final_price * 100
+
                 # 插入行
                 self.table.insertRow(row_idx)
                 
