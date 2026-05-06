@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(3, 5, 0, 0),
-    prodvers=(3, 5, 0, 0),
+    filevers=(3, 5, 2, 0),
+    prodvers=(3, 5, 2, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,11 +17,11 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Shop Manager'),
             StringStruct(u'FileDescription', u'Shop Manager Application'),
-            StringStruct(u'FileVersion', u'3.5.0.0'),
+            StringStruct(u'FileVersion', u'3.5.2.0'),
             StringStruct(u'InternalName', u'ShopManager'),
-            StringStruct(u'OriginalFilename', u'ShopManager_v3.5.exe'),
+            StringStruct(u'OriginalFilename', u'ShopManager_v3.5.2.exe'),
             StringStruct(u'ProductName', u'Shop Manager'),
-            StringStruct(u'ProductVersion', u'3.5.0.0')
+            StringStruct(u'ProductVersion', u'3.5.2.0')
           ]
         )
       ]

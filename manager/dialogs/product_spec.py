@@ -11,14 +11,16 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QWidget, QLineEdit, QSpinBox,
     QComboBox, QFrame, QGridLayout, QAbstractItemView, QFileDialog,
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
+    QGraphicsOpacityEffect, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
+    QPlainTextEdit,
 )
-from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
+from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator
 
 try:
-    from ..delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
+    from ..delegates import CenterAlignDelegate, WeightDelegate
 except ImportError:
-    from delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
+    from delegates import CenterAlignDelegate, WeightDelegate
 
 try:
     from .profit import ProfitCalculatorDialog
@@ -30,8 +32,127 @@ try:
 except ImportError:
     from api_config import SpecPromptEditorDialog, ProductPromptEditorDialog
 
+
+class InlineTextEditDelegate(QStyledItemDelegate):
+    """用于保证编辑态与展示态视觉一致的单行文本代理。"""
+    def __init__(self, alignment, max_length=None, wrap_display=False, parent=None):
+        super().__init__(parent)
+        self.alignment = alignment
+        self.max_length = max_length
+        self.wrap_display = wrap_display
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.displayAlignment = self.alignment
+        opt.textElideMode = Qt.ElideNone
+        if self.wrap_display:
+            opt.features |= QStyleOptionViewItem.WrapText
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        if not self.wrap_display:
+            return base
+
+        text = index.data(Qt.DisplayRole) or ""
+        if not text:
+            return base
+
+        column_width = option.rect.width()
+        if column_width <= 0 and option.widget:
+            column_width = option.widget.columnWidth(index.column())
+        if column_width <= 0:
+            return base
+
+        wrapped = option.fontMetrics.boundingRect(
+            0, 0, max(1, column_width), 10000,
+            Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignVCenter,
+            str(text)
+        )
+        return QSize(base.width(), max(base.height(), wrapped.height() + 2))
+
+    def createEditor(self, parent, option, index):
+        if self.wrap_display:
+            editor = QPlainTextEdit(parent)
+            editor.setFrameStyle(0)
+            editor.setFont(option.font)
+            editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+            editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            editor.document().setDocumentMargin(0)
+            editor.setStyleSheet(
+                "QPlainTextEdit {"
+                "padding: 0px; "
+                "margin: 0px; "
+                "border: none; "
+                "background-color: white; "
+                "font-size: 13px; "
+                "font-weight: normal; "
+                "}"
+            )
+            return editor
+
+        editor = QLineEdit(parent)
+        editor.setFrame(False)
+        editor.setAlignment(self.alignment)
+        editor.setFont(option.font)
+        editor.setTextMargins(0, 0, 0, 0)
+        if self.max_length is not None:
+            editor.setMaxLength(self.max_length)
+        editor.setStyleSheet(
+            "QLineEdit {"
+            "padding: 0px; "
+            "margin: 0px; "
+            "border: none; "
+            "background-color: white; "
+            "font-size: 13px; "
+            "font-weight: normal; "
+            "}"
+        )
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = index.data(Qt.DisplayRole) or ""
+        if isinstance(editor, QPlainTextEdit):
+            editor.setPlainText(text)
+        else:
+            editor.setText(text)
+
+    def setModelData(self, editor, model, index):
+        text = editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
+        if self.max_length is not None and len(text) > self.max_length:
+            text = text[:self.max_length]
+        model.setData(index, text, Qt.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = option.rect
+        if self.wrap_display and rect.width() > 2 and rect.height() > 2:
+            # 显示优先：轻微内缩，匹配常态 CE_ItemViewItem 的文本起点
+            rect = rect.adjusted(1, 1, -1, -1)
+        editor.setGeometry(rect)
+
+
 class ProductSpecDialog(QDialog):
     """商品规格管理与毛利计算器"""
+    COL_AI = 0
+    COL_SPEC_NAME = 1
+    COL_SPEC_CODE = 2
+    COL_COST = 3
+    COL_SALE_PRICE = 4
+    COL_FINAL_PRICE = 5
+    COL_MARGIN_RATE = 6
+    COL_GROSS_PROFIT = 7
+    COL_WEIGHT = 8
+    COL_WEIGHT_COMPARE = 9
+    COL_ORDER_COUNT = 10
+    COL_ORDER_COMPARE = 11
+    COL_REFUND_ORDERS = 12
+    COL_REFUND_RATIO = 13
+    COL_ACTION = 14
+    SPEC_TABLE_COLUMN_COUNT = 15
+
     def __init__(self, db_manager, product_id, product_code, product_name, parent=None):
         super().__init__(parent)
         self.db = db_manager
@@ -42,6 +163,11 @@ class ProductSpecDialog(QDialog):
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
         self.resize(1380, 900)
+        self._code_click_timer = QTimer(self)
+        self._code_click_timer.setSingleShot(True)
+        self._code_click_timer.timeout.connect(self._copy_product_code_to_clipboard)
+        self._copy_toast = None
+        self._copy_toast_animations = []
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -99,7 +225,7 @@ class ProductSpecDialog(QDialog):
         self.lbl_code = QLabel(f"商品ID: <b style='color:#4a90e2;'>{self.product_code}</b>")
         self.lbl_code.setStyleSheet("font-size: 14px; padding: 0 10px;")
         self.lbl_code.setCursor(Qt.PointingHandCursor)
-        self.lbl_code.setToolTip("双击修改商品ID")
+        self.lbl_code.setToolTip("单击复制商品ID，双击修改商品ID")
         
         # 商品标题
         self.lbl_name = QLabel(f"商品标题: <b>{self.product_name}</b>")
@@ -390,9 +516,9 @@ class ProductSpecDialog(QDialog):
 
         # 2. 规格表格
         self.table = QTableWidget()
-        self.table.setColumnCount(14)
+        self.table.setColumnCount(self.SPEC_TABLE_COLUMN_COUNT)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "单规格毛利", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
+            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
         ])
         
         # 设置列宽策略 - AI列和规格名称列固定宽度，其他列自适应拉伸
@@ -407,10 +533,13 @@ class ProductSpecDialog(QDialog):
         self.table.setColumnWidth(1, 180)
 
         # 其他列自适应拉伸
-        for i in range(2, 14):
+        for i in range(2, self.SPEC_TABLE_COLUMN_COUNT):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
+        # 关联编码列按内容自动扩展，避免省略显示
+        header.setSectionResizeMode(self.COL_SPEC_CODE, QHeaderView.ResizeToContents)
 
         self.table.setAlternatingRowColors(False)
+        self.table.setWordWrap(True)
 
         # 设置表格字体和样式
         self.table.setStyleSheet("""
@@ -440,21 +569,31 @@ class ProductSpecDialog(QDialog):
         # 启用自动行高调整
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         
-        # 设置数值列居中显示（关联编码、自动成本、手动售价、券后价、单规格毛利、权重%）
+        # 设置数值列居中显示（自动成本、手动售价、券后价、毛利率、毛利润、权重%）
         self.center_delegate = CenterAlignDelegate(self)
-        for col in [2, 3, 4, 5, 6, 7]:
+        for col in [self.COL_COST, self.COL_SALE_PRICE, self.COL_FINAL_PRICE, self.COL_MARGIN_RATE, self.COL_GROSS_PROFIT, self.COL_WEIGHT]:
             self.table.setItemDelegateForColumn(col, self.center_delegate)
         
         layout.addWidget(self.table)
         
-        # 设置代理
-        # 规格名称列（最多40字符）
-        self.spec_name_delegate = SpecNameDelegate(self)
-        self.table.setItemDelegateForColumn(1, self.spec_name_delegate)
+        # 设置代理：规格名称/关联编码编辑框与单元格视觉保持一致
+        self.spec_name_inline_delegate = InlineTextEditDelegate(
+            alignment=Qt.AlignLeft | Qt.AlignVCenter,
+            max_length=40,
+            wrap_display=True,
+            parent=self.table
+        )
+        self.table.setItemDelegateForColumn(self.COL_SPEC_NAME, self.spec_name_inline_delegate)
+
+        self.spec_code_inline_delegate = InlineTextEditDelegate(
+            alignment=Qt.AlignCenter,
+            parent=self.table
+        )
+        self.table.setItemDelegateForColumn(self.COL_SPEC_CODE, self.spec_code_inline_delegate)
         
         # 权重列
         self.weight_delegate = WeightDelegate(self)
-        self.table.setItemDelegateForColumn(7, self.weight_delegate)
+        self.table.setItemDelegateForColumn(self.COL_WEIGHT, self.weight_delegate)
 
         # 底部按钮操作区
 
@@ -547,16 +686,186 @@ class ProductSpecDialog(QDialog):
         """事件过滤器：处理标签双击事件"""
         if event.type() == QEvent.MouseButtonDblClick:
             if obj == self.lbl_code:
+                self._code_click_timer.stop()
                 self.edit_product_code()
                 return True
             elif obj == self.lbl_name:
                 self.edit_product_name()
                 return True
+        elif event.type() == QEvent.MouseButtonRelease and obj == self.lbl_code:
+            self._code_click_timer.start(QApplication.doubleClickInterval())
+            return True
         return super().eventFilter(obj, event)
+
+    def _copy_product_code_to_clipboard(self):
+        """复制商品ID并显示窗口内气泡提示。"""
+        QApplication.clipboard().setText(str(self.product_code))
+        self._show_copy_bubble(f"已复制商品ID: {self.product_code}")
+
+    def _show_copy_bubble(self, text, fade_in_ms=500, hold_ms=900, fade_out_ms=500):
+        """显示窗口内气泡提示，默认保留商品 ID 复制提示的淡入淡出节奏。"""
+        for anim in self._copy_toast_animations:
+            anim.stop()
+        self._copy_toast_animations = []
+
+        if self._copy_toast:
+            self._copy_toast.deleteLater()
+            self._copy_toast = None
+
+        toast = QLabel(text, self)
+        toast.setAttribute(Qt.WA_TransparentForMouseEvents)
+        toast.setStyleSheet("""
+            QLabel {
+                background-color: rgba(44, 62, 80, 230);
+                color: white;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+        """)
+        toast.adjustSize()
+
+        anchor = self.lbl_code.mapTo(self, self.lbl_code.rect().bottomLeft())
+        x = min(max(anchor.x(), 8), max(8, self.width() - toast.width() - 8))
+        y = min(anchor.y() + 8, max(8, self.height() - toast.height() - 8))
+        toast.move(x, y)
+
+        opacity = QGraphicsOpacityEffect(toast)
+        opacity.setOpacity(0.0)
+        toast.setGraphicsEffect(opacity)
+        toast.show()
+        toast.raise_()
+        self._copy_toast = toast
+
+        fade_in = QPropertyAnimation(opacity, b"opacity", self)
+        fade_in.setDuration(fade_in_ms)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.OutCubic)
+
+        fade_out = QPropertyAnimation(opacity, b"opacity", self)
+        fade_out.setDuration(fade_out_ms)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InCubic)
+
+        def close_toast():
+            if self._copy_toast is toast:
+                self._copy_toast = None
+            toast.deleteLater()
+            self._copy_toast_animations = [
+                anim for anim in self._copy_toast_animations
+                if anim not in (fade_in, fade_out)
+            ]
+
+        fade_in.finished.connect(lambda: QTimer.singleShot(hold_ms, fade_out.start))
+        fade_out.finished.connect(close_toast)
+        self._copy_toast_animations = [fade_in, fade_out]
+        fade_in.start()
+
+    def _show_action_bubble(self, text):
+        """显示 1 秒操作结果气泡提示。"""
+        self._show_copy_bubble(text, fade_in_ms=250, hold_ms=500, fade_out_ms=250)
+
+    def _snapshot_has_product_refunds(self, snapshot):
+        """检查历史快照里当前商品是否包含退款数据。"""
+        prefix = f"{self.product_code}_"
+        for key, data in snapshot.get("orders", {}).items():
+            if key.startswith(prefix) and isinstance(data, dict) and (data.get("refund_count") or 0) > 0:
+                return True
+        return False
+
+    def _restore_orders_from_snapshot(self, store_id, snapshot, import_time=None):
+        """按历史快照恢复指定店铺 imported_orders，不触发界面副作用。"""
+        orders_data = snapshot.get("orders", {})
+        if not orders_data:
+            return False
+
+        restore_time = import_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (store_id,))
+
+        for key, data in orders_data.items():
+            if not isinstance(data, dict):
+                continue
+            parts = key.split("_", 1)
+            if len(parts) < 2:
+                continue
+
+            user_product_id = parts[0]
+            spec_code = parts[1]
+            order_count = data.get("count", 0)
+            refund_count = data.get("refund_count", 0)
+            dates = data.get("dates", [])
+            earliest_date = min(dates) if dates else None
+            latest_date = max(dates) if dates else None
+            date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
+
+            self.db.safe_execute("""
+                INSERT OR REPLACE INTO imported_orders
+                (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (store_id, user_product_id, spec_code, order_count,
+                  restore_time, date_range, 0, refund_count))
+
+        return True
+
+    def _restore_latest_import_history_if_needed(self):
+        """当前商品订单缺少退款数时，自动从最新历史快照恢复。"""
+        current = self.db.safe_fetchall("""
+            SELECT COUNT(*), COALESCE(SUM(COALESCE(refund_count, 0)), 0)
+            FROM imported_orders
+            WHERE product_id=?
+        """, (self.product_code,))
+        current_count = current[0][0] if current else 0
+        current_refunds = current[0][1] if current else 0
+        if current_count > 0 and current_refunds > 0:
+            return False
+
+        store_rows = self.db.safe_fetchall(
+            "SELECT store_id FROM products WHERE id=?",
+            (self.product_id,)
+        )
+        if not store_rows:
+            return False
+        store_id = store_rows[0][0]
+
+        history_records = self.db.safe_fetchall("""
+            SELECT import_time, snapshot_data
+            FROM import_history
+            WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
+            ORDER BY import_time DESC, id DESC
+            LIMIT 1
+        """, (store_id,))
+        if not history_records:
+            return False
+
+        import_time, snapshot_data = history_records[0]
+        try:
+            snapshot = json.loads(snapshot_data)
+        except Exception:
+            return False
+
+        if not self._snapshot_has_product_refunds(snapshot):
+            return False
+
+        return self._restore_orders_from_snapshot(store_id, snapshot, import_time)
+
+    def _make_unselectable_item(self, text=""):
+        """创建不可编辑、不可选中的表格项。"""
+        item = QTableWidgetItem(text)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable & ~Qt.ItemIsSelectable)
+        return item
+
+    def _set_unselectable_cell_widget(self, row, column, widget):
+        """给 widget 单元格补一个不可选中的底层 item。"""
+        self.table.setItem(row, column, self._make_unselectable_item())
+        self.table.setCellWidget(row, column, widget)
 
     def load_specs(self):
         """从数据库加载规格数据到表格，并初始化删除功能"""
         try:
+            self._restore_latest_import_history_if_needed()
             # 0. 加载优惠券和新客立减金额
             discount_rows = self.db.safe_fetchall(
                 "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing FROM products WHERE id=?",
@@ -684,21 +993,21 @@ class ProductSpecDialog(QDialog):
                 ai_layout.addWidget(ai_btn)
                 ai_layout.addStretch()
                 
-                self.table.setCellWidget(row_idx, 0, ai_widget)
+                self.table.setCellWidget(row_idx, self.COL_AI, ai_widget)
                 
                 # 第1列：规格名称（最多40字符）
                 spec_item = QTableWidgetItem(spec_name)
                 spec_item.setToolTip("规格名称（最多40字符）")
-                self.table.setItem(row_idx, 1, spec_item)
+                self.table.setItem(row_idx, self.COL_SPEC_NAME, spec_item)
                 # 第2列：关联编码
-                self.table.setItem(row_idx, 2, QTableWidgetItem(spec_code))
+                self.table.setItem(row_idx, self.COL_SPEC_CODE, QTableWidgetItem(spec_code))
                 
                 # 成本列 (不可编辑)
                 cost_item = QTableWidgetItem(f"{cost_price:.2f}")
                 cost_item.setFlags(cost_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row_idx, 3, cost_item)
+                self.table.setItem(row_idx, self.COL_COST, cost_item)
                 
-                self.table.setItem(row_idx, 4, QTableWidgetItem(f"{sale_price:.2f}"))
+                self.table.setItem(row_idx, self.COL_SALE_PRICE, QTableWidgetItem(f"{sale_price:.2f}"))
                 
                 # 券后价列 (不可编辑) = 手动售价 - 最大优惠
                 coupon_amount = discount_rows[0][0] if discount_rows and discount_rows[0][0] else 0
@@ -707,12 +1016,18 @@ class ProductSpecDialog(QDialog):
                 final_price = sale_price - max_discount
                 final_price_item = QTableWidgetItem(f"{final_price:.2f}")
                 final_price_item.setFlags(final_price_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row_idx, 5, final_price_item)
+                self.table.setItem(row_idx, self.COL_FINAL_PRICE, final_price_item)
 
                 # 毛利列 (不可编辑)
                 margin_item = QTableWidgetItem(f"{margin_pct:.2f}%")
                 margin_item.setFlags(margin_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row_idx, 6, margin_item)
+                self.table.setItem(row_idx, self.COL_MARGIN_RATE, margin_item)
+
+                # 毛利润列 (不可编辑) = 券后价 - 成本
+                gross_profit = final_price - cost_price
+                profit_item = QTableWidgetItem(f"{gross_profit:.2f}")
+                profit_item.setFlags(profit_item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row_idx, self.COL_GROSS_PROFIT, profit_item)
 
                 # 权重列 - 根据锁定状态和订单数据显示
                 order_count = spec_orders.get(str(spec_code), 0) if has_imported_orders else 0
@@ -742,9 +1057,9 @@ class ProductSpecDialog(QDialog):
                     weight_item.setToolTip(f"订单数: {order_count}单")
                 elif has_imported_orders:
                     weight_item.setToolTip("该规格无订单")
-                self.table.setItem(row_idx, 7, weight_item)
+                self.table.setItem(row_idx, self.COL_WEIGHT, weight_item)
                 
-                # 第 8 列添加权重对比
+                # 第 9 列添加权重对比
                 weight_compare_widget = QWidget()
                 weight_compare_layout = QHBoxLayout(weight_compare_widget)
                 weight_compare_layout.setContentsMargins(0, 0, 0, 0)
@@ -752,14 +1067,14 @@ class ProductSpecDialog(QDialog):
                 weight_compare_label = QLabel("-")
                 weight_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
                 weight_compare_layout.addWidget(weight_compare_label)
-                self.table.setCellWidget(row_idx, 8, weight_compare_widget)
+                self._set_unselectable_cell_widget(row_idx, self.COL_WEIGHT_COMPARE, weight_compare_widget)
 
-                # 第 9 列添加单量
-                order_count_item = QTableWidgetItem(f"{order_count}单")
+                # 第 10 列添加单量
+                order_count_item = self._make_unselectable_item(f"{order_count}单")
                 order_count_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row_idx, 9, order_count_item)
+                self.table.setItem(row_idx, self.COL_ORDER_COUNT, order_count_item)
 
-                # 第 10 列添加单量对比
+                # 第 11 列添加单量对比
                 order_compare_widget = QWidget()
                 order_compare_layout = QHBoxLayout(order_compare_widget)
                 order_compare_layout.setContentsMargins(0, 0, 0, 0)
@@ -767,31 +1082,29 @@ class ProductSpecDialog(QDialog):
                 order_compare_label = QLabel("-")
                 order_compare_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
                 order_compare_layout.addWidget(order_compare_label)
-                self.table.setCellWidget(row_idx, 10, order_compare_widget)
+                self._set_unselectable_cell_widget(row_idx, self.COL_ORDER_COMPARE, order_compare_widget)
 
-                # 第 11 列添加退款订单
-                refund_orders_item = QTableWidgetItem(f"{refund_count}单" if refund_count > 0 else "无")
+                # 第 12 列添加退款订单
+                refund_orders_item = self._make_unselectable_item(f"{refund_count}单" if refund_count > 0 else "无")
                 refund_orders_item.setTextAlignment(Qt.AlignCenter)
-                refund_orders_item.setFlags(refund_orders_item.flags() & ~Qt.ItemIsEditable)
                 if refund_count > 0:
                     refund_orders_item.setForeground(QColor("#e74c3c"))
                 else:
                     refund_orders_item.setForeground(QColor("#95a5a6"))
-                self.table.setItem(row_idx, 11, refund_orders_item)
+                self.table.setItem(row_idx, self.COL_REFUND_ORDERS, refund_orders_item)
 
-                # 第 12 列添加退款占比
+                # 第 13 列添加退款占比
                 if order_count > 0 and refund_count > 0:
                     refund_ratio = refund_count / order_count * 100
-                    refund_ratio_item = QTableWidgetItem(f"{refund_ratio:.2f}%")
+                    refund_ratio_item = self._make_unselectable_item(f"{refund_ratio:.2f}%")
                     refund_ratio_item.setForeground(QColor("#e74c3c"))
                 else:
-                    refund_ratio_item = QTableWidgetItem("无")
+                    refund_ratio_item = self._make_unselectable_item("无")
                     refund_ratio_item.setForeground(QColor("#95a5a6"))
                 refund_ratio_item.setTextAlignment(Qt.AlignCenter)
-                refund_ratio_item.setFlags(refund_ratio_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row_idx, 12, refund_ratio_item)
+                self.table.setItem(row_idx, self.COL_REFUND_RATIO, refund_ratio_item)
 
-                # 第 13 列添加删除按钮
+                # 第 14 列添加删除按钮
                 btn_delete = QPushButton("🗑️")
                 btn_delete.setToolTip("删除此规格")
                 btn_delete.setStyleSheet("""
@@ -801,8 +1114,8 @@ class ProductSpecDialog(QDialog):
                     QPushButton:hover { background-color: #ff7875; }
                     QPushButton:pressed { background-color: #d9363e; }
                 """)
-                btn_delete.clicked.connect(lambda checked, r=row_idx: self.delete_spec_row(r))
-                self.table.setCellWidget(row_idx, 13, btn_delete)
+                btn_delete.clicked.connect(lambda checked=False, button=btn_delete: self._delete_spec_by_button(button))
+                self.table.setCellWidget(row_idx, self.COL_ACTION, btn_delete)
                 
                 # 🔑【关键修复】强制更新表格
                 self.table.update()
@@ -828,15 +1141,25 @@ class ProductSpecDialog(QDialog):
             print(f"加载规格失败：{traceback.format_exc()}")
             QMessageBox.warning(self, "错误", f"加载数据失败：{e}")
 
+    def _delete_spec_by_button(self, button):
+        """根据删除按钮当前所在的表格行执行删除，避免删除后行号错位。"""
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, self.COL_ACTION) is button:
+                self.delete_spec_row(row)
+                return
+
     def delete_spec_row(self, row):
         """
         【中文功能说明】
         删除指定行的规格。
         逻辑：确认 -> 移除行 -> 自动重算剩余权重 (归一化到 100%) -> 更新界面
         """
+        if row < 0 or row >= self.table.rowCount():
+            return
+
         # 1. 获取该行信息
-        name_item = self.table.item(row, 0)
-        code_item = self.table.item(row, 1)
+        name_item = self.table.item(row, self.COL_SPEC_NAME)
+        code_item = self.table.item(row, self.COL_SPEC_CODE)
         spec_name = name_item.text() if name_item else "未知"
         spec_code = code_item.text() if code_item else "未知"
         
@@ -855,7 +1178,7 @@ class ProductSpecDialog(QDialog):
             # 这里直接调用一个简单的归一化逻辑，或者复用 average_weights 的逻辑
             self.normalize_weights_after_delete()
             
-            QMessageBox.information(self, "提示", f"已移除 {spec_name}。\n请点击“保存”按钮使更改生效。")
+            self._show_action_bubble(f"已删除规格：{spec_name}")
 
     def normalize_weights_after_delete(self):
         """
@@ -876,7 +1199,7 @@ class ProductSpecDialog(QDialog):
             total_weight = 0.0
             weights = []
             for r in range(row_count):
-                w_item = self.table.item(r, 7) # 权重列是第 8 列 (索引 7)
+                w_item = self.table.item(r, self.COL_WEIGHT)
                 if w_item:
                     w_text = w_item.text().replace("🔒", "").strip()
                     try:
@@ -901,7 +1224,7 @@ class ProductSpecDialog(QDialog):
                 else:
                     new_w = 0.0
                 
-                w_item = self.table.item(r, 7)
+                w_item = self.table.item(r, self.COL_WEIGHT)
                 if w_item:
                     # 保留锁图标逻辑
                     old_text = w_item.text()
@@ -939,7 +1262,7 @@ class ProductSpecDialog(QDialog):
             total_weight = 0.0
             weights = []
             for r in range(row_count):
-                w_item = self.table.item(r, 7) # 权重列 (第8列)
+                w_item = self.table.item(r, self.COL_WEIGHT)
                 w_text = w_item.text().replace("🔒", "").strip() if w_item else "0"
                 try:
                     w = float(w_text)
@@ -961,7 +1284,7 @@ class ProductSpecDialog(QDialog):
                 else:
                     new_w = 0.0
                 
-                w_item = self.table.item(r, 7)
+                w_item = self.table.item(r, self.COL_WEIGHT)
                 if w_item:
                     # 保留锁图标逻辑 (如果原来有锁，加上锁)
                     old_text = w_item.text()
@@ -979,27 +1302,8 @@ class ProductSpecDialog(QDialog):
             self.is_balancing = False
 
     def recalc_single_row_margin(self, row):
-        """重新计算某一行的毛利率并更新到第5列"""
-        price_item = self.table.item(row, 3) # 售价
-        code_item = self.table.item(row, 1)  # 编码
-        margin_item = self.table.item(row, 5) # 毛利列
-        
-        if not price_item or not code_item or not margin_item:
-            return
-        
-        try:
-            price = float(price_item.text())
-            code = code_item.text()
-            
-            # 查成本
-            cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (code,))
-            cost = float(cost_res[0][0]) if cost_res else 0.0
-            
-            if price > 0:
-                margin = (price - cost) / price * 100
-                margin_item.setText(f"{margin:.2f}%")
-        except:
-            pass
+        """重新计算某一行的毛利率和毛利润。"""
+        self.calculate_row_margin(row)
 
     def calculate_roi_metrics(self):
         """计算投产比相关指标：毛保本投产、净保本投产、最佳投产"""
@@ -1168,37 +1472,42 @@ class ProductSpecDialog(QDialog):
         ai_layout.addWidget(ai_btn)
         ai_layout.addStretch()
         
-        self.table.setCellWidget(idx, 0, ai_widget)
+        self.table.setCellWidget(idx, self.COL_AI, ai_widget)
         
         # 第1列：规格名称（最多40字符）
         spec_item = QTableWidgetItem(f"新规格{idx+1}")
         spec_item.setToolTip("规格名称（最多40字符）")
-        self.table.setItem(idx, 1, spec_item)
+        self.table.setItem(idx, self.COL_SPEC_NAME, spec_item)
         # 第2列：关联编码
-        self.table.setItem(idx, 2, QTableWidgetItem(""))
+        self.table.setItem(idx, self.COL_SPEC_CODE, QTableWidgetItem(""))
         
         # 第3列：自动成本（不可编辑）
         cost_item = QTableWidgetItem("")
         cost_item.setFlags(cost_item.flags() & ~Qt.ItemIsEditable)
-        self.table.setItem(idx, 3, cost_item)
+        self.table.setItem(idx, self.COL_COST, cost_item)
         
         # 第4列：手动售价
-        self.table.setItem(idx, 4, QTableWidgetItem(""))
+        self.table.setItem(idx, self.COL_SALE_PRICE, QTableWidgetItem(""))
         
         # 第5列：券后价（不可编辑）
         final_price_item = QTableWidgetItem("0.00")
         final_price_item.setFlags(final_price_item.flags() & ~Qt.ItemIsEditable)
-        self.table.setItem(idx, 5, final_price_item)
+        self.table.setItem(idx, self.COL_FINAL_PRICE, final_price_item)
         
-        # 第6列：单规格毛利（不可编辑）
+        # 第6列：毛利率（不可编辑）
         margin_item = QTableWidgetItem("0.00%")
         margin_item.setFlags(margin_item.flags() & ~Qt.ItemIsEditable)
-        self.table.setItem(idx, 6, margin_item)
-        
-        # 第7列：权重
-        self.table.setItem(idx, 7, QTableWidgetItem("0"))
+        self.table.setItem(idx, self.COL_MARGIN_RATE, margin_item)
 
-        # 第8列：权重对比
+        # 第7列：毛利润（不可编辑）
+        profit_item = QTableWidgetItem("0.00")
+        profit_item.setFlags(profit_item.flags() & ~Qt.ItemIsEditable)
+        self.table.setItem(idx, self.COL_GROSS_PROFIT, profit_item)
+        
+        # 第8列：权重
+        self.table.setItem(idx, self.COL_WEIGHT, QTableWidgetItem("0"))
+
+        # 第9列：权重对比
         weight_compare_widget = QWidget()
         weight_compare_layout = QVBoxLayout(weight_compare_widget)
         weight_compare_layout.setContentsMargins(0, 2, 0, 2)
@@ -1209,14 +1518,14 @@ class ProductSpecDialog(QDialog):
         weight_compare_sub_label.setStyleSheet("color: #95a5a6; font-size: 10px;")
         weight_compare_layout.addWidget(weight_compare_value_label)
         weight_compare_layout.addWidget(weight_compare_sub_label)
-        self.table.setCellWidget(idx, 8, weight_compare_widget)
+        self._set_unselectable_cell_widget(idx, self.COL_WEIGHT_COMPARE, weight_compare_widget)
 
-        # 第9列：单量
-        order_count_item = QTableWidgetItem("0单")
+        # 第10列：单量
+        order_count_item = self._make_unselectable_item("0单")
         order_count_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(idx, 9, order_count_item)
+        self.table.setItem(idx, self.COL_ORDER_COUNT, order_count_item)
 
-        # 第10列：单量对比
+        # 第11列：单量对比
         order_compare_widget = QWidget()
         order_compare_layout = QVBoxLayout(order_compare_widget)
         order_compare_layout.setContentsMargins(0, 2, 0, 2)
@@ -1227,23 +1536,21 @@ class ProductSpecDialog(QDialog):
         order_compare_sub_label.setStyleSheet("color: #95a5a6; font-size: 10px;")
         order_compare_layout.addWidget(order_compare_value_label)
         order_compare_layout.addWidget(order_compare_sub_label)
-        self.table.setCellWidget(idx, 10, order_compare_widget)
+        self._set_unselectable_cell_widget(idx, self.COL_ORDER_COMPARE, order_compare_widget)
 
-        # 第11列：退款订单
-        refund_orders_item = QTableWidgetItem("无")
+        # 第12列：退款订单
+        refund_orders_item = self._make_unselectable_item("无")
         refund_orders_item.setTextAlignment(Qt.AlignCenter)
-        refund_orders_item.setFlags(refund_orders_item.flags() & ~Qt.ItemIsEditable)
         refund_orders_item.setForeground(QColor("#95a5a6"))
-        self.table.setItem(idx, 11, refund_orders_item)
+        self.table.setItem(idx, self.COL_REFUND_ORDERS, refund_orders_item)
 
-        # 第12列：退款占比
-        refund_ratio_item = QTableWidgetItem("无")
+        # 第13列：退款占比
+        refund_ratio_item = self._make_unselectable_item("无")
         refund_ratio_item.setTextAlignment(Qt.AlignCenter)
-        refund_ratio_item.setFlags(refund_ratio_item.flags() & ~Qt.ItemIsEditable)
         refund_ratio_item.setForeground(QColor("#95a5a6"))
-        self.table.setItem(idx, 12, refund_ratio_item)
+        self.table.setItem(idx, self.COL_REFUND_RATIO, refund_ratio_item)
 
-        # 第13列：删除按钮
+        # 第14列：删除按钮
         btn_delete = QPushButton("🗑️")
         btn_delete.setToolTip("删除此规格")
         btn_delete.setStyleSheet("""
@@ -1253,8 +1560,8 @@ class ProductSpecDialog(QDialog):
             QPushButton:hover { background-color: #ff7875; }
             QPushButton:pressed { background-color: #d9363e; }
         """)
-        btn_delete.clicked.connect(lambda checked, r=idx: self.delete_spec_row(r))
-        self.table.setCellWidget(idx, 13, btn_delete)
+        btn_delete.clicked.connect(lambda checked=False, button=btn_delete: self._delete_spec_by_button(button))
+        self.table.setCellWidget(idx, self.COL_ACTION, btn_delete)
 
         self.table.scrollToBottom()
 
@@ -1266,8 +1573,8 @@ class ProductSpecDialog(QDialog):
             return
         
         # 1. 如果是权重列变化，触发智能平衡
-        if col == 7:
-            item = self.table.item(row, 7)
+        if col == self.COL_WEIGHT:
+            item = self.table.item(row, self.COL_WEIGHT)
             if not item:
                 return
 
@@ -1315,7 +1622,7 @@ class ProductSpecDialog(QDialog):
         """计算所有已锁定规格的权重总和"""
         total_locked = 0.0
         for r in range(self.table.rowCount()):
-            item = self.table.item(r, 7)
+            item = self.table.item(r, self.COL_WEIGHT)
             if not item:
                 continue
             text = item.data(Qt.DisplayRole) or ""
@@ -1350,7 +1657,7 @@ class ProductSpecDialog(QDialog):
             return
 
         # 1. 获取当前修改行的新权重值
-        item_changed = self.table.item(changed_row, 7)
+        item_changed = self.table.item(changed_row, self.COL_WEIGHT)
         if not item_changed:
             return
 
@@ -1372,7 +1679,7 @@ class ProductSpecDialog(QDialog):
             if r == changed_row:
                 continue
             
-            item = self.table.item(r, 7)
+            item = self.table.item(r, self.COL_WEIGHT)
             if not item:
                 continue
             
@@ -1403,7 +1710,7 @@ class ProductSpecDialog(QDialog):
             if r == changed_row:
                 continue # 跳过自己
             
-            item = self.table.item(r, 7)
+            item = self.table.item(r, self.COL_WEIGHT)
             if not item:
                 continue
             
@@ -1432,7 +1739,7 @@ class ProductSpecDialog(QDialog):
             
             # 更新其他行
             for r in other_unlocked_rows:
-                item = self.table.item(r, 7)
+                item = self.table.item(r, self.COL_WEIGHT)
                 if item:
                     # 保持原来的锁定状态（虽然这里肯定是未锁定的）
                     item.setData(Qt.DisplayRole, f"{avg:.2f}")
@@ -1442,10 +1749,10 @@ class ProductSpecDialog(QDialog):
 
     def fetch_cost(self, row):
         """根据关联编码获取成本"""
-        code_item = self.table.item(row, 2)
+        code_item = self.table.item(row, self.COL_SPEC_CODE)
         code = code_item.text().strip() if code_item else ""
         if not code:
-            item_cost = self.table.item(row, 3)
+            item_cost = self.table.item(row, self.COL_COST)
             if item_cost: item_cost.setText("")
             self.calculate_row_margin(row)
             self.calculate_total_margin()
@@ -1454,23 +1761,26 @@ class ProductSpecDialog(QDialog):
         res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (code,))
         if res:
             cost = res[0][0]
-            item_cost = self.table.item(row, 3)
+            item_cost = self.table.item(row, self.COL_COST)
             if item_cost: item_cost.setText(f"{cost:.2f}")
             self.calculate_row_margin(row)
             self.calculate_total_margin()
         else:
-            item_cost = self.table.item(row, 3)
+            item_cost = self.table.item(row, self.COL_COST)
             if item_cost: item_cost.setText("")
-            item_margin = self.table.item(row, 6)
+            item_margin = self.table.item(row, self.COL_MARGIN_RATE)
             if item_margin: item_margin.setText("未找到成本")
+            item_profit = self.table.item(row, self.COL_GROSS_PROFIT)
+            if item_profit: item_profit.setText("0.00")
             self.calculate_total_margin()
 
     def calculate_row_margin(self, row):
         """计算单行毛利"""
-        item_cost = self.table.item(row, 3)
-        item_price = self.table.item(row, 4)
-        item_final_price = self.table.item(row, 5)
-        item_margin = self.table.item(row, 6)
+        item_cost = self.table.item(row, self.COL_COST)
+        item_price = self.table.item(row, self.COL_SALE_PRICE)
+        item_final_price = self.table.item(row, self.COL_FINAL_PRICE)
+        item_margin = self.table.item(row, self.COL_MARGIN_RATE)
+        item_profit = self.table.item(row, self.COL_GROSS_PROFIT)
         
         if not item_cost or not item_price or not item_margin:
             return
@@ -1486,6 +1796,8 @@ class ProductSpecDialog(QDialog):
                 if item_final_price:
                     item_final_price.setText("0.00")
                 item_margin.setText("0.00%")
+                if item_profit:
+                    item_profit.setText("0.00")
                 return
             
             cost = float(cost_text)
@@ -1500,6 +1812,10 @@ class ProductSpecDialog(QDialog):
             final_price = price - max_discount
             if item_final_price:
                 item_final_price.setText(f"{final_price:.2f}")
+
+            gross_profit = final_price - cost
+            if item_profit:
+                item_profit.setText(f"{gross_profit:.2f}")
             
             # 计算毛利
             if final_price > 0 and cost > 0:
@@ -1512,6 +1828,8 @@ class ProductSpecDialog(QDialog):
         except:
             if item_final_price:
                 item_final_price.setText("错误")
+            if item_profit:
+                item_profit.setText("错误")
             item_margin.setText("错误")
 
     def calculate_all(self):
@@ -1530,10 +1848,10 @@ class ProductSpecDialog(QDialog):
         max_discount = max(coupon, new_customer)
 
         for r in range(self.table.rowCount()):
-            price_item = self.table.item(r, 4)
-            code_item = self.table.item(r, 2)
-            margin_item = self.table.item(r, 6)
-            weight_item = self.table.item(r, 7)
+            price_item = self.table.item(r, self.COL_SALE_PRICE)
+            code_item = self.table.item(r, self.COL_SPEC_CODE)
+            margin_item = self.table.item(r, self.COL_MARGIN_RATE)
+            weight_item = self.table.item(r, self.COL_WEIGHT)
 
             if not all([price_item, code_item, margin_item, weight_item]):
                 continue
@@ -3098,8 +3416,8 @@ class ProductSpecDialog(QDialog):
 
     def _update_spec_compare_labels(self, row, current_count, last_count, current_total, current_weight, last_weight):
         """更新指定行的对比列标签"""
-        weight_compare_widget = self.table.cellWidget(row, 8)
-        order_compare_widget = self.table.cellWidget(row, 10)
+        weight_compare_widget = self.table.cellWidget(row, self.COL_WEIGHT_COMPARE)
+        order_compare_widget = self.table.cellWidget(row, self.COL_ORDER_COMPARE)
 
         if not weight_compare_widget or not order_compare_widget:
             return
@@ -3165,11 +3483,11 @@ class ProductSpecDialog(QDialog):
         
         if not imported_data:
             for row in range(self.table.rowCount()):
-                weight_item = self.table.item(row, 7)
+                weight_item = self.table.item(row, self.COL_WEIGHT)
                 if weight_item:
                     weight_item.setText("0.00%")
                     weight_item.setData(Qt.UserRole, 0)
-                order_item = self.table.item(row, 9)
+                order_item = self.table.item(row, self.COL_ORDER_COUNT)
                 if order_item:
                     order_item.setText("0单")
             self.update_total_orders_label()
@@ -3193,19 +3511,19 @@ class ProductSpecDialog(QDialog):
                 weight_item.setFlags(weight_item.flags() & ~Qt.ItemIsEditable)
                 weight_item.setData(Qt.UserRole, weight)
                 weight_item.setToolTip(f"订单数: {count}单")
-                self.table.setItem(row, 7, weight_item)
-                order_item = QTableWidgetItem(f"{count}单")
+                self.table.setItem(row, self.COL_WEIGHT, weight_item)
+                order_item = self._make_unselectable_item(f"{count}单")
                 order_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 9, order_item)
+                self.table.setItem(row, self.COL_ORDER_COUNT, order_item)
             else:
                 weight_text = "0.00%"
                 weight_item = QTableWidgetItem(weight_text)
                 weight_item.setFlags(weight_item.flags() & ~Qt.ItemIsEditable)
                 weight_item.setData(Qt.UserRole, 0.0)
-                self.table.setItem(row, 7, weight_item)
-                order_item = QTableWidgetItem("0单")
+                self.table.setItem(row, self.COL_WEIGHT, weight_item)
+                order_item = self._make_unselectable_item("0单")
                 order_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, 9, order_item)
+                self.table.setItem(row, self.COL_ORDER_COUNT, order_item)
         
         self.update_total_orders_label()
         self.update_compare_columns()
@@ -3328,7 +3646,7 @@ class ProductSpecDialog(QDialog):
             current_count = current_spec_counts.get(spec_code, 0)
             last_count = last_spec_counts.get(spec_code, None)
             
-            weight_item = self.table.item(row, 7)
+            weight_item = self.table.item(row, self.COL_WEIGHT)
             current_weight = weight_item.data(Qt.UserRole) if weight_item else 0
             
             last_spec_weight = 0
@@ -3345,8 +3663,8 @@ class ProductSpecDialog(QDialog):
         weighted_price = 0.0
         
         for r in range(self.table.rowCount()):
-            price_item = self.table.item(r, 4)
-            weight_item = self.table.item(r, 7)
+            price_item = self.table.item(r, self.COL_SALE_PRICE)
+            weight_item = self.table.item(r, self.COL_WEIGHT)
             
             if not price_item or not weight_item:
                 continue
@@ -3458,9 +3776,9 @@ class ProductSpecDialog(QDialog):
         locked_weight_sum = 0.0
         unlocked_rows = []
         
-        # 列索引7是权重列
+        # 权重列
         for r in range(rows):
-            item = self.table.item(r, 7)
+            item = self.table.item(r, self.COL_WEIGHT)
             if not item:
                 continue
             
@@ -3487,7 +3805,7 @@ class ProductSpecDialog(QDialog):
         if len(unlocked_rows) > 0:
             avg = remaining / len(unlocked_rows)
             for r in unlocked_rows:
-                item = self.table.item(r, 7)
+                item = self.table.item(r, self.COL_WEIGHT)
                 if item:
                     # 保持锁定状态不变，只改数字
                     old_text = item.data(Qt.DisplayRole) or ""
@@ -3536,7 +3854,7 @@ class ProductSpecDialog(QDialog):
                 item_name = self.table.item(r, 1)
                 item_code = self.table.item(r, 2)
                 item_price = self.table.item(r, 4)
-                item_weight = self.table.item(r, 7)  # 权重列（可能带锁图标）
+                item_weight = self.table.item(r, self.COL_WEIGHT)  # 权重列（可能带锁图标）
                 
                 if not item_name or not item_code:
                     continue

@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
     QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit, QLayout
 )
-from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate
+from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate, QBuffer, QByteArray, QIODevice
 from PyQt5.QtGui import QPixmap, QIcon
 
 
@@ -41,6 +41,10 @@ class ProductWidget(QWidget):
         self.img_label.setFixedSize(72, 72)
         self.img_label.setStyleSheet("border: 1px solid #ddd; border-radius: 4px; padding: 0px;")
         self.img_label.setAlignment(Qt.AlignCenter)
+        self.img_label.setMouseTracking(True)
+        self.img_label.setFocusPolicy(Qt.StrongFocus)
+        self.img_label.setToolTip("悬停后 Ctrl+V 粘贴图片")
+        self.img_label.installEventFilter(self)
         self.set_image_from_data(image_data)
 
         btn_layout = QHBoxLayout()
@@ -345,6 +349,58 @@ class ProductWidget(QWidget):
             return "一般亏"
         else:
             return "巨亏"
+
+    def eventFilter(self, obj, event):
+        if obj == self.img_label:
+            if event.type() == QEvent.Enter:
+                self.img_label.setFocus(Qt.MouseFocusReason)
+                return False
+            if event.type() == QEvent.KeyPress:
+                if event.key() == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
+                    self._paste_image_from_clipboard()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _paste_image_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if not mime_data or not mime_data.hasImage():
+            self.main_app.show_toast("剪贴板中没有图片")
+            return
+
+        image = clipboard.image()
+        if image.isNull():
+            self.main_app.show_toast("剪贴板图片读取失败")
+            return
+
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            self.main_app.show_toast("剪贴板图片读取失败")
+            return
+
+        try:
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            if not buffer.open(QIODevice.WriteOnly):
+                self.main_app.show_toast("剪贴板图片保存失败")
+                return
+            if not pixmap.save(buffer, "PNG"):
+                buffer.close()
+                self.main_app.show_toast("剪贴板图片保存失败")
+                return
+            buffer.close()
+            image_data = bytes(byte_array)
+            if not image_data:
+                self.main_app.show_toast("剪贴板图片保存失败")
+                return
+            self.main_app.db.safe_execute(
+                "UPDATE products SET image_data=? WHERE id=?",
+                (image_data, self.prod_id)
+            )
+            self.set_image_from_data(image_data)
+            self.main_app.show_toast("✅ 图片已粘贴并更新")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"粘贴图片失败: {e}")
 
     def update_roi_display(self, margin_rate=None):
         try:

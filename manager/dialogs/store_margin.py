@@ -1355,6 +1355,7 @@ class StoreMarginDialog(QDialog):
         self.toast_fade_out_animation.finished.connect(self.toast_label.hide)
 
         self.init_ui()
+        self._restore_latest_import_history_if_needed()
         self.load_products()
         self.refresh_manual_data_display()
 
@@ -1421,6 +1422,80 @@ class StoreMarginDialog(QDialog):
             return None, 0
         max_spec = max(spec_counts, key=lambda x: x[1] if x[1] else 0)
         return max_spec[0] if max_spec[0] else None, max_spec[1] if max_spec[1] else 0
+
+    def _snapshot_has_refunds(self, snapshot):
+        """检查历史快照里是否包含退款数据。"""
+        for data in snapshot.get("orders", {}).values():
+            if isinstance(data, dict) and (data.get("refund_count") or 0) > 0:
+                return True
+        return False
+
+    def _restore_orders_from_snapshot(self, snapshot, import_time=None):
+        """按历史快照恢复当前店铺 imported_orders，不触发界面副作用。"""
+        orders_data = snapshot.get("orders", {})
+        if not orders_data:
+            return False
+
+        restore_time = import_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
+
+        for key, data in orders_data.items():
+            if not isinstance(data, dict):
+                continue
+            parts = key.split("_", 1)
+            if len(parts) < 2:
+                continue
+
+            user_product_id = parts[0]
+            spec_code = parts[1]
+            order_count = data.get("count", 0)
+            refund_count = data.get("refund_count", 0)
+            dates = data.get("dates", [])
+            earliest_date = min(dates) if dates else None
+            latest_date = max(dates) if dates else None
+            date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
+
+            self.db.safe_execute("""
+                INSERT OR REPLACE INTO imported_orders
+                (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (self.store_id, user_product_id, spec_code, order_count,
+                  restore_time, date_range, 0, refund_count))
+
+        return True
+
+    def _restore_latest_import_history_if_needed(self):
+        """当前订单缺少退款数时，自动从最新历史快照恢复。"""
+        current = self.db.safe_fetchall("""
+            SELECT COUNT(*), COALESCE(SUM(COALESCE(refund_count, 0)), 0)
+            FROM imported_orders
+            WHERE store_id=?
+        """, (self.store_id,))
+        current_count = current[0][0] if current else 0
+        current_refunds = current[0][1] if current else 0
+        if current_count > 0 and current_refunds > 0:
+            return False
+
+        history_records = self.db.safe_fetchall("""
+            SELECT import_time, snapshot_data
+            FROM import_history
+            WHERE store_id=? AND snapshot_data IS NOT NULL AND snapshot_data != ''
+            ORDER BY import_time DESC, id DESC
+            LIMIT 1
+        """, (self.store_id,))
+        if not history_records:
+            return False
+
+        import_time, snapshot_data = history_records[0]
+        try:
+            snapshot = json.loads(snapshot_data)
+        except Exception:
+            return False
+
+        if not self._snapshot_has_refunds(snapshot):
+            return False
+
+        return self._restore_orders_from_snapshot(snapshot, import_time)
 
     def get_user_id_by_sys_id(self, sys_id):
         """根据系统ID获取用户ID"""
@@ -4633,15 +4708,15 @@ class ImportHistoryDialog(QDialog):
         """应用历史记录的订单数据"""
         # 获取历史记录
         history_records = self.db.safe_fetchall(
-            "SELECT snapshot_data FROM import_history WHERE id=?",
+            "SELECT import_time, snapshot_data FROM import_history WHERE id=?",
             (history_id,)
         )
 
-        if not history_records or not history_records[0][0]:
+        if not history_records or not history_records[0][1]:
             return
 
         try:
-            snapshot = json.loads(history_records[0][0])
+            snapshot = json.loads(history_records[0][1])
             orders_data = snapshot.get("orders", {})
         except:
             return

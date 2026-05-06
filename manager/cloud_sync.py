@@ -377,11 +377,11 @@ class CloudSyncManager:
                 for order in data['imported_orders']:
                     self.db.safe_execute(
                         """INSERT OR REPLACE INTO imported_orders
-                        (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (order.get('store_id'), order.get('product_id'), order.get('spec_code'),
                          order.get('order_count', 0), order.get('import_time'), order.get('order_date'),
-                         order.get('actual_amount', 0))
+                         order.get('actual_amount', 0), order.get('refund_count', 0))
                     )
 
             if data.get('import_history'):
