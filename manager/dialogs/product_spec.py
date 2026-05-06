@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QAbstractItemView, QFileDialog,
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
-    QPlainTextEdit,
+    QPlainTextEdit, QSlider,
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator
@@ -1913,80 +1913,77 @@ class ProductSpecDialog(QDialog):
         if not api_key:
             QMessageBox.warning(self, "⚠️ 提示", "请先在API配置中设置API Key！")
             return
-        
+
+        self._show_strategy_config_dialog(original_name, row)
+
+    def _show_strategy_config_dialog(self, original_name, row):
+        """显示规格优化策略标尺配置窗口。"""
         dialog = QDialog(self)
-        dialog.setWindowTitle("🤖 选择优化类型")
-        dialog.setMinimumWidth(300)
+        dialog.setWindowTitle("🤖 规格优化策略")
+        dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
-        
-        layout.addWidget(QLabel("请选择规格名称优化类型："))
-        
-        btn_high = QPushButton("🎯 高转化（提升购买意愿）")
-        btn_high.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                font-weight: bold;
-                padding: 15px;
+
+        title = QLabel("请选择本次规格优化的策略方向")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #2c3e50; padding: 8px;")
+        layout.addWidget(title)
+
+        spec_label = QLabel(f"当前规格：{original_name}")
+        spec_label.setStyleSheet("color: #6c757d; font-size: 12px; padding: 0 8px 8px 8px;")
+        spec_label.setWordWrap(True)
+        layout.addWidget(spec_label)
+
+        conversion_slider, conversion_spin, conversion_desc = self._create_axis_control(
+            layout,
+            "转化方向",
+            "明显劝退",
+            "中性",
+            "强购买引导",
+            self._describe_conversion_level
+        )
+        price_slider, price_spin, price_desc = self._create_axis_control(
+            layout,
+            "价格人群",
+            "低价人群",
+            "中性",
+            "高价人群",
+            self._describe_price_audience_level
+        )
+
+        hint_card = QWidget()
+        hint_card.setStyleSheet("""
+            QWidget {
+                background-color: #fffdf7;
+                border: 1px solid #f1c40f;
                 border-radius: 5px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #219a52;
+                padding: 8px;
             }
         """)
+        hint_layout = QVBoxLayout(hint_card)
+        hint_layout.setContentsMargins(10, 8, 10, 8)
+        hint_label = QLabel("本次补充提示（可选）")
+        hint_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50;")
+        hint_layout.addWidget(hint_label)
+        hint_input = QLineEdit()
+        hint_input.setPlaceholderText("例如：这是铁棍山药，主打粉糯口感和日常滋补")
+        hint_input.setMaxLength(160)
+        hint_input.setStyleSheet("padding: 7px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;")
+        hint_layout.addWidget(hint_input)
+        hint_desc = QLabel("仅本次调用使用，不保存到数据库。")
+        hint_desc.setStyleSheet("font-size: 10px; color: #6c757d;")
+        hint_layout.addWidget(hint_desc)
+        layout.addWidget(hint_card)
 
-        btn_high_preview = QPushButton("👁️ 预览")
-        btn_high_preview.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                padding: 5px 10px;
-                border-radius: 3px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #219a52;
-            }
-        """)
-        btn_high_preview.clicked.connect(lambda: self._show_optimization_preview_dialog(original_name, "high", dialog))
+        def open_preview():
+            dialog.accept()
+            self._show_optimization_preview_dialog(
+                original_name,
+                conversion_level=conversion_spin.value(),
+                price_audience_level=price_spin.value(),
+                custom_hint=hint_input.text().strip(),
+                row=row
+            )
 
-        btn_low = QPushButton("⚠️ 低转化（降低购买意愿）")
-        btn_low.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                font-weight: bold;
-                padding: 15px;
-                border-radius: 5px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-        """)
-
-        btn_low_preview = QPushButton("👁️ 预览")
-        btn_low_preview.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                padding: 5px 10px;
-                border-radius: 3px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-        """)
-        btn_low_preview.clicked.connect(lambda: self._show_optimization_preview_dialog(original_name, "low", dialog))
-
-        def start_optimize(prompt_type, row):
-            dialog.close()
-            self._show_optimization_preview_dialog(original_name, prompt_type, row=row)
-
-        btn_high.clicked.connect(lambda: start_optimize("high", row))
-        btn_low.clicked.connect(lambda: start_optimize("low", row))
+        btn_layout = QHBoxLayout()
 
         btn_common_rules = QPushButton("📋 通用规则设置")
         btn_common_rules.setStyleSheet("""
@@ -2001,22 +1998,105 @@ class ProductSpecDialog(QDialog):
             }
         """)
         btn_common_rules.clicked.connect(lambda: self._show_common_rules_dialog(dialog))
+        btn_layout.addWidget(btn_common_rules)
 
-        high_layout = QHBoxLayout()
-        high_layout.addWidget(btn_high)
-        high_layout.addWidget(btn_high_preview)
-        layout.addLayout(high_layout)
+        btn_layout.addStretch()
 
-        low_layout = QHBoxLayout()
-        low_layout.addWidget(btn_low)
-        low_layout.addWidget(btn_low_preview)
-        layout.addLayout(low_layout)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_layout.addWidget(btn_cancel)
 
-        layout.addWidget(btn_common_rules)
+        btn_preview = QPushButton("进入预览")
+        btn_preview.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                padding: 9px 22px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+        """)
+        btn_preview.clicked.connect(open_preview)
+        btn_layout.addWidget(btn_preview)
+
+        layout.addLayout(btn_layout)
 
         dialog.exec_()
 
-    def _show_optimization_preview_dialog(self, original_name, prompt_type, parent_dialog=None, row=None):
+    def _create_axis_control(self, parent_layout, title, left_text, center_text, right_text, describe_func):
+        card = QWidget()
+        card.setStyleSheet("""
+            QWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 8px;
+            }
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+
+        header = QHBoxLayout()
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50;")
+        header.addWidget(title_label)
+        header.addStretch()
+        desc_label = QLabel(describe_func(0))
+        desc_label.setStyleSheet("font-size: 12px; color: #3498db; font-weight: bold;")
+        header.addWidget(desc_label)
+        layout.addLayout(header)
+
+        axis_layout = QHBoxLayout()
+        left_label = QLabel(left_text)
+        left_label.setStyleSheet("font-size: 11px; color: #e74c3c;")
+        axis_layout.addWidget(left_label)
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(-10, 10)
+        slider.setValue(0)
+        slider.setTickPosition(QSlider.TicksBelow)
+        slider.setTickInterval(1)
+        axis_layout.addWidget(slider, 1)
+
+        spin = QSpinBox()
+        spin.setRange(-10, 10)
+        spin.setValue(0)
+        spin.setFixedWidth(70)
+        axis_layout.addWidget(spin)
+
+        right_label = QLabel(right_text)
+        right_label.setStyleSheet("font-size: 11px; color: #27ae60;")
+        axis_layout.addWidget(right_label)
+        layout.addLayout(axis_layout)
+
+        center_label = QLabel(f"-10 {left_text}    0 {center_text}    +10 {right_text}")
+        center_label.setAlignment(Qt.AlignCenter)
+        center_label.setStyleSheet("font-size: 10px; color: #6c757d;")
+        layout.addWidget(center_label)
+
+        def sync_from_slider(value):
+            spin.blockSignals(True)
+            spin.setPrefix("+" if value > 0 else "")
+            spin.setValue(value)
+            spin.blockSignals(False)
+            desc_label.setText(describe_func(value))
+
+        def sync_from_spin(value):
+            spin.setPrefix("+" if value > 0 else "")
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+            desc_label.setText(describe_func(value))
+
+        slider.valueChanged.connect(sync_from_slider)
+        spin.valueChanged.connect(sync_from_spin)
+        parent_layout.addWidget(card)
+        return slider, spin, desc_label
+
+    def _show_optimization_preview_dialog(self, original_name, conversion_level=0, price_audience_level=0, custom_hint="", parent_dialog=None, row=None):
         """显示优化预览窗口：展示条件、选择的提示词、生成预览"""
         dialog = QDialog(parent_dialog or self)
         dialog.setWindowTitle("🤖 规格优化预览")
@@ -2027,9 +2107,10 @@ class ProductSpecDialog(QDialog):
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
         main_layout.addWidget(header)
 
-        mode_color = "#27ae60" if prompt_type == "high" else "#e74c3c"
-        mode_icon = "🎯 高转化" if prompt_type == "high" else "⚠️ 低转化"
-        mode_label = QLabel(f"当前模式：{mode_icon}")
+        mode_color = "#27ae60" if conversion_level >= 0 else "#e74c3c"
+        mode_icon = self._describe_conversion_level(conversion_level)
+        price_icon = self._describe_price_audience_level(price_audience_level)
+        mode_label = QLabel(f"当前策略：转化方向 {conversion_level:+d}（{mode_icon}）｜价格人群 {price_audience_level:+d}（{price_icon}）")
         mode_label.setStyleSheet(f"font-size: 13px; color: {mode_color}; font-weight: bold; padding: 5px;")
         main_layout.addWidget(mode_label)
 
@@ -2101,29 +2182,17 @@ class ProductSpecDialog(QDialog):
 
         scroll_layout.addWidget(condition_card)
 
-        if margin_rate >= 25:
-            margin_level = "高毛利(≥25%)"
-            margin_color = "#27ae60"
-        else:
-            margin_level = "低毛利(<25%)"
-            margin_color = "#e74c3c"
+        price_relation = self._get_price_relation_info(row, original_name)
+        relation_color = "#27ae60" if price_relation.get("is_lowest") else "#e67e22"
+        relation_label = QLabel(f"💰 价格相对位置：{price_relation.get('summary', '暂无价格数据')}")
+        relation_label.setStyleSheet(f"font-size: 12px; color: {relation_color}; font-weight: bold; padding: 8px; background-color: #f8f9fa; border-radius: 4px;")
+        scroll_layout.addWidget(relation_label)
 
-        margin_level_label = QLabel(f"📈 当前毛利等级：{margin_level}")
-        margin_level_label.setStyleSheet(f"font-size: 12px; color: {margin_color}; font-weight: bold; padding: 8px; background-color: #f8f9fa; border-radius: 4px;")
-        scroll_layout.addWidget(margin_level_label)
-
-        if prompt_type == "high" and margin_rate >= 25:
-            strategy_name = "高转化+高毛利"
-            strategy_key = "ai_high_high_margin_prompt"
-        elif prompt_type == "high" and margin_rate < 25:
-            strategy_name = "高转化+低毛利"
-            strategy_key = "ai_high_low_margin_prompt"
-        elif prompt_type == "low" and margin_rate >= 25:
-            strategy_name = "低转化+高毛利"
-            strategy_key = "ai_low_high_margin_prompt"
-        else:
-            strategy_name = "低转化+低毛利"
-            strategy_key = "ai_low_low_margin_prompt"
+        hint_text = custom_hint.strip() if custom_hint else ""
+        hint_label = QLabel(f"📝 本次补充提示：{hint_text if hint_text else '未填写本次补充提示'}")
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("font-size: 12px; color: #8a6d3b; font-weight: bold; padding: 8px; background-color: #fffdf7; border-radius: 4px;")
+        scroll_layout.addWidget(hint_label)
 
         tags_card = QWidget()
         tags_layout = QVBoxLayout(tags_card)
@@ -2163,13 +2232,16 @@ class ProductSpecDialog(QDialog):
         if product_attr:
             tag_configs.append(("📦 商品属性", "#9b59b6"))
 
-        spec_prompt = self.db.get_setting("ai_spec_high_prompt" if prompt_type == "high" else "ai_spec_low_prompt", "")
-        if spec_prompt:
-            tag_configs.append((mode_icon, mode_color))
-
-        strategy_prompt = self.db.get_setting(strategy_key, "")
-        if strategy_prompt:
-            tag_configs.append(("💰 " + strategy_name, margin_color))
+        if self.db.get_setting("ai_spec_base_prompt", ""):
+            tag_configs.append(("🧩 基础生成规则", "#16a085"))
+        if self.db.get_setting("ai_spec_conversion_axis_prompt", ""):
+            tag_configs.append((f"🎯 转化方向：{conversion_level:+d} {mode_icon}", mode_color))
+        if self.db.get_setting("ai_spec_price_audience_prompt", ""):
+            tag_configs.append((f"👥 价格人群：{price_audience_level:+d} {price_icon}", "#2980b9"))
+        if self.db.get_setting("ai_spec_price_relation_prompt", ""):
+            tag_configs.append(("💰 价格相对位置", relation_color))
+        if hint_text:
+            tag_configs.append(("📝 本次补充提示", "#f39c12"))
 
         if store_memo:
             tag_configs.append(("📋 店铺大纲", "#6c757d"))
@@ -2204,12 +2276,14 @@ class ProductSpecDialog(QDialog):
                 background-color: #5a6268;
             }
         """)
-        btn_view_prompts.clicked.connect(lambda: self._show_prompt_detail_dialog(dialog, prompt_type, strategy_name, margin_rate))
+        btn_view_prompts.clicked.connect(lambda: self._show_prompt_detail_dialog(
+            dialog, conversion_level, price_audience_level, price_relation, original_name, row, custom_hint
+        ))
         tags_layout.addWidget(btn_view_prompts)
 
         scroll_layout.addWidget(tags_card)
 
-        full_prompt = self._build_full_prompt_text_optimized(original_name, prompt_type)
+        full_prompt = self._build_full_prompt_text_optimized(original_name, conversion_level, price_audience_level, row, custom_hint)
         try:
             import tiktoken
             enc = tiktoken.get_encoding("cl100k_base")
@@ -2233,7 +2307,7 @@ class ProductSpecDialog(QDialog):
         token_label = QLabel(token_hint)
         token_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #9b59b6;")
         token_layout.addWidget(token_label)
-        saved_label = QLabel("💡 已优化：仅调用1个毛利策略，节省Tokens")
+        saved_label = QLabel("💡 标尺策略：转化方向 + 价格人群 + 价格相对位置动态拼装")
         saved_label.setStyleSheet("font-size: 11px; color: #27ae60;")
         token_layout.addWidget(saved_label)
         scroll_layout.addWidget(token_card)
@@ -2286,21 +2360,23 @@ class ProductSpecDialog(QDialog):
                 background-color: {mode_color.replace('27ae60', '219a52').replace('e74c3c', 'c0392b')};
             }}
         """)
-        btn_generate.clicked.connect(lambda: self._start_optimize_from_preview(original_name, prompt_type, dialog, row))
+        btn_generate.clicked.connect(lambda: self._start_optimize_from_preview(
+            original_name, conversion_level, price_audience_level, custom_hint, dialog, row
+        ))
         btn_layout.addWidget(btn_generate)
 
         main_layout.addLayout(btn_layout)
 
         dialog.exec_()
 
-    def _start_optimize_from_preview(self, original_name, prompt_type, parent_dialog=None, row=None):
+    def _start_optimize_from_preview(self, original_name, conversion_level=0, price_audience_level=0, custom_hint="", parent_dialog=None, row=None):
         """从预览窗口确认并开始优化"""
         if parent_dialog:
             parent_dialog.accept()
         if row is None:
             row = self.table.currentRow()
         if row >= 0:
-            self._do_ai_optimize(row, original_name, prompt_type)
+            self._do_ai_optimize(row, original_name, conversion_level, price_audience_level, custom_hint)
 
     def _create_card(self, title, items, color):
         card = QWidget()
@@ -2342,10 +2418,27 @@ class ProductSpecDialog(QDialog):
 
     def _get_specs_with_margin_details(self):
         try:
-            rows = self.db.safe_fetchall(
-                "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
-                (self.product_id,)
-            )
+            rows = []
+            if hasattr(self, "table"):
+                for r in range(self.table.rowCount()):
+                    name_item = self.table.item(r, self.COL_SPEC_NAME)
+                    code_item = self.table.item(r, self.COL_SPEC_CODE)
+                    price_item = self.table.item(r, self.COL_SALE_PRICE)
+                    if not name_item or not name_item.text().strip():
+                        continue
+                    price_val = None
+                    if price_item:
+                        try:
+                            price_text = price_item.text().strip().replace("¥", "").replace(",", "")
+                            price_val = float(price_text) if price_text else None
+                        except (ValueError, TypeError):
+                            price_val = None
+                    rows.append((name_item.text().strip(), code_item.text().strip() if code_item else "", price_val))
+            if not rows:
+                rows = self.db.safe_fetchall(
+                    "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
+                    (self.product_id,)
+                )
         except Exception:
             return []
 
@@ -2390,8 +2483,241 @@ class ProductSpecDialog(QDialog):
 
         return results
 
-    def _build_full_prompt_text_optimized(self, original_name, prompt_type):
+    def _describe_conversion_level(self, level):
+        level = int(level)
+        if level >= 9:
+            return "超强购买引导"
+        if level >= 6:
+            return "强购买引导"
+        if level >= 3:
+            return "轻度转化引导"
+        if level > 0:
+            return "微弱转化引导"
+        if level == 0:
+            return "中性表达"
+        if level <= -9:
+            return "明显劝退"
+        if level <= -6:
+            return "强弱化购买意愿"
+        if level <= -3:
+            return "轻度弱化购买意愿"
+        return "微弱弱化购买意愿"
+
+    def _describe_price_audience_level(self, level):
+        level = int(level)
+        if level >= 9:
+            return "高价精品人群"
+        if level >= 6:
+            return "高价品质人群"
+        if level >= 3:
+            return "偏品质人群"
+        if level > 0:
+            return "轻度品质倾向"
+        if level == 0:
+            return "中性人群"
+        if level <= -9:
+            return "极度低价敏感"
+        if level <= -6:
+            return "低价敏感"
+        if level <= -3:
+            return "偏性价比人群"
+        return "轻度优惠倾向"
+
+    def _get_table_specs_for_ai(self):
+        """从当前表格读取规格信息，包含尚未保存的价格。"""
+        specs = []
+        for r in range(self.table.rowCount()):
+            name_item = self.table.item(r, self.COL_SPEC_NAME)
+            price_item = self.table.item(r, self.COL_SALE_PRICE)
+            code_item = self.table.item(r, self.COL_SPEC_CODE)
+            if not name_item or not name_item.text().strip():
+                continue
+            price = None
+            if price_item:
+                try:
+                    price_text = price_item.text().strip().replace("¥", "").replace(",", "")
+                    price = float(price_text) if price_text else None
+                except (ValueError, TypeError):
+                    price = None
+            specs.append({
+                "row": r,
+                "name": name_item.text().strip(),
+                "code": code_item.text().strip() if code_item else "",
+                "price": price,
+            })
+        return specs
+
+    def _get_price_relation_info(self, row=None, original_name=""):
+        specs = self._get_table_specs_for_ai()
+        priced = [s for s in specs if s.get("price") is not None]
+        current = None
+        if row is not None:
+            for spec in specs:
+                if spec["row"] == row:
+                    current = spec
+                    break
+        if current is None and original_name:
+            for spec in specs:
+                if spec["name"] == original_name:
+                    current = spec
+                    break
+        if current is None:
+            current = {"name": original_name, "price": None, "row": row}
+
+        current_price = current.get("price")
+        if current_price is None or not priced:
+            return {
+                "current_price": current_price,
+                "min_price": None,
+                "max_price": None,
+                "is_lowest": False,
+                "is_highest": False,
+                "summary": "当前规格价格缺失，禁止使用最便宜、最低价等绝对价格词",
+                "specs": specs,
+            }
+
+        prices = [s["price"] for s in priced]
+        min_price = min(prices)
+        max_price = max(prices)
+        lower_count = len([p for p in prices if p < current_price])
+        higher_count = len([p for p in prices if p > current_price])
+        is_lowest = abs(current_price - min_price) < 0.0001
+        is_highest = abs(current_price - max_price) < 0.0001
+
+        if is_lowest and is_highest:
+            summary = f"当前规格 ¥{current_price:.2f}，所有有价规格价格一致"
+        elif is_lowest:
+            summary = f"当前规格 ¥{current_price:.2f}，为当前最低价"
+        elif is_highest:
+            summary = f"当前规格 ¥{current_price:.2f}，为当前最高价，高于最低价 ¥{min_price:.2f}"
+        else:
+            summary = f"当前规格 ¥{current_price:.2f}，高于最低价 ¥{min_price:.2f}，低于最高价 ¥{max_price:.2f}"
+
+        return {
+            "current_price": current_price,
+            "min_price": min_price,
+            "max_price": max_price,
+            "lower_count": lower_count,
+            "higher_count": higher_count,
+            "is_lowest": is_lowest,
+            "is_highest": is_highest,
+            "summary": summary,
+            "specs": specs,
+        }
+
+    def _get_default_spec_base_prompt(self):
+        return """【基础生成规则】
+你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
+
+【内部发散步骤】（只在心里完成，不要输出分析过程）
+1. 先根据商品标题、产品信息、本次补充提示判断商品大类，不要写死某一个品类。
+2. 针对不同品类提取可感知价值：食品看口感、产地、营养成分、食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
+3. 从天然属性、营养/材质/工艺、消费场景、目标人群、规格差异、购买理由中发散命名。
+4. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
+5. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
+
+【合规边界】
+可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
+食品类可以表达营养、口感、日常滋补、早餐/煲汤/家庭餐等场景，但不能写治疗、降血糖、治病、药用承诺。
+
+必须保留原规格的核心信息，如数量、重量、尺码、颜色、款式、组合关系。
+不要直接复制原规格名称，要在原规格基础上做清晰、可读、有运营目的的改写。
+每个规格名称必须包含风格标记，格式为：【风格名】规格名称。
+每个规格名称控制在25-40个字符之间。
+只能使用常见中文、数字、括号、【】、-、丨。
+禁止出现"原规格"、"新规格"、"优化后"等解释性前缀。
+直接输出10个新规格名，一行一个，不要解释。"""
+
+    def _get_default_conversion_axis_prompt(self):
+        return """【转化方向标尺规则】
+当前转化方向数值：{conversion_level}，说明：{conversion_desc}。
+数值越接近+10，越要让顾客觉得这个规格最值得选，突出热销、适合、实用、推荐、放心、下单理由。
+数值在+1到+5时，只做轻度购买引导，不要过度促销。
+数值为0时，保持客观中性，只优化清晰度和卖点表达。
+数值越接近-10，越要弱化购买意愿，让顾客觉得这个规格不太适合自己，倾向选择其他规格。
+负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小、预算不匹配、适用人群窄、建议对比其他规格等表达。"""
+
+    def _get_default_price_audience_prompt(self):
+        return """【价格人群标尺规则】
+当前价格人群数值：{price_audience_level}，说明：{price_audience_desc}。
+数值越接近+10，越面向高价品质人群：不要只写甄选、精品、高品质，要说明顾客能感知到的价值依据，如口感/营养/材质/工艺/耐用/省心/礼赠/家庭场景/长期使用价值。
+高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
+数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
+数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
+无论数值如何，都不能和当前规格的真实价格相对位置冲突。"""
+
+    def _get_default_price_relation_prompt(self):
+        return """【价格相对位置规则】
+{price_relation_summary}
+所有规格当前表格价格：
+{spec_price_layout}
+如果当前规格不是当前最低价，禁止使用：最便宜、最低价、全网低价、超低价、底价、白菜价、亏本价。
+如果当前规格是最高价，应优先解释价值、品质、容量、组合、适用人群，不要伪装成低价款。
+如果当前规格是最低价，可以使用入门、实惠、低门槛、尝鲜等词，但仍不能夸大为全网最低。
+生成时必须参考所有规格价格，保证命名不会误导顾客。"""
+
+    def _format_spec_price_layout(self, specs):
+        if not specs:
+            return "暂无规格价格数据"
+        lines = []
+        for i, spec in enumerate(specs, 1):
+            price = spec.get("price")
+            price_text = f"¥{price:.2f}" if price is not None else "价格缺失"
+            lines.append(f"{i}. {spec.get('name', '')} - {price_text}")
+        return "\n".join(lines)
+
+    def _format_template(self, template, **kwargs):
+        try:
+            return template.format(**kwargs)
+        except Exception as e:
+            print(f"格式化AI提示词失败: {e}")
+            return template
+
+    def _build_strategy_prompt_parts(self, original_name, conversion_level=0, price_audience_level=0, row=None, custom_hint=""):
+        conversion_desc = self._describe_conversion_level(conversion_level)
+        price_audience_desc = self._describe_price_audience_level(price_audience_level)
+        price_relation = self._get_price_relation_info(row, original_name)
+        spec_price_layout = self._format_spec_price_layout(price_relation.get("specs", []))
+
+        base_template = self.db.get_setting("ai_spec_base_prompt", "") or self._get_default_spec_base_prompt()
+        conversion_template = self.db.get_setting("ai_spec_conversion_axis_prompt", "") or self._get_default_conversion_axis_prompt()
+        price_audience_template = self.db.get_setting("ai_spec_price_audience_prompt", "") or self._get_default_price_audience_prompt()
+        price_relation_template = self.db.get_setting("ai_spec_price_relation_prompt", "") or self._get_default_price_relation_prompt()
+
+        values = {
+            "conversion_level": f"{conversion_level:+d}",
+            "conversion_desc": conversion_desc,
+            "price_audience_level": f"{price_audience_level:+d}",
+            "price_audience_desc": price_audience_desc,
+            "price_relation_summary": price_relation.get("summary", ""),
+            "spec_price_layout": spec_price_layout,
+            "product_name": self.product_name,
+            "current_spec_name": original_name,
+            "custom_hint": custom_hint.strip() if custom_hint else "未填写本次补充提示",
+        }
+
+        return {
+            "base": self._format_template(base_template, **values),
+            "conversion": self._format_template(conversion_template, **values),
+            "price_audience": self._format_template(price_audience_template, **values),
+            "price_relation": self._format_template(price_relation_template, **values),
+            "price_relation_info": price_relation,
+        }
+
+    def _get_store_memo(self):
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            if store_rows and store_rows[0]:
+                store_id = store_rows[0][0]
+                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
+                return memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
+        except Exception as e:
+            print(f"获取店铺备注失败: {e}")
+        return ""
+
+    def _build_full_prompt_text_optimized(self, original_name, conversion_level=0, price_audience_level=0, row=None, custom_hint=""):
         """构建优化后的完整API提示词文本（仅使用一个毛利策略）"""
+        parts = self._build_strategy_prompt_parts(original_name, conversion_level, price_audience_level, row, custom_hint)
         lines = []
         lines.append("=" * 60)
         lines.append("【API调用完整提示词预览】")
@@ -2418,71 +2744,49 @@ class ProductSpecDialog(QDialog):
         lines.append(f"商品标题：{self.product_name}")
         lines.append("")
 
-        lines.append("【4. 所有规格信息】")
+        lines.append("【4. 本次补充提示】")
+        lines.append("-" * 40)
+        lines.append(custom_hint.strip() if custom_hint else "未填写本次补充提示")
+        lines.append("")
+
+        lines.append("【5. 所有规格信息】")
         lines.append("-" * 40)
         specs_layout = self._get_specs_with_margin()
         lines.append(specs_layout)
         lines.append("")
 
-        lines.append("【5. 当前优化规格】")
+        lines.append("【6. 当前优化规格】")
         lines.append("-" * 40)
         lines.append(f"正在优化：{original_name}")
         lines.append("")
 
-        margin_rate = self.get_current_margin_rate() * 100
-        if prompt_type == "high" and margin_rate >= 25:
-            setting_key = "ai_high_high_margin_prompt"
-            strategy_name = "高转化+高毛利(≥25%)"
-        elif prompt_type == "high" and margin_rate < 25:
-            setting_key = "ai_high_low_margin_prompt"
-            strategy_name = "高转化+低毛利(<25%)"
-        elif prompt_type == "low" and margin_rate >= 25:
-            setting_key = "ai_low_high_margin_prompt"
-            strategy_name = "低转化+高毛利(≥25%)"
-        else:
-            setting_key = "ai_low_low_margin_prompt"
-            strategy_name = "低转化+低毛利(<25%)"
-
-        margin_strategy = self.db.get_setting(setting_key, "")
-
-        lines.append(f"【6. 毛利策略：{strategy_name}】")
+        lines.append("【7. 基础生成规则】")
         lines.append("-" * 40)
-        lines.append(margin_strategy.strip())
+        lines.append(parts["base"].strip())
         lines.append("")
 
-        lines.append("【7. 店铺运营大纲】")
+        lines.append(f"【8. 转化方向标尺：{conversion_level:+d} {self._describe_conversion_level(conversion_level)}】")
         lines.append("-" * 40)
-        store_memo = ""
-        try:
-            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
-            if store_rows and store_rows[0]:
-                store_id = store_rows[0][0]
-                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
-                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
-        except Exception:
-            pass
+        lines.append(parts["conversion"].strip())
+        lines.append("")
+
+        lines.append(f"【9. 价格人群标尺：{price_audience_level:+d} {self._describe_price_audience_level(price_audience_level)}】")
+        lines.append("-" * 40)
+        lines.append(parts["price_audience"].strip())
+        lines.append("")
+
+        lines.append("【10. 价格相对位置规则】")
+        lines.append("-" * 40)
+        lines.append(parts["price_relation"].strip())
+        lines.append("")
+
+        lines.append("【11. 店铺运营大纲】")
+        lines.append("-" * 40)
+        store_memo = self._get_store_memo()
         if store_memo:
             lines.append(store_memo)
         else:
             lines.append("（未设置店铺运营大纲）")
-        lines.append("")
-
-        if prompt_type == "high":
-            lines.append("【8. 高转化规格优化提示词】")
-            lines.append("-" * 40)
-            spec_prompt = self.db.get_setting("ai_spec_high_prompt", "")
-            if spec_prompt:
-                lines.append(spec_prompt)
-            else:
-                lines.append("（使用默认高转化提示词）")
-        else:
-            lines.append("【8. 低转化规格优化提示词】")
-            lines.append("-" * 40)
-            spec_prompt = self.db.get_setting("ai_spec_low_prompt", "")
-            if spec_prompt:
-                lines.append(spec_prompt)
-            else:
-                lines.append("（使用默认低转化提示词）")
 
         lines.append("")
         lines.append("=" * 60)
@@ -2494,22 +2798,14 @@ class ProductSpecDialog(QDialog):
 
         return "\n".join(lines)
 
-    def _do_ai_optimize(self, row, original_name, prompt_type):
+    def _do_ai_optimize(self, row, original_name, conversion_level=0, price_audience_level=0, custom_hint=""):
         """执行AI优化"""
         api_key = self.db.get_setting("ai_api_key", "")
         if not api_key:
             QMessageBox.warning(self, "⚠️ 提示", "请先在API配置中设置API Key！")
             return
 
-        store_memo = ""
-        try:
-            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
-            if store_rows and store_rows[0]:
-                store_id = store_rows[0][0]
-                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
-                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
-        except Exception as e:
-            print(f"获取店铺备注失败: {e}")
+        store_memo = self._get_store_memo()
 
         forbidden_words = self.db.get_setting("ai_spec_forbidden_words", "")
         forbidden_rule = ""
@@ -2524,7 +2820,15 @@ class ProductSpecDialog(QDialog):
 """
 
         product_attr_prompt = self._build_product_attr_prompt(original_name)
-        product_info = self._build_product_info_prompt(original_name)
+        strategy_parts = self._build_strategy_prompt_parts(original_name, conversion_level, price_audience_level, row, custom_hint)
+
+        custom_hint_prompt = ""
+        if custom_hint and custom_hint.strip():
+            custom_hint_prompt = f"""【本次补充提示 - 高优先级】
+{custom_hint.strip()}
+请把这条补充提示作为本次命名的重要上下文，但仍要遵守价格相对位置、违禁词和合规边界。
+
+"""
 
         priority_prompt = ""
         if store_memo:
@@ -2533,38 +2837,16 @@ class ProductSpecDialog(QDialog):
 
 """
 
-        margin_rate = self.get_current_margin_rate() * 100
-        if prompt_type == "high" and margin_rate >= 25:
-            setting_key = "ai_high_high_margin_prompt"
-            strategy_name = "高转化+高毛利(≥25%)"
-        elif prompt_type == "high" and margin_rate < 25:
-            setting_key = "ai_high_low_margin_prompt"
-            strategy_name = "高转化+低毛利(<25%)"
-        elif prompt_type == "low" and margin_rate >= 25:
-            setting_key = "ai_low_high_margin_prompt"
-            strategy_name = "低转化+高毛利(≥25%)"
-        else:
-            setting_key = "ai_low_low_margin_prompt"
-            strategy_name = "低转化+低毛利(<25%)"
-
-        margin_strategy = self.db.get_setting(setting_key, "")
-
-        output_format = """【输出格式要求】
-必须生成10个不同的规格名称。
-每个规格名称必须有明显差异（使用不同的风格、卖点、词汇组合）。
-每个规格名称必须包含风格标记，格式为：【风格名】，例如：【热销爆款】、【限时优惠】、【性价比之王】、【品质保障】、【新品首发】等。
-每个规格名称的总字数（包括风格标记）必须达到40个字符左右。
-保留原规格的核心词（如数量、尺码、款式等），并在基础上扩展描述。
-直接输出10个新规格名，一行一个，不要解释。
-
-"""
-
-        if prompt_type == "high":
-            spec_prompt = self.db.get_setting("ai_spec_high_prompt", "")
-            prompt_text = forbidden_rule + product_attr_prompt + margin_strategy + priority_prompt + output_format + spec_prompt
-        else:
-            spec_prompt = self.db.get_setting("ai_spec_low_prompt", "")
-            prompt_text = forbidden_rule + product_attr_prompt + margin_strategy + priority_prompt + output_format + spec_prompt
+        prompt_text = (
+            forbidden_rule
+            + product_attr_prompt
+            + custom_hint_prompt
+            + priority_prompt
+            + strategy_parts["base"] + "\n\n"
+            + strategy_parts["conversion"] + "\n\n"
+            + strategy_parts["price_audience"] + "\n\n"
+            + strategy_parts["price_relation"] + "\n\n"
+        )
 
         user_prompt = f"商品标题：{self.product_name}\n\n原规格名称：{original_name}"
         
@@ -2602,7 +2884,7 @@ class ProductSpecDialog(QDialog):
                 result = response.json()
                 ai_response = result["choices"][0]["message"]["content"].strip()
                 
-                self.show_ai_result_dialog(row, original_name, ai_response, prompt_type)
+                self.show_ai_result_dialog(row, original_name, ai_response, conversion_level, price_audience_level, custom_hint)
             else:
                 QMessageBox.warning(self, "❌ 错误", f"API调用失败：{response.status_code}")
                 
@@ -2610,7 +2892,7 @@ class ProductSpecDialog(QDialog):
             progress.close()
             QMessageBox.warning(self, "❌ 错误", f"发生错误：{str(e)}")
     
-    def show_ai_result_dialog(self, row, original_name, optimized_name, prompt_type="high"):
+    def show_ai_result_dialog(self, row, original_name, optimized_name, conversion_level=0, price_audience_level=0, custom_hint=""):
         """显示AI优化结果对话框（10条选项供选择）"""
         options = self._parse_ai_options(optimized_name)
         options = self._filter_forbidden_words(options)
@@ -2621,7 +2903,9 @@ class ProductSpecDialog(QDialog):
 
         self._current_row = row
         self._current_original_name = original_name
-        self._current_prompt_type = prompt_type
+        self._current_conversion_level = conversion_level
+        self._current_price_audience_level = price_audience_level
+        self._current_custom_hint = custom_hint
 
         dialog = QDialog(self)
         dialog.setWindowTitle("🤖 AI优化结果（选择1个）")
@@ -2629,10 +2913,14 @@ class ProductSpecDialog(QDialog):
         dialog.setMinimumHeight(600)
         layout = QVBoxLayout(dialog)
 
-        mode_text = "🎯 高转化" if prompt_type == "high" else "⚠️ 低转化"
+        mode_text = f"转化 {conversion_level:+d}（{self._describe_conversion_level(conversion_level)}）｜价格人群 {price_audience_level:+d}（{self._describe_price_audience_level(price_audience_level)}）"
         header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel(f"当前模式：{mode_text}"))
+        header_layout.addWidget(QLabel(f"当前策略：{mode_text}"))
         header_layout.addWidget(QLabel(f"原规格名称：{original_name}"))
+        if custom_hint and custom_hint.strip():
+            hint_result_label = QLabel(f"本次补充：{custom_hint.strip()}")
+            hint_result_label.setWordWrap(True)
+            header_layout.addWidget(hint_result_label)
         header_layout.addStretch()
         layout.addLayout(header_layout)
 
@@ -2768,8 +3056,10 @@ class ProductSpecDialog(QDialog):
         """)
         
         def refresh_result():
-            prompt_type = getattr(self, '_current_prompt_type', 'high')
-            self._do_ai_optimize(self._current_row, self._current_original_name, prompt_type)
+            conversion_level = getattr(self, '_current_conversion_level', 0)
+            price_audience_level = getattr(self, '_current_price_audience_level', 0)
+            custom_hint = getattr(self, '_current_custom_hint', "")
+            self._do_ai_optimize(self._current_row, self._current_original_name, conversion_level, price_audience_level, custom_hint)
             dialog.accept()
         
         btn_refresh.clicked.connect(refresh_result)
@@ -2896,10 +3186,27 @@ class ProductSpecDialog(QDialog):
 
     def _get_specs_with_margin(self):
         """获取所有规格的布局信息（名称、毛利率、价格）"""
-        rows = self.db.safe_fetchall(
-            "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
-            (self.product_id,)
-        )
+        rows = []
+        if hasattr(self, "table"):
+            for r in range(self.table.rowCount()):
+                name_item = self.table.item(r, self.COL_SPEC_NAME)
+                code_item = self.table.item(r, self.COL_SPEC_CODE)
+                price_item = self.table.item(r, self.COL_SALE_PRICE)
+                if not name_item or not name_item.text().strip():
+                    continue
+                price_val = None
+                if price_item:
+                    try:
+                        price_text = price_item.text().strip().replace("¥", "").replace(",", "")
+                        price_val = float(price_text) if price_text else None
+                    except (ValueError, TypeError):
+                        price_val = None
+                rows.append((name_item.text().strip(), code_item.text().strip() if code_item else "", price_val))
+        if not rows:
+            rows = self.db.safe_fetchall(
+                "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
+                (self.product_id,)
+            )
         if not rows:
             return "暂无规格数据"
 
@@ -2971,76 +3278,7 @@ class ProductSpecDialog(QDialog):
         )
         return res[0][0] if res and res[0][0] else None
 
-    def _get_margin_strategy_prompt(self, prompt_type):
-        """根据高/低转化类型和毛利率获取策略提示词"""
-        margin_rate = self.get_current_margin_rate() * 100
-
-        if prompt_type == "high":
-            if margin_rate >= 25:
-                prompt = self.db.get_setting("ai_high_high_margin_prompt", "")
-                if not prompt:
-                    prompt = """【毛利策略：高转化 + 高毛利(≥25%)
-
-当前产品毛利率较高，选择高转化模式。
-
-【核心策略】
-1. 以产品质量、功能、耐用性为卖点
-2. 强调品质上乘、经久耐用
-3. 突出产品的核心功能和独特卖点
-4. 暗示使用寿命长、性价比高（单位使用成本低）
-5. 适合追求品质的顾客群体
-
-请结合产品本身的特点和功能，生成能体现产品价值的规格名称。"""
-            else:
-                prompt = self.db.get_setting("ai_high_low_margin_prompt", "")
-                if not prompt:
-                    prompt = """【毛利策略：高转化 + 低毛利(<25%)
-
-当前产品毛利率较低，选择高转化模式。
-
-【核心策略】
-1. 以低价优势、实惠、性价比为卖点
-2. 强调价格优惠、促销力度大
-3. 制造紧迫感，促进快速下单
-4. 暗示赠品多、套餐划算
-5. 适合价格敏感的顾客群体
-
-请结合产品的价格优势，生成能促进快速下单的规格名称。"""
-        else:
-            if margin_rate >= 25:
-                prompt = self.db.get_setting("ai_low_high_margin_prompt", "")
-                if not prompt:
-                    prompt = """【毛利策略：低转化 + 高毛利(≥25%)
-
-当前产品毛利率较高，选择低转化模式。
-目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
-
-【核心策略】
-1. 强调价格偏高、不实惠
-2. 暗示性价比低、不值得
-3. 突出产品可能存在的缺点或局限
-4. 让顾客觉得"买这个不划算"
-
-请生成让顾客觉得"不适合我"的规格名称。"""
-            else:
-                prompt = self.db.get_setting("ai_low_low_margin_prompt", "")
-                if not prompt:
-                    prompt = """【毛利策略：低转化 + 低毛利(<25%)
-
-当前产品毛利率较低，选择低转化模式。
-目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
-
-【核心策略】
-1. 强调价格看似便宜但实际不优惠
-2. 暗示"便宜没好货"
-3. 突出产品可能偷工减料或质量一般
-4. 让顾客觉得"买这个不明智"
-
-请生成让顾客觉得"不适合我"的规格名称。"""
-
-        return prompt + "\n\n"
-    
-    def _show_prompt_detail_dialog(self, parent_dialog, prompt_type, strategy_name, margin_rate):
+    def _show_prompt_detail_dialog(self, parent_dialog, conversion_level=0, price_audience_level=0, price_relation=None, original_name="", row=None, custom_hint=""):
         dialog = QDialog(parent_dialog)
         dialog.setWindowTitle("📋 当前调用的提示词详情")
         dialog.resize(700, 600)
@@ -3056,28 +3294,22 @@ class ProductSpecDialog(QDialog):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setSpacing(10)
 
+        parts = self._build_strategy_prompt_parts(original_name, conversion_level, price_audience_level, row, custom_hint)
+        if price_relation is None:
+            price_relation = parts.get("price_relation_info", {})
+
         prompt_items = [
-            ("🚫 违禁词过滤", "ai_spec_forbidden_words", True),
+            ("🚫 违禁词过滤", "ai_spec_forbidden_words", False),
             ("🛒 产品信息", "ai_product_info_prompt", False),
             ("📦 商品属性提示词", "ai_spec_attr_prompt", False),
-            ("🎯 高转化提示词" if prompt_type == "high" else "⚠️ 低转化提示词",
-             "ai_spec_high_prompt" if prompt_type == "high" else "ai_spec_low_prompt", False),
-            ("💰 毛利策略: " + strategy_name,
-             "ai_high_high_margin_prompt" if prompt_type == "high" and margin_rate >= 25 else
-             "ai_high_low_margin_prompt" if prompt_type == "high" and margin_rate < 25 else
-             "ai_low_high_margin_prompt" if prompt_type == "low" and margin_rate >= 25 else
-             "ai_low_low_margin_prompt", False),
+            ("📝 本次补充提示", custom_hint.strip() if custom_hint else "未填写本次补充提示", True),
+            ("🧩 基础生成规则", parts["base"], True),
+            (f"🎯 转化方向：{conversion_level:+d} {self._describe_conversion_level(conversion_level)}", parts["conversion"], True),
+            (f"👥 价格人群：{price_audience_level:+d} {self._describe_price_audience_level(price_audience_level)}", parts["price_audience"], True),
+            (f"💰 价格相对位置：{price_relation.get('summary', '')}", parts["price_relation"], True),
         ]
 
-        store_memo = ""
-        try:
-            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
-            if store_rows and store_rows[0]:
-                store_id = store_rows[0][0]
-                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
-                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
-        except Exception:
-            pass
+        store_memo = self._get_store_memo()
 
         if store_memo:
             prompt_items.append(("📋 店铺运营大纲", store_memo, True))
@@ -3192,13 +3424,11 @@ class ProductSpecDialog(QDialog):
         prompt_items = [
             ("🛒 产品信息（用户上传）", "ai_product_info_prompt", "产品提示词配置 → 产品信息标签页"),
             ("📦 商品属性提示词", "ai_spec_attr_prompt", "规格优化提示词配置 → 商品属性标签页"),
-            ("🎯 高转化提示词", "ai_spec_high_prompt", "规格优化提示词配置 → 高转化标签页"),
-            ("⚠️ 低转化提示词", "ai_spec_low_prompt", "规格优化提示词配置 → 低转化标签页"),
+            ("🧩 基础生成规则", "ai_spec_base_prompt", "规格优化提示词配置 → 基础生成规则标签页"),
+            ("🎯 转化标尺规则", "ai_spec_conversion_axis_prompt", "规格优化提示词配置 → 转化标尺规则标签页"),
             ("🚫 违禁词过滤", "ai_spec_forbidden_words", "规格优化提示词配置 → 违禁词设置按钮"),
-            ("💰 高转化+高毛利策略", "ai_high_high_margin_prompt", "产品提示词配置 → 高转化+高毛利标签页"),
-            ("💰 高转化+低毛利策略", "ai_high_low_margin_prompt", "产品提示词配置 → 高转化+低毛利标签页"),
-            ("💰 低转化+高毛利策略", "ai_low_high_margin_prompt", "产品提示词配置 → 低转化+高毛利标签页"),
-            ("💰 低转化+低毛利策略", "ai_low_low_margin_prompt", "产品提示词配置 → 低转化+低毛利标签页"),
+            ("👥 价格人群规则", "ai_spec_price_audience_prompt", "产品提示词配置 → 价格人群规则标签页"),
+            ("💰 价格相对位置规则", "ai_spec_price_relation_prompt", "产品提示词配置 → 价格相对位置规则标签页"),
         ]
 
         for title, setting_key, location in prompt_items:
@@ -3265,13 +3495,7 @@ class ProductSpecDialog(QDialog):
         dialog.exec_()
 
     def _open_prompt_editor(self, setting_key):
-        if setting_key == "ai_spec_attr_prompt":
-            dialog = SpecPromptEditorDialog(self.db, self)
-            dialog.exec_()
-        elif setting_key == "ai_spec_high_prompt":
-            dialog = SpecPromptEditorDialog(self.db, self)
-            dialog.exec_()
-        elif setting_key == "ai_spec_low_prompt":
+        if setting_key in ("ai_spec_attr_prompt", "ai_spec_base_prompt", "ai_spec_conversion_axis_prompt"):
             dialog = SpecPromptEditorDialog(self.db, self)
             dialog.exec_()
         elif setting_key == "ai_spec_forbidden_words":

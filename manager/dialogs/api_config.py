@@ -1055,28 +1055,33 @@ class SpecPromptEditorDialog(QDialog):
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
         layout.addWidget(header)
 
-        info = QLabel("💡 配置AI优化商品规格名称的提示词。用户可选择「高转化」或「低转化」模式。")
+        info = QLabel("💡 配置AI优化商品规格名称的提示词。运行时会根据「转化方向」和「价格人群」标尺动态拼装。")
         info.setStyleSheet("color: #6c757d; font-size: 12px; padding: 5px;")
         layout.addWidget(info)
 
         tab_widget = QTabWidget()
-        self.high_tab = QWidget()
-        self.low_tab = QWidget()
+        self.base_tab = QWidget()
+        self.conversion_tab = QWidget()
         self.attr_tab = QWidget()
-        tab_widget.addTab(self.high_tab, "🎯 高转化提示词")
-        tab_widget.addTab(self.low_tab, "⚠️ 低转化提示词")
+        tab_widget.addTab(self.base_tab, "🧩 基础生成规则")
+        tab_widget.addTab(self.conversion_tab, "🎯 转化标尺规则")
         tab_widget.addTab(self.attr_tab, "📦 商品属性提示词")
         layout.addWidget(tab_widget)
 
-        self.high_layout = QVBoxLayout(self.high_tab)
-        high_label = QLabel("【SKU规格名称生成提示词模板 - 高转化优化版】")
-        high_label.setStyleSheet("font-weight: bold; color: #27ae60;")
-        self.high_layout.addWidget(high_label)
+        self.base_layout = QVBoxLayout(self.base_tab)
+        base_label = QLabel("【SKU规格名称生成提示词模板 - 基础生成规则】")
+        base_label.setStyleSheet("font-weight: bold; color: #16a085;")
+        self.base_layout.addWidget(base_label)
 
-        self.high_prompt_text = QTextEdit()
-        self.high_prompt_text.setPlaceholderText("请输入高转化提示词...")
-        self.high_prompt_text.setMinimumHeight(250)
-        self.high_prompt_text.setStyleSheet("""
+        base_desc = QLabel("💡 可使用变量：{product_name}、{current_spec_name}、{custom_hint}")
+        base_desc.setStyleSheet("color: #6c757d; font-size: 11px;")
+        base_desc.setWordWrap(True)
+        self.base_layout.addWidget(base_desc)
+
+        self.base_prompt_text = QTextEdit()
+        self.base_prompt_text.setPlaceholderText("请输入基础生成规则...")
+        self.base_prompt_text.setMinimumHeight(250)
+        self.base_prompt_text.setStyleSheet("""
             QTextEdit {
                 background-color: #fff;
                 border: 1px solid #dee2e6;
@@ -1086,17 +1091,22 @@ class SpecPromptEditorDialog(QDialog):
                 font-family: Consolas, monospace;
             }
         """)
-        self.high_layout.addWidget(self.high_prompt_text)
+        self.base_layout.addWidget(self.base_prompt_text)
 
-        self.low_layout = QVBoxLayout(self.low_tab)
-        low_label = QLabel("【SKU规格名称生成提示词模板 - 低转化优化版】")
-        low_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
-        self.low_layout.addWidget(low_label)
+        self.conversion_layout = QVBoxLayout(self.conversion_tab)
+        conversion_label = QLabel("【SKU规格名称生成提示词模板 - 转化标尺规则】")
+        conversion_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        self.conversion_layout.addWidget(conversion_label)
 
-        self.low_prompt_text = QTextEdit()
-        self.low_prompt_text.setPlaceholderText("请输入低转化提示词...")
-        self.low_prompt_text.setMinimumHeight(250)
-        self.low_prompt_text.setStyleSheet("""
+        conversion_desc = QLabel("💡 可使用变量：{conversion_level}、{conversion_desc}、{product_name}、{current_spec_name}、{custom_hint}")
+        conversion_desc.setStyleSheet("color: #6c757d; font-size: 11px;")
+        conversion_desc.setWordWrap(True)
+        self.conversion_layout.addWidget(conversion_desc)
+
+        self.conversion_prompt_text = QTextEdit()
+        self.conversion_prompt_text.setPlaceholderText("请输入转化标尺规则...")
+        self.conversion_prompt_text.setMinimumHeight(250)
+        self.conversion_prompt_text.setStyleSheet("""
             QTextEdit {
                 background-color: #fff;
                 border: 1px solid #dee2e6;
@@ -1106,7 +1116,7 @@ class SpecPromptEditorDialog(QDialog):
                 font-family: Consolas, monospace;
             }
         """)
-        self.low_layout.addWidget(self.low_prompt_text)
+        self.conversion_layout.addWidget(self.conversion_prompt_text)
 
         self.attr_layout = QVBoxLayout(self.attr_tab)
         attr_label = QLabel("【商品属性提示词 - 附加信息】")
@@ -1164,13 +1174,13 @@ class SpecPromptEditorDialog(QDialog):
 
         btn_layout = QHBoxLayout()
 
-        self.btn_reset_high = QPushButton("🔄 恢复高转化默认")
-        self.btn_reset_high.clicked.connect(lambda: self.reset_prompt("high"))
-        btn_layout.addWidget(self.btn_reset_high)
+        self.btn_reset_base = QPushButton("🔄 恢复基础默认")
+        self.btn_reset_base.clicked.connect(lambda: self.reset_prompt("base"))
+        btn_layout.addWidget(self.btn_reset_base)
 
-        self.btn_reset_low = QPushButton("🔄 恢复低转化默认")
-        self.btn_reset_low.clicked.connect(lambda: self.reset_prompt("low"))
-        btn_layout.addWidget(self.btn_reset_low)
+        self.btn_reset_conversion = QPushButton("🔄 恢复转化默认")
+        self.btn_reset_conversion.clicked.connect(lambda: self.reset_prompt("conversion"))
+        btn_layout.addWidget(self.btn_reset_conversion)
 
         self.btn_reset_attr = QPushButton("🔄 恢复属性默认")
         self.btn_reset_attr.clicked.connect(lambda: self.reset_prompt("attr"))
@@ -1200,54 +1210,24 @@ class SpecPromptEditorDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-    def get_default_high_prompt(self):
-        return """你是一个电商SKU命名专家，擅长通过规格名称提升顾客购买意愿。请根据用户输入的原规格名称，生成10个不同风格的新规格名称。
+    def get_default_base_prompt(self):
+        return """【基础生成规则】
+你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
 
-【核心逻辑】
-不是让顾客"快买"，而是让顾客觉得"这个选项最划算最适合我"：
-强调性价比高、量大实惠
-突出热销、多人选择
-暗示赠品多、套餐划算
-制造紧迫感（限时、限量）
-让顾客主动认为"买这个最聪明"
+【内部发散步骤】（只在心里完成，不要输出分析过程）
+1. 先根据商品标题、产品信息、本次补充提示判断商品大类，不要写死某一个品类。
+2. 针对不同品类提取可感知价值：食品看口感、产地、营养成分、食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
+3. 从天然属性、营养/材质/工艺、消费场景、目标人群、规格差异、购买理由中发散命名。
+4. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
+5. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
 
-【重要 - 避免重复原规格】
-不要直接把原规格名称复制出来！
-要在原规格基础上进行创意改编，让每个规格名称都新颖独特
-禁止出现"原规格：xxx"、"原规格名称"、"新规格1："等前缀
-每个规格必须是完整的、独立的名称
-不要出现"原规格"三个字
+【合规边界】
+可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
+食品类可以表达营养、口感、日常滋补、早餐/煲汤/家庭餐等场景，但不能写治疗、降血糖、治病、药用承诺。
 
-【风格要求 - 10个规格必须包含以下风格】
-1. 热销爆款风格（强调多人购买、销量）
-2. 限时优惠风格（强调特价、限时）
-3. 赠品福利风格（强调送赠品、送礼品）
-4. 性价比之王风格（强调便宜、划算）
-5. 品质保障风格（强调质量、正品）
-6. 新品首发风格（强调新品、首发）
-7. 实用推荐风格（强调实用、推荐）
-8. 环保健康风格（强调安全、环保）
-9. 明星同款风格（强调潮流、时尚）
-10. 回头客风格（强调回购、老客）
-
-【要求】
-只能用括号：（）、【】、-、丨
-每个规格字数控制在25-35字之间
-10个规格的风格必须各不相同，不能雷同
-保留原规格的核心词（如数量、尺码、款式等）
-从消费者视角出发，让他们自己觉得"这个值"
-禁止使用"·"符号
-直接输出10个新规格名，一行一个，不要解释"""
-
-    def get_default_low_prompt(self):
-        return """你是一个电商SKU命名专家，擅长通过规格名称降低顾客购买意愿。请根据用户输入的原规格名称，生成10个不同风格的新规格名称，让顾客觉得"这个不适合我"。
-
-【核心逻辑】
-不是让顾客"别买"，而是让顾客觉得"这个选项不适合我"：
-强调数量少、规格小、性价比低
-暗示产品有瑕疵或风险
-突出使用周期短、不够用
-让顾客主动选择其他更划算的规格
+必须保留原规格的核心信息，如数量、重量、尺码、颜色、款式、组合关系。
+不要直接复制原规格名称，要在原规格基础上做清晰、可读、有运营目的的改写。
+每个规格名称必须包含风格标记，格式为：【风格名】规格名称。
 
 【重要 - 避免重复原规格】
 不要直接把原规格名称复制出来！
@@ -1256,26 +1236,22 @@ class SpecPromptEditorDialog(QDialog):
 每个规格必须是完整的、独立的名称
 不要出现"原规格"三个字
 
-【风格要求 - 10个规格必须包含以下风格】
-1. 容量太小风格（强调量少、不够用）
-2. 性价比低风格（强调贵、不划算）
-3. 限时缺货风格（暗示可能缺货、要等）
-4. 质量问题风格（暗示可能有瑕疵）
-5. 适用范围窄风格（强调只适合特定人群）
-6. 赠品少风格（强调没有赠品、不值得）
-7. 寿命短风格（强调用不久、不耐用）
-8. 回头率低风格（暗示买过的人不再买）
-9. 替代品风格（暗示有更好的选择）
-10. 谨慎购买风格（暗示要仔细考虑）
-
 【要求】
 只能用括号：（）、【】、-、丨
-每个规格字数控制在25-35字之间
+每个规格字数控制在25-40字之间
 10个规格的风格必须各不相同，不能雷同
 保留原规格的核心词（如数量、尺码、款式等）
-从消费者视角出发，让他们自己觉得"这个不合适"
 禁止使用"·"符号
 直接输出10个新规格名，一行一个，不要解释"""
+
+    def get_default_conversion_prompt(self):
+        return """【转化方向标尺规则】
+当前转化方向数值：{conversion_level}，说明：{conversion_desc}。
+数值越接近+10，越要让顾客觉得这个规格最值得选，突出热销、适合、实用、推荐、放心、下单理由。
+数值在+1到+5时，只做轻度购买引导，不要过度促销。
+数值为0时，保持客观中性，只优化清晰度和卖点表达。
+数值越接近-10，越要弱化购买意愿，让顾客觉得这个规格不太适合自己，倾向选择其他规格。
+负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小、预算不匹配、适用人群窄、建议对比其他规格等表达。"""
 
     def get_default_attr_prompt(self):
         return """【商品属性信息】
@@ -1293,19 +1269,19 @@ class SpecPromptEditorDialog(QDialog):
 请结合以上商品属性和规格信息，生成最适合该规格的优化名称。"""
 
     def load_prompts(self):
-        high_prompt = self.db.get_setting("ai_spec_high_prompt", "")
-        low_prompt = self.db.get_setting("ai_spec_low_prompt", "")
+        base_prompt = self.db.get_setting("ai_spec_base_prompt", "")
+        conversion_prompt = self.db.get_setting("ai_spec_conversion_axis_prompt", "")
         attr_prompt = self.db.get_setting("ai_spec_attr_prompt", "")
 
-        if high_prompt:
-            self.high_prompt_text.setPlainText(high_prompt)
+        if base_prompt:
+            self.base_prompt_text.setPlainText(base_prompt)
         else:
-            self.high_prompt_text.setPlainText(self.get_default_high_prompt())
+            self.base_prompt_text.setPlainText(self.get_default_base_prompt())
 
-        if low_prompt:
-            self.low_prompt_text.setPlainText(low_prompt)
+        if conversion_prompt:
+            self.conversion_prompt_text.setPlainText(conversion_prompt)
         else:
-            self.low_prompt_text.setPlainText(self.get_default_low_prompt())
+            self.conversion_prompt_text.setPlainText(self.get_default_conversion_prompt())
 
         if attr_prompt:
             self.attr_prompt_text.setPlainText(attr_prompt)
@@ -1323,33 +1299,33 @@ class SpecPromptEditorDialog(QDialog):
             self.forbidden_count_label.setText("（未设置违禁词）")
 
     def reset_prompt(self, prompt_type):
-        if prompt_type == "high":
-            reply = QMessageBox.question(self, "确认", "确定要恢复高转化提示词为默认吗？", QMessageBox.Yes | QMessageBox.No)
+        if prompt_type == "base":
+            reply = QMessageBox.question(self, "确认", "确定要恢复基础生成规则为默认吗？", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.high_prompt_text.setPlainText(self.get_default_high_prompt())
-        elif prompt_type == "low":
-            reply = QMessageBox.question(self, "确认", "确定要恢复低转化提示词为默认吗？", QMessageBox.Yes | QMessageBox.No)
+                self.base_prompt_text.setPlainText(self.get_default_base_prompt())
+        elif prompt_type == "conversion":
+            reply = QMessageBox.question(self, "确认", "确定要恢复转化标尺规则为默认吗？", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.low_prompt_text.setPlainText(self.get_default_low_prompt())
+                self.conversion_prompt_text.setPlainText(self.get_default_conversion_prompt())
         elif prompt_type == "attr":
             reply = QMessageBox.question(self, "确认", "确定要恢复商品属性提示词为默认吗？", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.attr_prompt_text.setPlainText(self.get_default_attr_prompt())
 
     def save_prompts(self):
-        high_prompt = self.high_prompt_text.toPlainText().strip()
-        low_prompt = self.low_prompt_text.toPlainText().strip()
+        base_prompt = self.base_prompt_text.toPlainText().strip()
+        conversion_prompt = self.conversion_prompt_text.toPlainText().strip()
         attr_prompt = self.attr_prompt_text.toPlainText().strip()
 
-        if not high_prompt:
-            QMessageBox.warning(self, "⚠️ 警告", "高转化提示词不能为空！")
+        if not base_prompt:
+            QMessageBox.warning(self, "⚠️ 警告", "基础生成规则不能为空！")
             return
-        if not low_prompt:
-            QMessageBox.warning(self, "⚠️ 警告", "低转化提示词不能为空！")
+        if not conversion_prompt:
+            QMessageBox.warning(self, "⚠️ 警告", "转化标尺规则不能为空！")
             return
 
-        self.db.set_setting("ai_spec_high_prompt", high_prompt)
-        self.db.set_setting("ai_spec_low_prompt", low_prompt)
+        self.db.set_setting("ai_spec_base_prompt", base_prompt)
+        self.db.set_setting("ai_spec_conversion_axis_prompt", conversion_prompt)
         self.db.set_setting("ai_spec_attr_prompt", attr_prompt)
 
         QMessageBox.information(self, "✅ 成功", "规格优化提示词已保存！\n\n下次AI优化规格名称时将使用新的提示词。")
@@ -1497,7 +1473,7 @@ class ProductPromptEditorDialog(QDialog):
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50; padding: 10px;")
         layout.addWidget(header)
 
-        info = QLabel("💡 配置AI生成规格名称时使用的产品提示词。产品信息由用户手动上传，毛利策略根据转化类型和毛利率自动选择。")
+        info = QLabel("💡 配置AI生成规格名称时使用的产品提示词。价格人群和价格相对位置会根据标尺与当前表格价格动态生成。")
         info.setStyleSheet("color: #6c757d; font-size: 12px; padding: 5px;")
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1505,24 +1481,18 @@ class ProductPromptEditorDialog(QDialog):
         tab_widget = QTabWidget()
 
         self.product_info_tab = QWidget()
-        self.high_high_margin_tab = QWidget()
-        self.high_low_margin_tab = QWidget()
-        self.low_high_margin_tab = QWidget()
-        self.low_low_margin_tab = QWidget()
+        self.price_audience_tab = QWidget()
+        self.price_relation_tab = QWidget()
 
         tab_widget.addTab(self.product_info_tab, "📦 产品信息（用户上传）")
-        tab_widget.addTab(self.high_high_margin_tab, "🎯高转化+💰高毛利")
-        tab_widget.addTab(self.high_low_margin_tab, "🎯高转化+💰低毛利")
-        tab_widget.addTab(self.low_high_margin_tab, "⚠️低转化+💰高毛利")
-        tab_widget.addTab(self.low_low_margin_tab, "⚠️低转化+💰低毛利")
+        tab_widget.addTab(self.price_audience_tab, "👥 价格人群规则")
+        tab_widget.addTab(self.price_relation_tab, "💰 价格相对位置规则")
 
         layout.addWidget(tab_widget)
 
         self.init_product_info_tab()
-        self.init_high_high_margin_tab()
-        self.init_high_low_margin_tab()
-        self.init_low_high_margin_tab()
-        self.init_low_low_margin_tab()
+        self.init_price_audience_tab()
+        self.init_price_relation_tab()
 
         btn_layout = QHBoxLayout()
 
@@ -1580,21 +1550,21 @@ class ProductPromptEditorDialog(QDialog):
         """)
         layout.addWidget(self.product_info_text)
 
-    def init_high_high_margin_tab(self):
-        layout = QVBoxLayout(self.high_high_margin_tab)
+    def init_price_audience_tab(self):
+        layout = QVBoxLayout(self.price_audience_tab)
 
-        label = QLabel("【高转化 + 高毛利(≥25%)】")
-        label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        label = QLabel("【价格人群标尺规则】")
+        label.setStyleSheet("font-weight: bold; color: #2980b9;")
         layout.addWidget(label)
 
-        desc = QLabel("💡 高转化 + 高毛利时，以产品质量、功能、耐用性为卖点。让顾客觉得买这个最值。")
+        desc = QLabel("💡 可使用变量：{price_audience_level}、{price_audience_desc}、{product_name}、{current_spec_name}、{custom_hint}")
         desc.setStyleSheet("color: #6c757d; font-size: 11px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        self.high_high_prompt_text = QTextEdit()
-        self.high_high_prompt_text.setMinimumHeight(350)
-        self.high_high_prompt_text.setStyleSheet("""
+        self.price_audience_prompt_text = QTextEdit()
+        self.price_audience_prompt_text.setMinimumHeight(350)
+        self.price_audience_prompt_text.setStyleSheet("""
             QTextEdit {
                 background-color: #fff;
                 border: 1px solid #dee2e6;
@@ -1604,23 +1574,23 @@ class ProductPromptEditorDialog(QDialog):
                 font-family: Consolas, monospace;
             }
         """)
-        layout.addWidget(self.high_high_prompt_text)
+        layout.addWidget(self.price_audience_prompt_text)
 
-    def init_high_low_margin_tab(self):
-        layout = QVBoxLayout(self.high_low_margin_tab)
+    def init_price_relation_tab(self):
+        layout = QVBoxLayout(self.price_relation_tab)
 
-        label = QLabel("【高转化 + 低毛利(<25%)】")
+        label = QLabel("【价格相对位置规则】")
         label.setStyleSheet("font-weight: bold; color: #e67e22;")
         layout.addWidget(label)
 
-        desc = QLabel("💡 高转化 + 低毛利时，以低价优势、实惠、性价比为卖点。让顾客觉得买这个最划算。")
+        desc = QLabel("💡 可使用变量：{price_relation_summary}、{spec_price_layout}、{product_name}、{current_spec_name}")
         desc.setStyleSheet("color: #6c757d; font-size: 11px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        self.high_low_prompt_text = QTextEdit()
-        self.high_low_prompt_text.setMinimumHeight(350)
-        self.high_low_prompt_text.setStyleSheet("""
+        self.price_relation_prompt_text = QTextEdit()
+        self.price_relation_prompt_text.setMinimumHeight(350)
+        self.price_relation_prompt_text.setStyleSheet("""
             QTextEdit {
                 background-color: #fff;
                 border: 1px solid #dee2e6;
@@ -1630,157 +1600,58 @@ class ProductPromptEditorDialog(QDialog):
                 font-family: Consolas, monospace;
             }
         """)
-        layout.addWidget(self.high_low_prompt_text)
-
-    def init_low_high_margin_tab(self):
-        layout = QVBoxLayout(self.low_high_margin_tab)
-
-        label = QLabel("【低转化 + 高毛利(≥25%)】")
-        label.setStyleSheet("font-weight: bold; color: #9b59b6;")
-        layout.addWidget(label)
-
-        desc = QLabel("💡 低转化 + 高毛利时，以不实惠、单价贵等方向优化。让顾客觉得不适合自己。")
-        desc.setStyleSheet("color: #6c757d; font-size: 11px;")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        self.low_high_prompt_text = QTextEdit()
-        self.low_high_prompt_text.setMinimumHeight(350)
-        self.low_high_prompt_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #fff;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 12px;
-                font-family: Consolas, monospace;
-            }
-        """)
-        layout.addWidget(self.low_high_prompt_text)
-
-    def init_low_low_margin_tab(self):
-        layout = QVBoxLayout(self.low_low_margin_tab)
-
-        label = QLabel("【低转化 + 低毛利(<25%)】")
-        label.setStyleSheet("font-weight: bold; color: #e74c3c;")
-        layout.addWidget(label)
-
-        desc = QLabel("💡 低转化 + 低毛利时，以不实惠、单价贵等方向优化。让顾客觉得不适合自己。")
-        desc.setStyleSheet("color: #6c757d; font-size: 11px;")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        self.low_low_prompt_text = QTextEdit()
-        self.low_low_prompt_text.setMinimumHeight(350)
-        self.low_low_prompt_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #fff;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 12px;
-                font-family: Consolas, monospace;
-            }
-        """)
-        layout.addWidget(self.low_low_prompt_text)
+        layout.addWidget(self.price_relation_prompt_text)
 
     def get_default_product_info_prompt(self):
         return """（请在此处输入产品相关信息，如：垆土铁棍山药、密度高、偶尔有锈斑等）"""
 
-    def get_default_high_high_margin_prompt(self):
-        return """【毛利策略：高转化 + 高毛利(≥25%)】
+    def get_default_price_audience_prompt(self):
+        return """【价格人群标尺规则】
+当前价格人群数值：{price_audience_level}，说明：{price_audience_desc}。
+数值越接近+10，越面向高价品质人群：不要只写甄选、精品、高品质，要说明顾客能感知到的价值依据，如口感/营养/材质/工艺/耐用/省心/礼赠/家庭场景/长期使用价值。
+高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
+数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
+数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
+无论数值如何，都不能和当前规格的真实价格相对位置冲突。"""
 
-当前产品毛利率较高，选择高转化模式。
-
-【核心策略】
-1. 以产品质量、功能、耐用性为卖点
-2. 强调品质上乘、经久耐用
-3. 突出产品的核心功能和独特卖点
-4. 暗示使用寿命长、性价比高（单位使用成本低）
-5. 适合追求品质的顾客群体
-
-请结合产品本身的特点和功能，生成能体现产品价值的规格名称。"""
-
-    def get_default_high_low_margin_prompt(self):
-        return """【毛利策略：高转化 + 低毛利(<25%)】
-
-当前产品毛利率较低，选择高转化模式。
-
-【核心策略】
-1. 以低价优势、实惠、性价比为卖点
-2. 强调价格优惠、促销力度大
-3. 制造紧迫感，促进快速下单
-4. 暗示赠品多、套餐划算
-5. 适合价格敏感的顾客群体
-
-请结合产品的价格优势，生成能促进快速下单的规格名称。"""
-
-    def get_default_low_high_margin_prompt(self):
-        return """【毛利策略：低转化 + 高毛利(≥25%)】
-
-当前产品毛利率较高，选择低转化模式。
-目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
-
-【核心策略】
-1. 强调价格偏高、不实惠
-2. 暗示性价比低、不值得
-3. 突出产品可能存在的缺点或局限
-4. 让顾客觉得"买这个不划算"
-
-请生成让顾客觉得"不适合我"的规格名称。"""
-
-    def get_default_low_low_margin_prompt(self):
-        return """【毛利策略：低转化 + 低毛利(<25%)】
-
-当前产品毛利率较低，选择低转化模式。
-目标：让顾客觉得这个产品不适合自己，主动选择其他规格。
-
-【核心策略】
-1. 强调价格看似便宜但实际不优惠
-2. 暗示"便宜没好货"
-3. 突出产品可能偷工减料或质量一般
-4. 让顾客觉得"买这个不明智"
-
-请生成让顾客觉得"不适合我"的规格名称。"""
+    def get_default_price_relation_prompt(self):
+        return """【价格相对位置规则】
+{price_relation_summary}
+所有规格当前表格价格：
+{spec_price_layout}
+如果当前规格不是当前最低价，禁止使用：最便宜、最低价、全网低价、超低价、底价、白菜价、亏本价。
+如果当前规格是最高价，应优先解释价值、品质、容量、组合、适用人群，不要伪装成低价款。
+如果当前规格是最低价，可以使用入门、实惠、低门槛、尝鲜等词，但仍不能夸大为全网最低。
+生成时必须参考所有规格价格，保证命名不会误导顾客。"""
 
     def load_prompts(self):
         product_info = self.db.get_setting("ai_product_info_prompt", "")
-        high_high = self.db.get_setting("ai_high_high_margin_prompt", "")
-        high_low = self.db.get_setting("ai_high_low_margin_prompt", "")
-        low_high = self.db.get_setting("ai_low_high_margin_prompt", "")
-        low_low = self.db.get_setting("ai_low_low_margin_prompt", "")
+        price_audience = self.db.get_setting("ai_spec_price_audience_prompt", "")
+        price_relation = self.db.get_setting("ai_spec_price_relation_prompt", "")
 
         self.product_info_text.setPlainText(product_info if product_info else self.get_default_product_info_prompt())
-        self.high_high_prompt_text.setPlainText(high_high if high_high else self.get_default_high_high_margin_prompt())
-        self.high_low_prompt_text.setPlainText(high_low if high_low else self.get_default_high_low_margin_prompt())
-        self.low_high_prompt_text.setPlainText(low_high if low_high else self.get_default_low_high_margin_prompt())
-        self.low_low_prompt_text.setPlainText(low_low if low_low else self.get_default_low_low_margin_prompt())
+        self.price_audience_prompt_text.setPlainText(price_audience if price_audience else self.get_default_price_audience_prompt())
+        self.price_relation_prompt_text.setPlainText(price_relation if price_relation else self.get_default_price_relation_prompt())
 
     def reset_all_prompts(self):
         reply = QMessageBox.question(self, "确认", "确定要恢复所有提示词为默认吗？", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.product_info_text.setPlainText(self.get_default_product_info_prompt())
-            self.high_high_prompt_text.setPlainText(self.get_default_high_high_margin_prompt())
-            self.high_low_prompt_text.setPlainText(self.get_default_high_low_margin_prompt())
-            self.low_high_prompt_text.setPlainText(self.get_default_low_high_margin_prompt())
-            self.low_low_prompt_text.setPlainText(self.get_default_low_low_margin_prompt())
+            self.price_audience_prompt_text.setPlainText(self.get_default_price_audience_prompt())
+            self.price_relation_prompt_text.setPlainText(self.get_default_price_relation_prompt())
 
     def save_prompts(self):
         product_info = self.product_info_text.toPlainText().strip()
-        high_high = self.high_high_prompt_text.toPlainText().strip()
-        high_low = self.high_low_prompt_text.toPlainText().strip()
-        low_high = self.low_high_prompt_text.toPlainText().strip()
-        low_low = self.low_low_prompt_text.toPlainText().strip()
+        price_audience = self.price_audience_prompt_text.toPlainText().strip()
+        price_relation = self.price_relation_prompt_text.toPlainText().strip()
 
         if not product_info:
             QMessageBox.warning(self, "⚠️ 警告", "产品信息不能为空！")
             return
 
         self.db.set_setting("ai_product_info_prompt", product_info)
-        self.db.set_setting("ai_high_high_margin_prompt", high_high)
-        self.db.set_setting("ai_high_low_margin_prompt", high_low)
-        self.db.set_setting("ai_low_high_margin_prompt", low_high)
-        self.db.set_setting("ai_low_low_margin_prompt", low_low)
+        self.db.set_setting("ai_spec_price_audience_prompt", price_audience)
+        self.db.set_setting("ai_spec_price_relation_prompt", price_relation)
 
         QMessageBox.information(self, "✅ 成功", "产品提示词配置已保存！")
         self.accept()
