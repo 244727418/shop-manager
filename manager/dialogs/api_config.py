@@ -6,6 +6,78 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QTabWidget, QWidget,
 )
 from PyQt5.QtCore import Qt
+import time
+
+SPEC_PROMPT_VERSION = "sku_axis_no_style_label_v3"
+
+
+def get_default_spec_base_prompt_v2():
+    return """【基础生成规则】
+你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
+
+【内部发散步骤】（只在心里完成，不要输出分析过程）
+1. 先识别产品主体词：从商品标题、产品信息、本次补充提示、原规格中提取最短但清楚的商品主体名。
+2. 每条SKU正文都必须包含产品主体词或更明确的同义主体，不能优化后只剩精品装、家庭装、尝鲜款、礼盒装这类空泛规格。
+3. 再识别购买人群和购买痛点：谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
+4. 针对不同品类提取可感知价值：食品看口感、营养成分、烹饪/食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
+5. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
+6. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
+
+【合规边界】
+可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
+食品类可以表达营养、口感、日常滋补、早餐/煲汤/家庭餐等场景，但不能写治疗、降血糖、治病、药用承诺。
+
+必须保留原规格的核心信息，如数量、重量、尺码、颜色、款式、组合关系。
+不要直接复制原规格名称，要在原规格基础上做清晰、可读、有运营目的的改写。
+不要输出独立风格标签，不要把风格写成单独前缀；风格差异必须融入SKU正文，例如通过卖点、人群、场景、规格对比、语气结构体现。
+SKU名称尽量接近35字，最多不超过40字。
+强制禁止使用中文逗号、英文逗号、顿号、句号、分号、冒号、感叹号、问号、斜杠、反斜杠、下划线、星号、项目符号。
+允许使用的符号只有：- + 丨 () [] 【】
+可以少量使用允许符号让10条在结构上有差异，但不要为了符号牺牲可读性。
+禁止出现"原规格"、"新规格"、"优化后"等解释性前缀。
+直接输出10个新规格名，一行一个，不要解释。"""
+
+
+def get_default_conversion_axis_prompt_v2():
+    return """【转化方向标尺规则】
+当前转化方向数值：{conversion_level}，说明：{conversion_desc}。
+正向转化：先识别购买人群，再围绕人群痛点写购买理由，例如省心、适合家庭、适合送礼、适合囤货、适合尝鲜、适合高频使用。
+数值越接近+10，越要让顾客觉得这个规格就是最适合自己的选择，但不要只写热销、推荐、放心，要写具体场景和具体价值。
+数值在+1到+5时，只做轻度购买引导，不要过度促销。
+数值为0时，保持客观中性，只优化清晰度、主体识别和规格差异。
+负向转化：目标不是说产品差，而是让非目标用户主动放弃当前规格，倾向选择其他规格。
+数值越接近-10，劝退越明显：必须写出选择门槛、适用限制或需求不匹配，不能写成人人都想买的强转化文案。
+高价人群负向时尤其要强调只适合高频使用、重度需求、送礼、囤货、大规格、高标准用户；普通用户会觉得用不上、没必要、需求不匹配。
+低价人群负向时强调预算不匹配、轻用无需选、先看基础规格、入门不建议。
+负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小/大、预算不匹配、使用频率不匹配、场景不匹配、建议对比其他规格等表达。"""
+
+
+def get_default_price_audience_prompt_v2():
+    return """【价格人群标尺规则】
+当前价格人群数值：{price_audience_level}，说明：{price_audience_desc}。
+数值越接近+10，越面向高价品质人群：不要只写甄选、精品、高品质，要说明顾客能感知到的价值依据，如口感/营养/材质/工艺/耐用/省心/礼赠/家庭场景/长期使用价值。
+高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
+当转化方向为负数且价格人群偏高时，劝退方式要变成“高门槛筛选”：强调该规格更适合高标准用户、重度使用者、礼赠场景、大规格需求、明确品质追求者，让普通用户觉得没必要选它。
+高价人群劝退不要说贵、不划算、质量差，而要用“更适合懂品质/送礼/长期囤用/高频使用/对口感材质有要求的人”来抬高选择门槛。
+高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合”等促进转化表达。
+数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
+当转化方向为负数且价格人群偏低时，可以强调预算不匹配、入门不建议、日常轻用无需选择、可先看更基础规格，但不能误导当前规格是最低价。
+数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
+无论数值如何，都不能和当前规格的真实价格相对位置冲突。"""
+
+
+def ensure_spec_prompt_defaults_v2(db):
+    if not db:
+        return
+    try:
+        if db.get_setting("ai_spec_prompt_version", "") == SPEC_PROMPT_VERSION:
+            return
+        db.set_setting("ai_spec_base_prompt", get_default_spec_base_prompt_v2())
+        db.set_setting("ai_spec_conversion_axis_prompt", get_default_conversion_axis_prompt_v2())
+        db.set_setting("ai_spec_price_audience_prompt", get_default_price_audience_prompt_v2())
+        db.set_setting("ai_spec_prompt_version", SPEC_PROMPT_VERSION)
+    except Exception as e:
+        print(f"升级规格优化提示词失败: {e}")
 
 
 class ApiConfigDialog(QDialog):
@@ -242,8 +314,8 @@ class ApiConfigDialog(QDialog):
                     "Content-Type": "application/json"
                 }
 
-                test_url = "https://api.deepseek.com/v1/chat/completions"
-                model = "deepseek-chat"
+                test_url = "https://api.deepseek.com/chat/completions"
+                model = "deepseek-v4-flash"
             else:
                 headers = {
                     "Authorization": f"Bearer {api_key_clean}",
@@ -259,12 +331,24 @@ class ApiConfigDialog(QDialog):
                 "temperature": 0.7
             }
 
-            response = requests.post(
-                test_url,
-                headers=headers,
-                json=data,
-                timeout=30
-            )
+            response = None
+            for attempt in range(3):
+                response = requests.post(
+                    test_url,
+                    headers=headers,
+                    json=data,
+                    timeout=30
+                )
+                if response.status_code not in (500, 503):
+                    break
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+
+            if response.status_code == 503:
+                error_detail = response.text.strip()[:120]
+                self.test_result_label.setText(f"API测试失败：503，DeepSeek服务器当前过载，请稍后重试 {error_detail}")
+                self.test_result_label.setStyleSheet("color: #e74c3c; font-size: 12px;")
+                return
 
             if response.status_code == 200:
                 result = response.json()
@@ -1043,6 +1127,7 @@ class SpecPromptEditorDialog(QDialog):
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        ensure_spec_prompt_defaults_v2(self.db)
         self.setWindowTitle("📋 规格优化提示词配置")
         self.resize(800, 600)
         self.init_ui()
@@ -1211,47 +1296,10 @@ class SpecPromptEditorDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def get_default_base_prompt(self):
-        return """【基础生成规则】
-你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
-
-【内部发散步骤】（只在心里完成，不要输出分析过程）
-1. 先根据商品标题、产品信息、本次补充提示判断商品大类，不要写死某一个品类。
-2. 针对不同品类提取可感知价值：食品看口感、产地、营养成分、食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
-3. 从天然属性、营养/材质/工艺、消费场景、目标人群、规格差异、购买理由中发散命名。
-4. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
-5. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
-
-【合规边界】
-可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
-食品类可以表达营养、口感、日常滋补、早餐/煲汤/家庭餐等场景，但不能写治疗、降血糖、治病、药用承诺。
-
-必须保留原规格的核心信息，如数量、重量、尺码、颜色、款式、组合关系。
-不要直接复制原规格名称，要在原规格基础上做清晰、可读、有运营目的的改写。
-每个规格名称必须包含风格标记，格式为：【风格名】规格名称。
-
-【重要 - 避免重复原规格】
-不要直接把原规格名称复制出来！
-要在原规格基础上进行创意改编，让每个规格名称都新颖独特
-禁止出现"原规格：xxx"、"原规格名称"、"新规格1："等前缀
-每个规格必须是完整的、独立的名称
-不要出现"原规格"三个字
-
-【要求】
-只能用括号：（）、【】、-、丨
-每个规格字数控制在25-40字之间
-10个规格的风格必须各不相同，不能雷同
-保留原规格的核心词（如数量、尺码、款式等）
-禁止使用"·"符号
-直接输出10个新规格名，一行一个，不要解释"""
+        return get_default_spec_base_prompt_v2()
 
     def get_default_conversion_prompt(self):
-        return """【转化方向标尺规则】
-当前转化方向数值：{conversion_level}，说明：{conversion_desc}。
-数值越接近+10，越要让顾客觉得这个规格最值得选，突出热销、适合、实用、推荐、放心、下单理由。
-数值在+1到+5时，只做轻度购买引导，不要过度促销。
-数值为0时，保持客观中性，只优化清晰度和卖点表达。
-数值越接近-10，越要弱化购买意愿，让顾客觉得这个规格不太适合自己，倾向选择其他规格。
-负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小、预算不匹配、适用人群窄、建议对比其他规格等表达。"""
+        return get_default_conversion_axis_prompt_v2()
 
     def get_default_attr_prompt(self):
         return """【商品属性信息】
@@ -1461,6 +1509,7 @@ class ProductPromptEditorDialog(QDialog):
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        ensure_spec_prompt_defaults_v2(self.db)
         self.setWindowTitle("🛒 产品提示词配置")
         self.resize(850, 700)
         self.init_ui()
@@ -1606,13 +1655,7 @@ class ProductPromptEditorDialog(QDialog):
         return """（请在此处输入产品相关信息，如：垆土铁棍山药、密度高、偶尔有锈斑等）"""
 
     def get_default_price_audience_prompt(self):
-        return """【价格人群标尺规则】
-当前价格人群数值：{price_audience_level}，说明：{price_audience_desc}。
-数值越接近+10，越面向高价品质人群：不要只写甄选、精品、高品质，要说明顾客能感知到的价值依据，如口感/营养/材质/工艺/耐用/省心/礼赠/家庭场景/长期使用价值。
-高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
-数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
-数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
-无论数值如何，都不能和当前规格的真实价格相对位置冲突。"""
+        return get_default_price_audience_prompt_v2()
 
     def get_default_price_relation_prompt(self):
         return """【价格相对位置规则】

@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import time
 import requests
 from datetime import datetime
 
@@ -136,6 +137,7 @@ class InlineTextEditDelegate(QStyledItemDelegate):
 
 class ProductSpecDialog(QDialog):
     """商品规格管理与毛利计算器"""
+    SPEC_PROMPT_VERSION = "sku_axis_no_style_label_v3"
     COL_AI = 0
     COL_SPEC_NAME = 1
     COL_SPEC_CODE = 2
@@ -160,6 +162,7 @@ class ProductSpecDialog(QDialog):
         self.product_code = product_code
         self.product_name = product_name
         self.main_app = parent
+        self._ensure_ai_spec_prompt_defaults()
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
         self.resize(1380, 900)
@@ -184,6 +187,18 @@ class ProductSpecDialog(QDialog):
     def closeEvent(self, event):
         self.load_specs()
         super().closeEvent(event)
+
+    def _ensure_ai_spec_prompt_defaults(self):
+        """一次性升级规格优化提示词，避免旧保存模板继续生效。"""
+        try:
+            if self.db.get_setting("ai_spec_prompt_version", "") == self.SPEC_PROMPT_VERSION:
+                return
+            self.db.set_setting("ai_spec_base_prompt", self._get_default_spec_base_prompt())
+            self.db.set_setting("ai_spec_conversion_axis_prompt", self._get_default_conversion_axis_prompt())
+            self.db.set_setting("ai_spec_price_audience_prompt", self._get_default_price_audience_prompt())
+            self.db.set_setting("ai_spec_prompt_version", self.SPEC_PROMPT_VERSION)
+        except Exception as e:
+            print(f"升级规格优化提示词失败: {e}")
         
 
     def delayed_refresh(self):
@@ -2610,11 +2625,12 @@ class ProductSpecDialog(QDialog):
 你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
 
 【内部发散步骤】（只在心里完成，不要输出分析过程）
-1. 先根据商品标题、产品信息、本次补充提示判断商品大类，不要写死某一个品类。
-2. 针对不同品类提取可感知价值：食品看口感、产地、营养成分、食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
-3. 从天然属性、营养/材质/工艺、消费场景、目标人群、规格差异、购买理由中发散命名。
-4. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
-5. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
+1. 先识别产品主体词：从商品标题、产品信息、本次补充提示、原规格中提取最短但清楚的商品主体名。
+2. 每条SKU正文都必须包含产品主体词或更明确的同义主体，不能优化后只剩精品装、家庭装、尝鲜款、礼盒装这类空泛规格。
+3. 再识别购买人群和购买痛点：谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
+4. 针对不同品类提取可感知价值：食品看口感、营养成分、烹饪/食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
+5. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
+6. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
 
 【合规边界】
 可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
@@ -2622,27 +2638,37 @@ class ProductSpecDialog(QDialog):
 
 必须保留原规格的核心信息，如数量、重量、尺码、颜色、款式、组合关系。
 不要直接复制原规格名称，要在原规格基础上做清晰、可读、有运营目的的改写。
-每个规格名称必须包含风格标记，格式为：【风格名】规格名称。
-每个规格名称控制在25-40个字符之间。
-只能使用常见中文、数字、括号、【】、-、丨。
+不要输出独立风格标签，不要把风格写成单独前缀；风格差异必须融入SKU正文，例如通过卖点、人群、场景、规格对比、语气结构体现。
+SKU名称尽量接近35字，最多不超过40字。
+强制禁止使用中文逗号、英文逗号、顿号、句号、分号、冒号、感叹号、问号、斜杠、反斜杠、下划线、星号、项目符号。
+允许使用的符号只有：- + 丨 () [] 【】
+可以少量使用允许符号让10条在结构上有差异，但不要为了符号牺牲可读性。
 禁止出现"原规格"、"新规格"、"优化后"等解释性前缀。
 直接输出10个新规格名，一行一个，不要解释。"""
 
     def _get_default_conversion_axis_prompt(self):
         return """【转化方向标尺规则】
 当前转化方向数值：{conversion_level}，说明：{conversion_desc}。
-数值越接近+10，越要让顾客觉得这个规格最值得选，突出热销、适合、实用、推荐、放心、下单理由。
+正向转化：先识别购买人群，再围绕人群痛点写购买理由，例如省心、适合家庭、适合送礼、适合囤货、适合尝鲜、适合高频使用。
+数值越接近+10，越要让顾客觉得这个规格就是最适合自己的选择，但不要只写热销、推荐、放心，要写具体场景和具体价值。
 数值在+1到+5时，只做轻度购买引导，不要过度促销。
-数值为0时，保持客观中性，只优化清晰度和卖点表达。
-数值越接近-10，越要弱化购买意愿，让顾客觉得这个规格不太适合自己，倾向选择其他规格。
-负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小、预算不匹配、适用人群窄、建议对比其他规格等表达。"""
+数值为0时，保持客观中性，只优化清晰度、主体识别和规格差异。
+负向转化：目标不是说产品差，而是让非目标用户主动放弃当前规格，倾向选择其他规格。
+数值越接近-10，劝退越明显：必须写出选择门槛、适用限制或需求不匹配，不能写成人人都想买的强转化文案。
+高价人群负向时尤其要强调只适合高频使用、重度需求、送礼、囤货、大规格、高标准用户；普通用户会觉得用不上、没必要、需求不匹配。
+低价人群负向时强调预算不匹配、轻用无需选、先看基础规格、入门不建议。
+负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小/大、预算不匹配、使用频率不匹配、场景不匹配、建议对比其他规格等表达。"""
 
     def _get_default_price_audience_prompt(self):
         return """【价格人群标尺规则】
 当前价格人群数值：{price_audience_level}，说明：{price_audience_desc}。
 数值越接近+10，越面向高价品质人群：不要只写甄选、精品、高品质，要说明顾客能感知到的价值依据，如口感/营养/材质/工艺/耐用/省心/礼赠/家庭场景/长期使用价值。
 高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
+当转化方向为负数且价格人群偏高时，劝退方式要变成“高门槛筛选”：强调该规格更适合高标准用户、重度使用者、礼赠场景、大规格需求、明确品质追求者，让普通用户觉得没必要选它。
+高价人群劝退不要说贵、不划算、质量差，而要用“更适合懂品质/送礼/长期囤用/高频使用/对口感材质有要求的人”来抬高选择门槛。
+高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合”等促进转化表达。
 数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
+当转化方向为负数且价格人群偏低时，可以强调预算不匹配、入门不建议、日常轻用无需选择、可先看更基础规格，但不能误导当前规格是最低价。
 数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
 无论数值如何，都不能和当前规格的真实价格相对位置冲突。"""
 
@@ -2858,8 +2884,8 @@ class ProductSpecDialog(QDialog):
         QApplication.processEvents()
         
         try:
-            api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/v1/chat/completions")
-            model = self.db.get_setting("ai_model", "deepseek-chat")
+            api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
+            model = self.db.get_setting("ai_model", "deepseek-v4-flash")
             
             headers = {
                 "Authorization": f"Bearer {api_key.strip()}",
@@ -2876,7 +2902,13 @@ class ProductSpecDialog(QDialog):
                 "temperature": 0.9
             }
             
-            response = requests.post(api_url, headers=headers, json=data, timeout=60)
+            response = None
+            for attempt in range(3):
+                response = requests.post(api_url, headers=headers, json=data, timeout=60)
+                if response.status_code not in (500, 503):
+                    break
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
             
             progress.close()
             
@@ -2886,7 +2918,14 @@ class ProductSpecDialog(QDialog):
                 
                 self.show_ai_result_dialog(row, original_name, ai_response, conversion_level, price_audience_level, custom_hint)
             else:
-                QMessageBox.warning(self, "❌ 错误", f"API调用失败：{response.status_code}")
+                error_detail = response.text.strip()[:500] if response is not None else ""
+                if response.status_code == 503:
+                    message = "API调用失败：503\nDeepSeek服务器当前过载，请稍后重试。"
+                else:
+                    message = f"API调用失败：{response.status_code}"
+                if error_detail:
+                    message += f"\n\n返回内容：{error_detail}"
+                QMessageBox.warning(self, "❌ 错误", message)
                 
         except Exception as e:
             progress.close()
@@ -2924,7 +2963,7 @@ class ProductSpecDialog(QDialog):
         header_layout.addStretch()
         layout.addLayout(header_layout)
 
-        layout.addWidget(QLabel("请选择优化后的规格名称（风格标记仅供观看，选择时不会复制到规格）："))
+        layout.addWidget(QLabel("请选择优化后的规格名称（已清理禁用符号，选择后会写入规格并复制到剪贴板）："))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2933,22 +2972,10 @@ class ProductSpecDialog(QDialog):
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setSpacing(8)
 
-        style_names = [
-            "热销爆款", "限时优惠", "赠品福利", "性价比之王", "品质保障",
-            "新品首发", "实用推荐", "环保健康", "明星同款", "回头客",
-            "容量太小", "性价比低", "限时缺货", "质量问题", "适用范围窄",
-            "赠品少", "寿命短", "回头率低", "替代品", "谨慎购买"
-        ]
-
         import re
 
         for i, option in enumerate(options):
-            style_text = ""
-            style_match = re.search(r'【([^】]+)】', option)
-            if style_match:
-                style_text = style_match.group(1)
-
-            spec_name = re.sub(r'^【[^】]+】\s*', '', option)
+            spec_name = self._sanitize_ai_spec_name(option)
 
             container = QWidget()
             container.setStyleSheet("""
@@ -2966,32 +2993,6 @@ class ProductSpecDialog(QDialog):
             number_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; min-width: 30px;")
             container_layout.addWidget(number_label)
 
-            style_label = QLabel(style_text if style_text else "未知")
-            if style_text:
-                style_label.setStyleSheet("""
-                    QLabel {
-                        background-color: #9b59b6;
-                        color: white;
-                        padding: 5px 10px;
-                        border-radius: 12px;
-                        font-size: 11px;
-                        font-weight: bold;
-                    }
-                """)
-            else:
-                style_label.setStyleSheet("""
-                    QLabel {
-                        background-color: #95a5a6;
-                        color: white;
-                        padding: 5px 10px;
-                        border-radius: 12px;
-                        font-size: 11px;
-                    }
-                """)
-            style_label.setMinimumWidth(100)
-            style_label.setAlignment(Qt.AlignCenter)
-            container_layout.addWidget(style_label)
-
             spec_label = QLabel(spec_name)
             spec_label.setWordWrap(True)
             spec_label.setStyleSheet("""
@@ -3002,7 +3003,7 @@ class ProductSpecDialog(QDialog):
                 }
             """)
             container_layout.addWidget(spec_label)
-            container_layout.setStretch(2, 1)
+            container_layout.setStretch(1, 1)
 
             container_layout.addSpacing(10)
 
@@ -3022,7 +3023,7 @@ class ProductSpecDialog(QDialog):
             """)
 
             def select_option(opt_text, r=row):
-                final_name = opt_text
+                final_name = self._sanitize_ai_spec_name(opt_text)
                 self.table.item(r, 1).setText(final_name)
 
                 clipboard = QApplication.clipboard()
@@ -3074,6 +3075,28 @@ class ProductSpecDialog(QDialog):
         
         dialog.exec_()
     
+    def _strip_display_label(self, text):
+        """去掉AI结果开头的展示标签，保留真正写入规格的SKU正文。"""
+        if not text:
+            return ""
+        cleaned = re.sub(r'^【[^】]{1,12}】\s*', '', str(text).strip())
+        cleaned = re.sub(r'^\[[^\]]{1,12}\]\s*', '', cleaned)
+        return cleaned.strip()
+
+    def _sanitize_ai_spec_name(self, text):
+        """清理AI候选规格名中的禁用符号，保留允许的SKU符号。"""
+        if not text:
+            return ""
+        cleaned = str(text).strip()
+        cleaned = re.sub(r'^(优化后[：:]\s*)', '', cleaned)
+        cleaned = re.sub(r'^(规格名称[：:]\s*)', '', cleaned)
+        cleaned = re.sub(r'^(新规格[：:]\s*)', '', cleaned)
+        forbidden_chars = "，,、。；;：:！!？?／/\\_＿*＊•·“”\"'‘’《》<>"
+        trans = str.maketrans({ch: " " for ch in forbidden_chars})
+        cleaned = cleaned.translate(trans)
+        cleaned = re.sub(r'\s+', '', cleaned)
+        return cleaned.strip()
+
     def _parse_ai_options(self, text):
         """解析AI返回的多条规格选项"""
         if not text:
@@ -3101,7 +3124,7 @@ class ProductSpecDialog(QDialog):
             line = re.sub(r'^(新规格[：:]\s*)', '', line)
             line = re.sub(r'^(新规格\d+[.、\.]\s*)', '', line)
             line = re.sub(r'^[-*]\s*', '', line)
-            line = line.replace('·', '').replace('•', '')
+            line = self._sanitize_ai_spec_name(line)
 
             if line and len(line) >= 2:
                 options.append(line)
