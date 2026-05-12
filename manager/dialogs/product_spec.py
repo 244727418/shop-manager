@@ -10,7 +10,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QWidget, QLineEdit, QSpinBox,
-    QComboBox, QFrame, QGridLayout, QAbstractItemView, QFileDialog,
+    QComboBox, QCheckBox, QFrame, QGridLayout, QAbstractItemView, QFileDialog,
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
     QPlainTextEdit, QSlider,
@@ -140,20 +140,21 @@ class ProductSpecDialog(QDialog):
     SPEC_PROMPT_VERSION = "sku_axis_no_style_label_v3"
     COL_AI = 0
     COL_SPEC_NAME = 1
-    COL_SPEC_CODE = 2
-    COL_COST = 3
-    COL_SALE_PRICE = 4
-    COL_FINAL_PRICE = 5
-    COL_MARGIN_RATE = 6
-    COL_GROSS_PROFIT = 7
-    COL_WEIGHT = 8
-    COL_WEIGHT_COMPARE = 9
-    COL_ORDER_COUNT = 10
-    COL_ORDER_COMPARE = 11
-    COL_REFUND_ORDERS = 12
-    COL_REFUND_RATIO = 13
-    COL_ACTION = 14
-    SPEC_TABLE_COLUMN_COUNT = 15
+    COL_SPEC_NAME_2 = 2
+    COL_SPEC_CODE = 3
+    COL_COST = 4
+    COL_SALE_PRICE = 5
+    COL_FINAL_PRICE = 6
+    COL_MARGIN_RATE = 7
+    COL_GROSS_PROFIT = 8
+    COL_WEIGHT = 9
+    COL_WEIGHT_COMPARE = 10
+    COL_ORDER_COUNT = 11
+    COL_ORDER_COMPARE = 12
+    COL_REFUND_ORDERS = 13
+    COL_REFUND_RATIO = 14
+    COL_ACTION = 15
+    SPEC_TABLE_COLUMN_COUNT = 16
 
     def __init__(self, db_manager, product_id, product_code, product_name, parent=None):
         super().__init__(parent)
@@ -163,6 +164,7 @@ class ProductSpecDialog(QDialog):
         self.product_name = product_name
         self.main_app = parent
         self._ensure_ai_spec_prompt_defaults()
+        self.two_level_specs = self.db.get_setting(f"product_spec_two_level_{self.product_id}", "0") == "1"
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
         self.resize(1380, 900)
@@ -527,13 +529,56 @@ class ProductSpecDialog(QDialog):
         roi_widget.setStyleSheet("background-color: #f8f9fa; border-radius: 5px; border: 1px solid #dee2e6;")
         layout.addWidget(roi_widget)
 
+        spec_filter_widget = QWidget()
+        spec_filter_layout = QHBoxLayout(spec_filter_widget)
+        spec_filter_layout.setContentsMargins(8, 5, 8, 5)
+        spec_filter_layout.setSpacing(8)
+
+        self.chk_two_level_specs = QCheckBox("两层规格模式")
+        self.chk_two_level_specs.setChecked(self.two_level_specs)
+        self.chk_two_level_specs.toggled.connect(self._on_two_level_mode_toggled)
+        spec_filter_layout.addWidget(self.chk_two_level_specs)
+
+        self.two_level_controls = QWidget()
+        two_level_layout = QHBoxLayout(self.two_level_controls)
+        two_level_layout.setContentsMargins(0, 0, 0, 0)
+        two_level_layout.setSpacing(8)
+
+        two_level_layout.addWidget(QLabel("筛选第一层:"))
+        self.spec_filter_level1 = QComboBox()
+        self.spec_filter_level1.setFixedWidth(150)
+        self.spec_filter_level1.currentTextChanged.connect(self._apply_spec_filters)
+        two_level_layout.addWidget(self.spec_filter_level1)
+
+        two_level_layout.addWidget(QLabel("筛选第二层:"))
+        self.spec_filter_level2 = QComboBox()
+        self.spec_filter_level2.setFixedWidth(120)
+        self.spec_filter_level2.currentTextChanged.connect(self._apply_spec_filters)
+        two_level_layout.addWidget(self.spec_filter_level2)
+
+        two_level_layout.addWidget(QLabel("批量售价:"))
+
+        self.batch_price_value = QLineEdit()
+        self.batch_price_value.setPlaceholderText("输入价格...")
+        self.batch_price_value.setFixedWidth(120)
+        two_level_layout.addWidget(self.batch_price_value)
+
+        self.btn_batch_update_prices = QPushButton("批量修改可见行价格")
+        self.btn_batch_update_prices.clicked.connect(self._batch_update_visible_prices)
+        two_level_layout.addWidget(self.btn_batch_update_prices)
+
+        spec_filter_layout.addWidget(self.two_level_controls)
+        spec_filter_layout.addStretch()
+        spec_filter_widget.setStyleSheet("background-color: #eef7ff; border: 1px solid #cfe8ff; border-radius: 4px;")
+        layout.addWidget(spec_filter_widget)
+
         # 规格表格区
 
         # 2. 规格表格
         self.table = QTableWidget()
         self.table.setColumnCount(self.SPEC_TABLE_COLUMN_COUNT)
         self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "关联编码", "自动成本", "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
+            "", "规格名称", "第二层规格", "关联编码", "自动成本", "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
         ])
         
         # 设置列宽策略 - AI列和规格名称列固定宽度，其他列自适应拉伸
@@ -546,9 +591,11 @@ class ProductSpecDialog(QDialog):
         # 规格名称列(索引1)固定宽度（增加40像素）
         header.setSectionResizeMode(1, QHeaderView.Fixed)
         self.table.setColumnWidth(1, 180)
+        header.setSectionResizeMode(self.COL_SPEC_NAME_2, QHeaderView.Fixed)
+        self.table.setColumnWidth(self.COL_SPEC_NAME_2, 110)
 
         # 其他列自适应拉伸
-        for i in range(2, self.SPEC_TABLE_COLUMN_COUNT):
+        for i in range(3, self.SPEC_TABLE_COLUMN_COUNT):
             header.setSectionResizeMode(i, QHeaderView.Stretch)
         # 关联编码列按内容自动扩展，避免省略显示
         header.setSectionResizeMode(self.COL_SPEC_CODE, QHeaderView.ResizeToContents)
@@ -599,6 +646,7 @@ class ProductSpecDialog(QDialog):
             parent=self.table
         )
         self.table.setItemDelegateForColumn(self.COL_SPEC_NAME, self.spec_name_inline_delegate)
+        self.table.setItemDelegateForColumn(self.COL_SPEC_NAME_2, self.spec_name_inline_delegate)
 
         self.spec_code_inline_delegate = InlineTextEditDelegate(
             alignment=Qt.AlignCenter,
@@ -609,6 +657,7 @@ class ProductSpecDialog(QDialog):
         # 权重列
         self.weight_delegate = WeightDelegate(self)
         self.table.setItemDelegateForColumn(self.COL_WEIGHT, self.weight_delegate)
+        self._set_two_level_mode(self.two_level_specs, transform_rows=False)
 
         # 底部按钮操作区
 
@@ -696,6 +745,177 @@ class ProductSpecDialog(QDialog):
 
         # 5. 信号连接
         self.table.cellChanged.connect(self.on_cell_change)
+
+    def _split_two_level_spec_name(self, spec_name):
+        """按最后一个空格拆分两层规格名。"""
+        text = (spec_name or "").strip()
+        if not text or " " not in text:
+            return text, ""
+        first, second = text.rsplit(" ", 1)
+        return first.strip(), second.strip()
+
+    def _compose_spec_name(self, row):
+        """根据当前模式从表格行合成保存用的完整规格名。"""
+        first_item = self.table.item(row, self.COL_SPEC_NAME)
+        first = first_item.text().strip() if first_item else ""
+        if not self.two_level_specs:
+            return first
+
+        second_item = self.table.item(row, self.COL_SPEC_NAME_2)
+        second = second_item.text().strip() if second_item else ""
+        return f"{first} {second}".strip() if second else first
+
+    def _set_spec_name_cells(self, row, spec_name):
+        """按当前模式写入规格名单元格。"""
+        if self.two_level_specs:
+            first, second = self._split_two_level_spec_name(spec_name)
+        else:
+            first, second = spec_name, ""
+
+        first_item = QTableWidgetItem(first)
+        first_item.setToolTip("规格名称（最大40字符）")
+        self.table.setItem(row, self.COL_SPEC_NAME, first_item)
+
+        second_item = QTableWidgetItem(second)
+        second_item.setToolTip("第二层规格")
+        self.table.setItem(row, self.COL_SPEC_NAME_2, second_item)
+
+    def _on_two_level_mode_toggled(self, checked):
+        self.db.set_setting(f"product_spec_two_level_{self.product_id}", "1" if checked else "0")
+        self._set_two_level_mode(bool(checked), transform_rows=True)
+
+    def _set_two_level_mode(self, enabled, transform_rows=True):
+        old_mode = self.two_level_specs
+        self.two_level_specs = bool(enabled)
+        self.table.setHorizontalHeaderLabels([
+            "", "第一层规格" if enabled else "规格名称", "第二层规格", "关联编码", "自动成本",
+            "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)",
+            "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
+        ])
+        self.table.setColumnHidden(self.COL_SPEC_NAME_2, not enabled)
+        self.two_level_controls.setVisible(enabled)
+
+        if transform_rows:
+            for row in range(self.table.rowCount()):
+                if old_mode:
+                    first_item = self.table.item(row, self.COL_SPEC_NAME)
+                    second_item = self.table.item(row, self.COL_SPEC_NAME_2)
+                    first = first_item.text().strip() if first_item else ""
+                    second = second_item.text().strip() if second_item else ""
+                    full_name = f"{first} {second}".strip() if second else first
+                else:
+                    first_item = self.table.item(row, self.COL_SPEC_NAME)
+                    full_name = first_item.text().strip() if first_item else ""
+                self._set_spec_name_cells(row, full_name)
+
+        if not enabled:
+            self._set_combo_items(self.spec_filter_level1, [])
+            self._set_combo_items(self.spec_filter_level2, [])
+            for row in range(self.table.rowCount()):
+                self.table.setRowHidden(row, False)
+        else:
+            self._refresh_spec_filter_options()
+            self._apply_spec_filters()
+
+    def _set_combo_items(self, combo, values):
+        current = combo.currentText()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("全部")
+            for value in values:
+                combo.addItem(value)
+            index = combo.findText(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(False)
+
+    def _refresh_spec_filter_options(self):
+        if not hasattr(self, "table"):
+            return
+
+        first_values = []
+        second_values = []
+        for row in range(self.table.rowCount()):
+            first_item = self.table.item(row, self.COL_SPEC_NAME)
+            second_item = self.table.item(row, self.COL_SPEC_NAME_2)
+            first = first_item.text().strip() if first_item else ""
+            second = second_item.text().strip() if second_item else ""
+            if first and first not in first_values:
+                first_values.append(first)
+            if second and second not in second_values:
+                second_values.append(second)
+
+        self._set_combo_items(self.spec_filter_level1, sorted(first_values))
+        self._set_combo_items(self.spec_filter_level2, sorted(second_values))
+
+    def _get_combo_filter_value(self, combo):
+        value = combo.currentText().strip()
+        return "" if value == "全部" else value
+
+    def _apply_spec_filters(self):
+        if not self.two_level_specs or not hasattr(self, "table"):
+            return
+
+        first_filter = self._get_combo_filter_value(self.spec_filter_level1)
+        second_filter = self._get_combo_filter_value(self.spec_filter_level2)
+
+        for row in range(self.table.rowCount()):
+            first_item = self.table.item(row, self.COL_SPEC_NAME)
+            second_item = self.table.item(row, self.COL_SPEC_NAME_2)
+            first = first_item.text().strip() if first_item else ""
+            second = second_item.text().strip() if second_item else ""
+            match_first = not first_filter or first_filter == first
+            match_second = not second_filter or second_filter == second
+            self.table.setRowHidden(row, not (match_first and match_second))
+
+    def _batch_update_visible_prices(self):
+        if not self.two_level_specs:
+            QMessageBox.information(self, "提示", "请先勾选两层规格模式。")
+            return
+
+        value_text = self.batch_price_value.text().strip()
+        if not value_text:
+            QMessageBox.information(self, "提示", "请输入要批量修改的价格。")
+            return
+
+        try:
+            new_price = float(value_text)
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的数字价格。")
+            return
+
+        if new_price < 0:
+            QMessageBox.warning(self, "输入错误", "价格不能为负数。")
+            return
+
+        changed = 0
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                if self.table.isRowHidden(row):
+                    continue
+                item = self.table.item(row, self.COL_SALE_PRICE)
+                if not item:
+                    item = QTableWidgetItem()
+                    self.table.setItem(row, self.COL_SALE_PRICE, item)
+                item.setText(f"{new_price:.2f}")
+                self.calculate_row_margin(row)
+                changed += 1
+        finally:
+            self.table.blockSignals(False)
+
+        if changed == 0:
+            QMessageBox.information(self, "提示", "当前筛选条件下没有可修改的可见行。")
+            return
+
+        self.calculate_total_margin()
+        if hasattr(self, 'lbl_gross_break_even'):
+            self.calculate_roi_metrics()
+        self._refresh_spec_filter_options()
+        self._apply_spec_filters()
+        self.batch_price_value.clear()
+        self._show_action_bubble(f"已批量修改 {changed} 行价格")
 
     def eventFilter(self, obj, event):
         """事件过滤器：处理标签双击事件"""
@@ -1010,10 +1230,8 @@ class ProductSpecDialog(QDialog):
                 
                 self.table.setCellWidget(row_idx, self.COL_AI, ai_widget)
                 
-                # 第1列：规格名称（最多40字符）
-                spec_item = QTableWidgetItem(spec_name)
-                spec_item.setToolTip("规格名称（最多40字符）")
-                self.table.setItem(row_idx, self.COL_SPEC_NAME, spec_item)
+                # 第1/2列：规格名称
+                self._set_spec_name_cells(row_idx, spec_name)
                 # 第2列：关联编码
                 self.table.setItem(row_idx, self.COL_SPEC_CODE, QTableWidgetItem(spec_code))
                 
@@ -1140,6 +1358,8 @@ class ProductSpecDialog(QDialog):
             self.update_remaining_weight_label()
             self.update_total_orders_label()
             self.update_compare_columns()
+            self._refresh_spec_filter_options()
+            self._apply_spec_filters()
 
             # 🔑【关键修复】恢复之前选中的行
             if self._saved_current_row > 0 and self._saved_current_row < self.table.rowCount():
@@ -1173,9 +1393,8 @@ class ProductSpecDialog(QDialog):
             return
 
         # 1. 获取该行信息
-        name_item = self.table.item(row, self.COL_SPEC_NAME)
         code_item = self.table.item(row, self.COL_SPEC_CODE)
-        spec_name = name_item.text() if name_item else "未知"
+        spec_name = self._compose_spec_name(row) or "未知"
         spec_code = code_item.text() if code_item else "未知"
         
         # 2. 二次确认
@@ -1489,10 +1708,8 @@ class ProductSpecDialog(QDialog):
         
         self.table.setCellWidget(idx, self.COL_AI, ai_widget)
         
-        # 第1列：规格名称（最多40字符）
-        spec_item = QTableWidgetItem(f"新规格{idx+1}")
-        spec_item.setToolTip("规格名称（最多40字符）")
-        self.table.setItem(idx, self.COL_SPEC_NAME, spec_item)
+        # 第1/2列：规格名称
+        self._set_spec_name_cells(idx, f"新规格{idx+1}")
         # 第2列：关联编码
         self.table.setItem(idx, self.COL_SPEC_CODE, QTableWidgetItem(""))
         
@@ -1578,6 +1795,8 @@ class ProductSpecDialog(QDialog):
         btn_delete.clicked.connect(lambda checked=False, button=btn_delete: self._delete_spec_by_button(button))
         self.table.setCellWidget(idx, self.COL_ACTION, btn_delete)
 
+        self._refresh_spec_filter_options()
+        self._apply_spec_filters()
         self.table.scrollToBottom()
 
     def on_cell_change(self, row, col):
@@ -1616,12 +1835,12 @@ class ProductSpecDialog(QDialog):
             self.calculate_all_margins()
             self.update_remaining_weight_label()
             
-        elif col == 2:  # 关联编码变化 -> 查成本
+        elif col == self.COL_SPEC_CODE:  # 关联编码变化 -> 查成本
             self.fetch_cost(row)
             self.calculate_row_margin(row)
             self.calculate_total_margin()
             
-        elif col == 4:  # 手动售价变化 -> 算单行毛利
+        elif col == self.COL_SALE_PRICE:  # 手动售价变化 -> 算单行毛利
             self.calculate_row_margin(row)
             self.calculate_total_margin()
             
@@ -1917,12 +2136,12 @@ class ProductSpecDialog(QDialog):
     
     def ai_optimize_single_spec(self, row):
         """AI优化单个规格名称"""
-        item = self.table.item(row, 1)
+        item = self.table.item(row, self.COL_SPEC_NAME)
         if not item or not item.text().strip():
             QMessageBox.warning(self, "⚠️ 提示", "该规格没有名称！")
             return
         
-        original_name = item.text().strip()
+        original_name = self._compose_spec_name(row)
         
         api_key = self.db.get_setting("ai_api_key", "")
         if not api_key:
@@ -2436,10 +2655,10 @@ class ProductSpecDialog(QDialog):
             rows = []
             if hasattr(self, "table"):
                 for r in range(self.table.rowCount()):
-                    name_item = self.table.item(r, self.COL_SPEC_NAME)
                     code_item = self.table.item(r, self.COL_SPEC_CODE)
                     price_item = self.table.item(r, self.COL_SALE_PRICE)
-                    if not name_item or not name_item.text().strip():
+                    spec_name = self._compose_spec_name(r)
+                    if not spec_name:
                         continue
                     price_val = None
                     if price_item:
@@ -2448,7 +2667,7 @@ class ProductSpecDialog(QDialog):
                             price_val = float(price_text) if price_text else None
                         except (ValueError, TypeError):
                             price_val = None
-                    rows.append((name_item.text().strip(), code_item.text().strip() if code_item else "", price_val))
+                    rows.append((spec_name, code_item.text().strip() if code_item else "", price_val))
             if not rows:
                 rows = self.db.safe_fetchall(
                     "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
@@ -2542,10 +2761,10 @@ class ProductSpecDialog(QDialog):
         """从当前表格读取规格信息，包含尚未保存的价格。"""
         specs = []
         for r in range(self.table.rowCount()):
-            name_item = self.table.item(r, self.COL_SPEC_NAME)
             price_item = self.table.item(r, self.COL_SALE_PRICE)
             code_item = self.table.item(r, self.COL_SPEC_CODE)
-            if not name_item or not name_item.text().strip():
+            spec_name = self._compose_spec_name(r)
+            if not spec_name:
                 continue
             price = None
             if price_item:
@@ -2556,7 +2775,7 @@ class ProductSpecDialog(QDialog):
                     price = None
             specs.append({
                 "row": r,
-                "name": name_item.text().strip(),
+                "name": spec_name,
                 "code": code_item.text().strip() if code_item else "",
                 "price": price,
             })
@@ -3024,7 +3243,12 @@ SKU名称尽量接近35字，最多不超过40字。
 
             def select_option(opt_text, r=row):
                 final_name = self._sanitize_ai_spec_name(opt_text)
-                self.table.item(r, 1).setText(final_name)
+                if self.two_level_specs:
+                    self._set_spec_name_cells(r, final_name)
+                else:
+                    self.table.item(r, self.COL_SPEC_NAME).setText(final_name)
+                self._refresh_spec_filter_options()
+                self._apply_spec_filters()
 
                 clipboard = QApplication.clipboard()
                 clipboard.setText(final_name)
@@ -3212,10 +3436,10 @@ SKU名称尽量接近35字，最多不超过40字。
         rows = []
         if hasattr(self, "table"):
             for r in range(self.table.rowCount()):
-                name_item = self.table.item(r, self.COL_SPEC_NAME)
                 code_item = self.table.item(r, self.COL_SPEC_CODE)
                 price_item = self.table.item(r, self.COL_SALE_PRICE)
-                if not name_item or not name_item.text().strip():
+                spec_name = self._compose_spec_name(r)
+                if not spec_name:
                     continue
                 price_val = None
                 if price_item:
@@ -3224,7 +3448,7 @@ SKU名称尽量接近35字，最多不超过40字。
                         price_val = float(price_text) if price_text else None
                     except (ValueError, TypeError):
                         price_val = None
-                rows.append((name_item.text().strip(), code_item.text().strip() if code_item else "", price_val))
+                rows.append((spec_name, code_item.text().strip() if code_item else "", price_val))
         if not rows:
             rows = self.db.safe_fetchall(
                 "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?",
@@ -3745,7 +3969,7 @@ SKU名称尽量接近35字，最多不超过40字。
         total_orders = sum(spec_order_counts.values())
 
         for row in range(self.table.rowCount()):
-            spec_code_item = self.table.item(row, 2)
+            spec_code_item = self.table.item(row, self.COL_SPEC_CODE)
             if not spec_code_item:
                 continue
             spec_code = str(spec_code_item.text()).strip()
@@ -3886,7 +4110,7 @@ SKU名称尽量接近35字，最多不超过40字。
         current_total = sum(current_spec_counts.values())
 
         for row in range(self.table.rowCount()):
-            spec_code_item = self.table.item(row, 2)
+            spec_code_item = self.table.item(row, self.COL_SPEC_CODE)
             if not spec_code_item:
                 continue
             spec_code = str(spec_code_item.text()).strip()
@@ -4066,6 +4290,51 @@ SKU名称尽量接近35字，最多不超过40字。
             if abs(locked_weight_sum - 100.0) > 0.01:
                 QMessageBox.information(self, "提示", f"所有行已锁定，总权重：{locked_weight_sum:.2f}%")
 
+    def _format_log_number(self, value, suffix=""):
+        try:
+            num = float(value)
+            text = f"{num:.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            text = str(value)
+        return f"{text}{suffix}"
+
+    def _build_metric_change(self, metric, old, new, text, change_type, time_str):
+        return {
+            "time": time_str,
+            "metric": metric,
+            "old": old,
+            "new": new,
+            "text": text,
+            "type": change_type,
+        }
+
+    def _calculate_weighted_margin_from_specs(self, specs, discount_amount):
+        total_weighted_margin = 0.0
+        total_weight = 0.0
+        for spec in specs:
+            try:
+                spec_code = spec.get("spec_code", "")
+                sale_price = float(spec.get("sale_price") or 0)
+                weight = float(spec.get("weight_percent") or 0)
+                if sale_price <= 0 or weight <= 0:
+                    continue
+
+                cost_rows = self.db.safe_fetchall(
+                    "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                    (spec_code,)
+                )
+                cost = float(cost_rows[0][0]) if cost_rows and cost_rows[0][0] else 0.0
+                final_price = sale_price - discount_amount
+                if final_price <= 0 or cost <= 0:
+                    continue
+
+                margin = (final_price - cost) / final_price
+                total_weighted_margin += margin * weight
+                total_weight += weight
+            except Exception:
+                continue
+        return (total_weighted_margin / total_weight * 100) if total_weight > 0 else 0.0
+
     def save_data(self):
         """
         【中文功能说明】
@@ -4082,35 +4351,56 @@ SKU名称尽量接近35字，最多不超过40字。
         try:
             # 1. 获取旧数据（用于对比价格和检测删除）
             old_rows = self.db.safe_fetchall(
-                "SELECT spec_name, spec_code, sale_price FROM product_specs WHERE product_id=?", 
+                "SELECT spec_name, spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", 
                 (self.product_id,)
             )
             old_price_map = {r[1]: r[2] for r in old_rows} # {编码: 旧价格}
             old_name_map = {r[1]: r[0] for r in old_rows}  # {编码: 旧名称}
             old_codes_set = set(old_price_map.keys())       # 旧编码集合
+            old_specs_for_margin = [
+                {
+                    "spec_name": r[0],
+                    "spec_code": r[1],
+                    "sale_price": r[2],
+                    "weight_percent": r[3],
+                }
+                for r in old_rows
+            ]
+
+            old_discount_rows = self.db.safe_fetchall(
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
+                (self.product_id,)
+            )
+            old_coupon = old_discount_rows[0][0] if old_discount_rows and old_discount_rows[0][0] else 0
+            old_new_customer = old_discount_rows[0][1] if old_discount_rows and old_discount_rows[0][1] else 0
+            old_roi = old_discount_rows[0][2] if old_discount_rows and old_discount_rows[0][2] else 0
+            old_return_rate = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
+            old_discount_amount = max(old_coupon, old_new_customer)
+            old_margin_pct = self._calculate_weighted_margin_from_specs(old_specs_for_margin, old_discount_amount)
             
             # 准备新数据
             new_specs = []
-            price_changes = []      # 存储调价记录 [(编码, 旧价, 新价)]
+            price_changes = []      # 存储调价记录 [(名称, 编码, 旧价, 新价)]
             current_codes_set = set() # 存储当前表格中存在的编码
             
             # 2. 遍历当前表格收集新数据
             row_count = self.table.rowCount()
             
             for r in range(row_count):
-                item_name = self.table.item(r, 1)
-                item_code = self.table.item(r, 2)
-                item_price = self.table.item(r, 4)
+                item_code = self.table.item(r, self.COL_SPEC_CODE)
+                item_price = self.table.item(r, self.COL_SALE_PRICE)
                 item_weight = self.table.item(r, self.COL_WEIGHT)  # 权重列（可能带锁图标）
                 
-                if not item_name or not item_code:
+                if not item_code:
                     continue
 
-                spec_name = item_name.text().strip()
+                spec_name = self._compose_spec_name(r)
                 # 规格名称最多40字符
-                if len(spec_name) > 40:
+                if len(spec_name) > 40 and not self.two_level_specs:
                     spec_name = spec_name[:40]
-                    item_name.setText(spec_name)
+                    item_name = self.table.item(r, self.COL_SPEC_NAME)
+                    if item_name:
+                        item_name.setText(spec_name)
                 spec_code = item_code.text().strip()
                 
                 # 记录当前存在的编码
@@ -4143,10 +4433,10 @@ SKU名称尽量接近35字，最多不超过40字。
                 if spec_code in old_price_map:
                     old_price = old_price_map[spec_code]
                     if abs(new_price - old_price) > 0.001:
-                        price_changes.append((spec_code, old_price, new_price))
+                        price_changes.append((spec_name or old_name_map.get(spec_code, spec_code), spec_code, old_price, new_price))
                 elif new_price > 0:
                     # 新加的规格
-                    price_changes.append((spec_code, 0.0, new_price))
+                    price_changes.append((spec_name or spec_code, spec_code, 0.0, new_price))
 
             # 3. 检测删除操作
             deleted_codes = old_codes_set - current_codes_set
@@ -4157,19 +4447,18 @@ SKU名称尽量接近35字，最多不超过40字。
 
             # 4. 执行数据库事务 (先删后插)
             # 先保存优惠券和新客立减金额
-            # 获取旧值用于判断是否变化
-            old_discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
-                (self.product_id,)
-            )
-            old_coupon = old_discount_rows[0][0] if old_discount_rows and old_discount_rows[0][0] else 0
-            old_new_customer = old_discount_rows[0][1] if old_discount_rows and old_discount_rows[0][1] else 0
-            old_roi = old_discount_rows[0][2] if old_discount_rows and old_discount_rows[0][2] else 0
-            old_return_rate = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
-            
             # 记录是否有投产/优惠券变化
             param_changed = False
             param_change_details = []
+            metric_change_specs = []
+            coupon_amount = old_coupon
+            new_customer_discount = old_new_customer
+            current_roi = old_roi
+            return_rate = old_return_rate
+            is_limited_time = 0
+            is_marketing = 0
+            old_limited_time = 0
+            old_marketing = 0
             
             try:
                 coupon_amount = float(self.coupon_input.text()) if self.coupon_input.text() else 0
@@ -4258,37 +4547,18 @@ SKU名称尽量接近35字，最多不超过40字。
             
             # 5. 生成并写入日志 (如果有变化或删除)
             if price_changes or deleted_logs or param_changed:
-                # 读取优惠券和新客立减金额
-                discount_rows = self.db.safe_fetchall(
-                    "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?",
-                    (self.product_id,)
-                )
-                coupon_amount = discount_rows[0][0] if discount_rows and discount_rows[0][0] else 0
-                new_customer_discount = discount_rows[0][1] if discount_rows and discount_rows[0][1] else 0
-                total_discount = coupon_amount + new_customer_discount
+                discount_amount = max(coupon_amount, new_customer_discount)
 
                 # 重新计算保存后的综合毛利（基于优惠后的最终价格）
                 rows = self.db.safe_fetchall(
-                    "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", 
+                    "SELECT spec_name, spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", 
                     (self.product_id,)
                 )
-                total_weighted_margin = 0.0
-                total_weight = 0.0
-                
-                for r in rows:
-                    sc, sp, w = r[0], r[1], r[2]
-                    if sp is None or w is None: continue
-                    
-                    cr = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (sc,))
-                    c = cr[0][0] if cr else 0.0
-                    
-                    final_price = sp - total_discount
-                    if final_price > 0:
-                        m = (final_price - c) / final_price
-                        total_weighted_margin += m * w
-                        total_weight += w
-                
-                current_margin_pct = (total_weighted_margin / total_weight * 100) if total_weight > 0 else 0.0
+                new_specs_for_margin = [
+                    {"spec_name": r[0], "spec_code": r[1], "sale_price": r[2], "weight_percent": r[3]}
+                    for r in rows
+                ]
+                current_margin_pct = self._calculate_weighted_margin_from_specs(new_specs_for_margin, discount_amount)
                 
                 # 获取当前日期
                 now = datetime.now()
@@ -4307,49 +4577,112 @@ SKU名称尽量接近35字，最多不超过40字。
                     except:
                         existing_logs = []
                 
-                # 从历史日志中提取最近一次记录的综合毛利值
-                last_recorded_margin = None
-                if existing_logs:
-                    for log_entry in reversed(existing_logs):
-                        log_text = log_entry.get("text", "")
-                        margin_match = re.search(r'综合毛利[为为]?\s*([\d.]+)%', log_text)
-                        if margin_match:
-                            last_recorded_margin = float(margin_match.group(1))
-                            break
-                
                 # 判断综合毛利是否发生实质性变化（阈值0.1%）
                 MARGIN_CHANGE_THRESHOLD = 0.1
-                margin_changed = False
-                if last_recorded_margin is None:
-                    margin_changed = True
-                else:
-                    margin_changed = abs(current_margin_pct - last_recorded_margin) >= MARGIN_CHANGE_THRESHOLD
+                margin_changed = abs(current_margin_pct - old_margin_pct) >= MARGIN_CHANGE_THRESHOLD
                 
                 # 构建日志文本
                 time_str = now.strftime("%H:%M")
-                
+                metric_changes = []
                 log_parts = []
+
                 if price_changes:
-                    change_details = "; ".join([f"{code}: {old:.2f}→{new:.2f}" for code, old, new in price_changes])
-                    log_parts.append(f"调整售价 [{change_details}]")
+                    for spec_name, code, old, new in price_changes:
+                        old_text = self._format_log_number(old, "元")
+                        new_text = self._format_log_number(new, "元")
+                        if old <= 0:
+                            change_text = f"{spec_name}设置售价到{new_text}"
+                            change_type = "price_set"
+                        elif new > old:
+                            change_text = f"{spec_name}从{old_text}涨价到{new_text}"
+                            change_type = "price_increase"
+                        else:
+                            change_text = f"{spec_name}从{old_text}降价到{new_text}"
+                            change_type = "price_decrease"
+                        log_parts.append(change_text)
+                        metric_changes.append(self._build_metric_change(
+                            "规格售价", old_text, new_text, change_text, change_type, time_str
+                        ))
+
                 if deleted_logs:
                     log_parts.extend(deleted_logs)
-                if param_changed:
-                    log_parts.append(f"[{'; '.join(param_change_details)}]")
-                
-                # 仅当综合毛利发生实质性变化时添加毛利后缀
+                    for deleted_text in deleted_logs:
+                        metric_changes.append(self._build_metric_change(
+                            "规格删除", "", "", deleted_text, "spec_deleted", time_str
+                        ))
+
+                if coupon_amount != old_coupon:
+                    old_text = self._format_log_number(old_coupon, "元")
+                    new_text = self._format_log_number(coupon_amount, "元")
+                    if coupon_amount > 0 and old_coupon <= 0:
+                        change_text = f"优惠券设置为{new_text}"
+                    elif coupon_amount <= 0:
+                        change_text = f"优惠券从{old_text}取消"
+                    else:
+                        change_text = f"优惠券从{old_text}调整到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("优惠券", old_text, new_text, change_text, "coupon", time_str))
+
+                if new_customer_discount != old_new_customer:
+                    old_text = self._format_log_number(old_new_customer, "元")
+                    new_text = self._format_log_number(new_customer_discount, "元")
+                    if new_customer_discount > 0 and old_new_customer <= 0:
+                        change_text = f"新客立减设置为{new_text}"
+                    elif new_customer_discount <= 0:
+                        change_text = f"新客立减从{old_text}取消"
+                    else:
+                        change_text = f"新客立减从{old_text}调整到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("新客立减", old_text, new_text, change_text, "new_customer_discount", time_str))
+
+                if current_roi != old_roi:
+                    old_text = self._format_log_number(old_roi)
+                    new_text = self._format_log_number(current_roi)
+                    direction = "提高" if current_roi > old_roi else "降低"
+                    change_text = f"投产从{old_text}{direction}到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("投产", old_text, new_text, change_text, "roi", time_str))
+
+                if return_rate != old_return_rate:
+                    old_text = self._format_log_number(old_return_rate, "%")
+                    new_text = self._format_log_number(return_rate, "%")
+                    direction = "提高" if return_rate > old_return_rate else "降低"
+                    change_text = f"退货率从{old_text}{direction}到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("退货率", old_text, new_text, change_text, "return_rate", time_str))
+
+                if is_limited_time != old_limited_time:
+                    old_text = "已报名" if old_limited_time else "未报名"
+                    new_text = "已报名" if is_limited_time else "未报名"
+                    change_text = "报名了限时限量购" if is_limited_time else "取消了限时限量购"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("限时限量购", old_text, new_text, change_text, "limited_time", time_str))
+
+                if is_marketing != old_marketing:
+                    old_text = "已报名" if old_marketing else "未报名"
+                    new_text = "已报名" if is_marketing else "未报名"
+                    change_text = "报名了营销活动" if is_marketing else "取消了营销活动"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("营销活动", old_text, new_text, change_text, "marketing", time_str))
+
                 if margin_changed:
-                    log_text = f"自动记录：{'; '.join(log_parts)}，新综合毛利为 {current_margin_pct:.1f}%"
-                else:
-                    log_text = f"自动记录：{'; '.join(log_parts)}"
+                    old_text = self._format_log_number(old_margin_pct, "%")
+                    new_text = self._format_log_number(current_margin_pct, "%")
+                    change_text = f"综合毛利从{old_text}变为{new_text}"
+                    metric_changes.append(self._build_metric_change("综合毛利", old_text, new_text, change_text, "gross_margin", time_str))
+                
+                has_price_increase = any(old > 0 and new > old for _, _, old, new in price_changes)
+                log_text = "；".join(log_parts)
+                if has_price_increase:
+                    log_text = f"{log_text}，新综合毛利 {current_margin_pct:.1f}%"
                 
                 # 追加新日志
-                existing_logs.append({"time": time_str, "text": log_text})
+                existing_logs.append({"time": time_str, "text": log_text, "changes": metric_changes})
                 
                 # 写回数据库
                 self.db.safe_execute(
                     "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
-                    (self.product_id, year, month, day, json.dumps(existing_logs))
+                    (self.product_id, year, month, day, json.dumps(existing_logs, ensure_ascii=False))
                 )
                 
                 # 提示用户

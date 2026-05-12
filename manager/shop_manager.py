@@ -1709,6 +1709,21 @@ class ShopManagerApp(QMainWindow):
         
         QTimer.singleShot(10, self.update_frozen_geometry)
         
+    def _format_operation_record_for_cell(self, record):
+        time_text = record.get("time", "")
+        body = str(record.get("text", "") or "")
+        body = re.sub(r"^自动记录[:：]\s*", "", body).strip()
+        if not body and record.get("changes"):
+            body = "；".join([c.get("text", "") for c in record.get("changes", []) if c.get("text")])
+        return f"[{time_text}] {body}" if time_text else body
+
+    def _apply_record_cell_style(self, item):
+        font = QFont("Microsoft YaHei", 11)
+        font.setBold(True)
+        item.setFont(font)
+        item.setForeground(QColor("#1f2d3d"))
+        item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
+
     def render_records_for_product(self, row, prod_id, days):
         try:
             # 1. 从数据库获取最新记录
@@ -1726,7 +1741,7 @@ class ShopManagerApp(QMainWindow):
             
             # 定义基础参数
             min_row_height = 120
-            pixel_per_line = 24
+            pixel_per_line = 30
             
             max_needed_height = min_row_height
 
@@ -1735,7 +1750,7 @@ class ShopManagerApp(QMainWindow):
                 
                 # 构建显示文本
                 if cell_data:
-                    display_text = "\n".join([f"[{item.get('time', '')}] {item.get('text', '')}" for item in cell_data])
+                    display_text = "\n".join([self._format_operation_record_for_cell(item) for item in cell_data])
                 else:
                     display_text = ""
                 
@@ -1752,7 +1767,7 @@ class ShopManagerApp(QMainWindow):
                 item.setText(display_text)
                 
                 # 确保文字靠上对齐，方便多行显示
-                item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
+                self._apply_record_cell_style(item)
 
                 # 【关键修复 3】更保守的行高计算
                 if display_text:
@@ -1787,7 +1802,7 @@ class ShopManagerApp(QMainWindow):
                 cell_data = rec_dict.get(day, [])
                 
                 if cell_data:
-                    display_text = "\n".join([f"[{item.get('time', '')}] {item.get('text', '')}" for item in cell_data])
+                    display_text = "\n".join([self._format_operation_record_for_cell(item) for item in cell_data])
                 else:
                     display_text = ""
                 
@@ -1798,7 +1813,7 @@ class ShopManagerApp(QMainWindow):
                     self.table.setItem(row, day, item)
                 
                 item.setText(display_text)
-                item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
+                self._apply_record_cell_style(item)
 
         except Exception as e:
             print(f"渲染店铺记录失败：{e}")

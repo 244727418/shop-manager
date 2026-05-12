@@ -2,15 +2,10 @@
 """操作记录、每日记录对话框"""
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QWidget, QMessageBox, QLineEdit, QTextEdit, QDateEdit, QFrame
+    QScrollArea, QWidget, QMessageBox, QLineEdit, QTextEdit, QDateEdit, QFrame,
+    QTimeEdit, QCheckBox, QSizePolicy
 )
-from PyQt5.QtCore import QDate, Qt
-
-try:
-    from ..widgets import RecordRow
-except ImportError:
-    from widgets import RecordRow
-
+from PyQt5.QtCore import QDate, Qt, QTime
 
 class OperationRecordDialog(QDialog):
     """操作记录弹窗编辑对话框"""
@@ -28,43 +23,172 @@ class OperationRecordDialog(QDialog):
         self.rows = []
 
         self.setWindowTitle(f"编辑操作记录 - {year}年{month:02d}月{day:02d}日")
-        self.resize(500, 300)
+        self.resize(900, 620)
+        self.setMinimumSize(760, 500)
         self.init_ui()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(5)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(10, 8, 10, 10)
 
         debug_label = QLabel("🔧 调试: records.py (OperationRecordDialog)")
-        debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
+        debug_label.setFixedHeight(16)
+        debug_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        debug_label.setStyleSheet("font-size: 9px; color: #999; background-color: #f4f4f4; padding: 1px 6px; border: 1px solid #e5e5e5;")
         debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         debug_label.setCursor(Qt.IBeamCursor)
         main_layout.addWidget(debug_label)
+
+        add_panel = QFrame()
+        add_panel.setFrameShape(QFrame.StyledPanel)
+        add_panel.setStyleSheet("""
+            QFrame {
+                background: #f8fafc;
+                border: 1px solid #d9e2ec;
+                border-radius: 4px;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+                color: #34495e;
+                font-weight: bold;
+            }
+        """)
+        add_layout = QVBoxLayout(add_panel)
+        add_layout.setContentsMargins(10, 8, 10, 8)
+        add_layout.setSpacing(6)
+
+        add_title = QLabel("新增操作记录")
+        add_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; border: none; background: transparent;")
+        add_layout.addWidget(add_title)
+
+        input_layout = QHBoxLayout()
+        input_layout.setSpacing(8)
+
+        input_layout.addWidget(QLabel("时间"))
+        self.new_time_edit = QTimeEdit()
+        self.new_time_edit.setDisplayFormat("HH:mm")
+        self.new_time_edit.setTime(QTime.currentTime())
+        self.new_time_edit.setFixedWidth(70)
+        input_layout.addWidget(self.new_time_edit)
+
+        input_layout.addWidget(QLabel("内容"))
+        self.new_text_edit = QTextEdit()
+        self.new_text_edit.setPlaceholderText("输入本次操作记录...")
+        self.new_text_edit.setMinimumHeight(56)
+        self.new_text_edit.setMaximumHeight(80)
+        self.new_text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        input_layout.addWidget(self.new_text_edit, 1)
+
+        self.chk_task = QCheckBox("任务")
+        self.chk_reminder = QCheckBox("提醒")
+        input_layout.addWidget(self.chk_task)
+        input_layout.addWidget(self.chk_reminder)
+
+        self.reminder_date = QDateEdit()
+        self.reminder_date.setCalendarPopup(True)
+        self.reminder_date.setDate(QDate.currentDate().addDays(1))
+        self.reminder_date.setDisplayFormat("yyyy-MM-dd")
+        self.reminder_date.setFixedWidth(110)
+        self.reminder_date.setVisible(False)
+        input_layout.addWidget(self.reminder_date)
+
+        self.reminder_time = QTimeEdit()
+        self.reminder_time.setDisplayFormat("HH:mm")
+        self.reminder_time.setTime(QTime.currentTime())
+        self.reminder_time.setFixedWidth(70)
+        self.reminder_time.setVisible(False)
+        input_layout.addWidget(self.reminder_time)
+        self.chk_reminder.stateChanged.connect(self._toggle_reminder_inputs)
+
+        btn_add = QPushButton("+ 添加")
+        btn_add.setFixedWidth(76)
+        btn_add.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2980b9; }
+        """)
+        btn_add.clicked.connect(self.add_new_record_from_input)
+        input_layout.addWidget(btn_add)
+
+        add_layout.addLayout(input_layout)
+        main_layout.addWidget(add_panel)
+
+        body_layout = QHBoxLayout()
+        body_layout.setSpacing(10)
+
+        manual_panel = QFrame()
+        manual_panel.setFrameShape(QFrame.StyledPanel)
+        manual_panel.setStyleSheet("QFrame { border: 1px solid #e1e5ea; border-radius: 4px; background: white; }")
+        manual_layout = QVBoxLayout(manual_panel)
+        manual_layout.setContentsMargins(8, 8, 8, 8)
+        manual_layout.setSpacing(6)
+
+        manual_title = QLabel("文字记录区")
+        manual_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; border: none; background: transparent;")
+        manual_layout.addWidget(manual_title)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll_widget = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
-        self.scroll_layout.setSpacing(0)
+        self.scroll_layout.setSpacing(6)
         self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setAlignment(Qt.AlignTop)
         self.scroll.setWidget(self.scroll_widget)
-        self.scroll.setMinimumHeight(150)
-        self.scroll.setMaximumHeight(200)
+        self.scroll.setMinimumHeight(260)
+        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         for rec in self.records:
-            self.add_row(rec.get("time", ""), rec.get("text", ""))
-        if not self.records:
-            self.add_row()
+            self.add_row(rec.get("time", ""), rec.get("text", ""), rec)
 
-        main_layout.addWidget(self.scroll)
+        manual_layout.addWidget(self.scroll, 1)
+        body_layout.addWidget(manual_panel, 3)
+
+        metric_panel = QFrame()
+        metric_panel.setFrameShape(QFrame.StyledPanel)
+        metric_panel.setStyleSheet("QFrame { border: 1px solid #e1e5ea; border-radius: 4px; background: #fbfcfe; }")
+        metric_layout = QVBoxLayout(metric_panel)
+        metric_layout.setContentsMargins(8, 8, 8, 8)
+        metric_layout.setSpacing(6)
+
+        metric_title = QLabel("系统指标变化")
+        metric_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; border: none; background: transparent;")
+        metric_layout.addWidget(metric_title)
+
+        metric_scroll = QScrollArea()
+        metric_scroll.setWidgetResizable(True)
+        metric_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        metric_widget = QWidget()
+        metric_list = QVBoxLayout(metric_widget)
+        metric_list.setContentsMargins(0, 0, 0, 0)
+        metric_list.setSpacing(6)
+        metric_list.setAlignment(Qt.AlignTop)
+
+        metric_changes = self._collect_metric_changes()
+        if metric_changes:
+            for change in metric_changes:
+                metric_list.addWidget(self._create_metric_card(change))
+        else:
+            empty = QLabel("暂无系统指标变化")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("color: #95a5a6; padding: 30px; border: none; background: transparent;")
+            metric_list.addWidget(empty)
+
+        metric_scroll.setWidget(metric_widget)
+        metric_layout.addWidget(metric_scroll, 1)
+        body_layout.addWidget(metric_panel, 2)
+
+        main_layout.addLayout(body_layout, 1)
 
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(10)
-
-        btn_add = QPushButton("+ 加一行")
-        btn_add.setStyleSheet("padding: 5px 15px;")
-        btn_add.clicked.connect(lambda: self.add_row())
 
         btn_save = QPushButton("💾 保存")
         btn_save.setStyleSheet("""
@@ -91,17 +215,81 @@ class OperationRecordDialog(QDialog):
         """)
         btn_cancel.clicked.connect(self.reject)
 
-        bottom_layout.addWidget(btn_add)
         bottom_layout.addStretch()
         bottom_layout.addWidget(btn_save)
         bottom_layout.addWidget(btn_cancel)
 
         main_layout.addLayout(bottom_layout)
 
-    def add_row(self, time_str="", text=""):
-        row = RecordRow(time_str, text, with_task_buttons=True, parent_dialog=self)
+    def _toggle_reminder_inputs(self, state):
+        visible = state == Qt.Checked
+        self.reminder_date.setVisible(visible)
+        self.reminder_time.setVisible(visible)
+
+    def add_new_record_from_input(self):
+        text = self.new_text_edit.toPlainText().strip()
+        if not text:
+            return
+        row = self.add_row(self.new_time_edit.time().toString("HH:mm"), text)
+        row.pending_task = self.chk_task.isChecked()
+        row.pending_reminder = self.chk_reminder.isChecked()
+        if row.pending_reminder:
+            row.pending_reminder_datetime = f"{self.reminder_date.date().toString('yyyy-MM-dd')} {self.reminder_time.time().toString('HH:mm')}"
+        self.new_text_edit.clear()
+        self.chk_task.setChecked(False)
+        self.chk_reminder.setChecked(False)
+        self.new_time_edit.setTime(QTime.currentTime())
+
+    def add_row(self, time_str="", text="", original_record=None):
+        row = OperationRecordRow(time_str, text, original_record)
         self.scroll_layout.addWidget(row)
         self.rows.append(row)
+        return row
+
+    def _collect_metric_changes(self):
+        changes = []
+        for rec in self.records:
+            for change in rec.get("changes", []) or []:
+                item = dict(change)
+                item.setdefault("time", rec.get("time", ""))
+                changes.append(item)
+        return changes
+
+    def _create_metric_card(self, change):
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        card.setStyleSheet("""
+            QFrame {
+                background: white;
+                border: 1px solid #dfe6ee;
+                border-radius: 4px;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(3)
+
+        top = QLabel(f"{change.get('time', '')}  {change.get('metric', '指标变化')}")
+        top.setStyleSheet("font-size: 12px; font-weight: bold; color: #34495e;")
+        layout.addWidget(top)
+
+        old_value = change.get("old", "")
+        new_value = change.get("new", "")
+        if old_value != "" or new_value != "":
+            value = QLabel(f"{old_value}  ->  {new_value}")
+            value.setStyleSheet("font-size: 12px; color: #8e44ad; font-weight: bold;")
+            value.setWordWrap(True)
+            layout.addWidget(value)
+
+        text = QLabel(change.get("text", ""))
+        text.setWordWrap(True)
+        text.setStyleSheet("font-size: 12px; color: #2c3e50; line-height: 1.35;")
+        layout.addWidget(text)
+        return card
 
     def save(self):
         data = []
@@ -112,7 +300,10 @@ class OperationRecordDialog(QDialog):
             try:
                 row_data = row.get_data()
                 if row_data and row_data.get("text"):
-                    data.append({"time": row_data.get("time", ""), "text": row_data.get("text", "")})
+                    record = {"time": row_data.get("time", ""), "text": row_data.get("text", "")}
+                    if row_data.get("changes"):
+                        record["changes"] = row_data.get("changes")
+                    data.append(record)
 
                     if row_data.get("add_task"):
                         task_list.append(row_data.get("text", ""))
@@ -155,6 +346,86 @@ class OperationRecordDialog(QDialog):
                 print(f"添加任务/提醒失败: {e}")
 
         self.accept()
+
+
+class OperationRecordRow(QWidget):
+    """操作记录列表中的单条文本记录。"""
+    def __init__(self, time_str="", text="", original_record=None):
+        super().__init__()
+        self.original_record = original_record or {}
+        self.pending_task = False
+        self.pending_reminder = False
+        self.pending_reminder_datetime = ""
+        self.deleted = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setSpacing(8)
+
+        self.setStyleSheet("""
+            QWidget {
+                background: #ffffff;
+                border: 1px solid #e7ebef;
+                border-radius: 4px;
+            }
+            QTimeEdit, QTextEdit {
+                border: 1px solid #d5dce3;
+                border-radius: 3px;
+                background: white;
+            }
+        """)
+
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.setFixedWidth(70)
+        parsed_time = QTime.fromString(time_str or "", "HH:mm")
+        self.time_edit.setTime(parsed_time if parsed_time.isValid() else QTime.currentTime())
+        layout.addWidget(self.time_edit)
+
+        self.text_edit = QTextEdit(text)
+        self.text_edit.setMinimumHeight(54)
+        self.text_edit.setMaximumHeight(110)
+        self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(self.text_edit, 1)
+
+        self.btn_del = QPushButton("删除")
+        self.btn_del.setFixedSize(48, 28)
+        self.btn_del.setStyleSheet("""
+            QPushButton {
+                border: none;
+                background: #e74c3c;
+                color: white;
+                border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background: #c0392b; }
+        """)
+        self.btn_del.clicked.connect(self.mark_deleted)
+        layout.addWidget(self.btn_del)
+
+    def mark_deleted(self):
+        self.deleted = True
+        self.hide()
+        self.setParent(None)
+        self.deleteLater()
+
+    def get_data(self):
+        if self.deleted:
+            return {}
+        text = self.text_edit.toPlainText().strip()
+        data = {
+            "time": self.time_edit.time().toString("HH:mm"),
+            "text": text,
+            "add_task": self.pending_task,
+            "add_reminder": self.pending_reminder,
+        }
+        if self.pending_reminder:
+            data["reminder_datetime"] = self.pending_reminder_datetime
+        changes = self.original_record.get("changes")
+        if changes:
+            data["changes"] = changes
+        return data
 
 
 class DailyRecordDialog(QDialog):
