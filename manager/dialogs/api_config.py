@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import time
 
-SPEC_PROMPT_VERSION = "sku_axis_no_style_label_v3"
+SPEC_PROMPT_VERSION = "sku_axis_product_memo_deterrence_v4"
 
 
 def get_default_spec_base_prompt_v2():
@@ -16,12 +16,18 @@ def get_default_spec_base_prompt_v2():
 你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
 
 【内部发散步骤】（只在心里完成，不要输出分析过程）
-1. 先识别产品主体词：从商品标题、产品信息、本次补充提示、原规格中提取最短但清楚的商品主体名。
+1. 先识别产品主体词：从商品标题、产品信息、主界面图片备注、本次补充提示、原规格中提取最短但清楚的商品主体名。
 2. 每条SKU正文都必须包含产品主体词或更明确的同义主体，不能优化后只剩精品装、家庭装、尝鲜款、礼盒装这类空泛规格。
-3. 再识别购买人群和购买痛点：谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
+3. 再识别购买人群和购买痛点：优先结合主界面图片备注判断该链接主要针对的人群，再思考谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
 4. 针对不同品类提取可感知价值：食品看口感、营养成分、烹饪/食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
 5. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
 6. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
+
+【目标人群备注】
+主界面图片备注：{product_memo}
+这条备注代表当前商品链接长期想打的目标人群，是命名的重要方向。
+如果本次补充提示和主界面图片备注同时存在，本次补充提示用于临时细化，主界面图片备注用于判断长期目标人群和核心消费场景。
+正向转化时围绕该目标人群的痛点、期待和购买理由发散；负向转化时让该目标人群之外的用户感觉当前规格不适合自己。
 
 【合规边界】
 可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
@@ -46,7 +52,11 @@ def get_default_conversion_axis_prompt_v2():
 数值在+1到+5时，只做轻度购买引导，不要过度促销。
 数值为0时，保持客观中性，只优化清晰度、主体识别和规格差异。
 负向转化：目标不是说产品差，而是让非目标用户主动放弃当前规格，倾向选择其他规格。
-数值越接近-10，劝退越明显：必须写出选择门槛、适用限制或需求不匹配，不能写成人人都想买的强转化文案。
+负向转化必须按强度分层：
+-1到-4：轻度筛选，表达更适合特定需求，避免人人适合。
+-5到-7：明显劝退，必须让非目标用户感觉不太适合自己，可写需求不匹配、轻用无需、先看其他规格。
+-8到-10：强劝退，必须出现筛选门槛词，例如慎选、先别选、轻需求无需、普通家用看基础款、仅适合高频、仅适合送礼、仅适合囤货、仅适合重度需求。
+数值越接近-10，越不能写成促进购买文案，禁止出现放心选、值得入、强推、闭眼入、必选、人人适合、品质必选等强转化表达。
 高价人群负向时尤其要强调只适合高频使用、重度需求、送礼、囤货、大规格、高标准用户；普通用户会觉得用不上、没必要、需求不匹配。
 低价人群负向时强调预算不匹配、轻用无需选、先看基础规格、入门不建议。
 负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小/大、预算不匹配、使用频率不匹配、场景不匹配、建议对比其他规格等表达。"""
@@ -59,7 +69,9 @@ def get_default_price_audience_prompt_v2():
 高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
 当转化方向为负数且价格人群偏高时，劝退方式要变成“高门槛筛选”：强调该规格更适合高标准用户、重度使用者、礼赠场景、大规格需求、明确品质追求者，让普通用户觉得没必要选它。
 高价人群劝退不要说贵、不划算、质量差，而要用“更适合懂品质/送礼/长期囤用/高频使用/对口感材质有要求的人”来抬高选择门槛。
-高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合”等促进转化表达。
+高价人群负向必须是筛选式劝退，不要写成高端推荐，不要夸到所有人都想买。
+高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合、闭眼入、强推、放心囤”等促进转化表达。
+如果转化方向接近-10且价格人群偏高，SKU中应体现门槛或限制，例如“高频才合适”“送礼再选”“大规格慎选”“轻需求先别选”“普通家用看基础款”。
 数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
 当转化方向为负数且价格人群偏低时，可以强调预算不匹配、入门不建议、日常轻用无需选择、可先看更基础规格，但不能误导当前规格是最低价。
 数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
@@ -1158,7 +1170,7 @@ class SpecPromptEditorDialog(QDialog):
         base_label.setStyleSheet("font-weight: bold; color: #16a085;")
         self.base_layout.addWidget(base_label)
 
-        base_desc = QLabel("💡 可使用变量：{product_name}、{current_spec_name}、{custom_hint}")
+        base_desc = QLabel("💡 可使用变量：{product_name}、{current_spec_name}、{custom_hint}、{product_memo}")
         base_desc.setStyleSheet("color: #6c757d; font-size: 11px;")
         base_desc.setWordWrap(True)
         self.base_layout.addWidget(base_desc)
@@ -1183,7 +1195,7 @@ class SpecPromptEditorDialog(QDialog):
         conversion_label.setStyleSheet("font-weight: bold; color: #27ae60;")
         self.conversion_layout.addWidget(conversion_label)
 
-        conversion_desc = QLabel("💡 可使用变量：{conversion_level}、{conversion_desc}、{product_name}、{current_spec_name}、{custom_hint}")
+        conversion_desc = QLabel("💡 可使用变量：{conversion_level}、{conversion_desc}、{product_name}、{current_spec_name}、{custom_hint}、{product_memo}")
         conversion_desc.setStyleSheet("color: #6c757d; font-size: 11px;")
         conversion_desc.setWordWrap(True)
         self.conversion_layout.addWidget(conversion_desc)
@@ -1606,7 +1618,7 @@ class ProductPromptEditorDialog(QDialog):
         label.setStyleSheet("font-weight: bold; color: #2980b9;")
         layout.addWidget(label)
 
-        desc = QLabel("💡 可使用变量：{price_audience_level}、{price_audience_desc}、{product_name}、{current_spec_name}、{custom_hint}")
+        desc = QLabel("💡 可使用变量：{price_audience_level}、{price_audience_desc}、{product_name}、{current_spec_name}、{custom_hint}、{product_memo}")
         desc.setStyleSheet("color: #6c757d; font-size: 11px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)

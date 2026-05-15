@@ -6,9 +6,10 @@ import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
-    QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit, QLayout
+    QTimeEdit, QDialog, QSizePolicy, QCheckBox, QDateEdit, QLayout,
+    QMenu, QAction
 )
-from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate, QBuffer, QByteArray, QIODevice
+from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate, QBuffer, QByteArray, QIODevice, QTimer
 from PyQt5.QtGui import QPixmap, QIcon
 
 
@@ -26,6 +27,10 @@ class ProductWidget(QWidget):
         self.prod_title = prod_title
         self.main_app = main_app
         self.db = main_app.db
+        self._suppress_next_code_click = False
+        self._code_click_timer = QTimer(self)
+        self._code_click_timer.setSingleShot(True)
+        self._code_click_timer.timeout.connect(self.copy_product_id)
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 2, 5, 2)
@@ -33,6 +38,7 @@ class ProductWidget(QWidget):
 
         img_container = QWidget()
         img_container.setFixedWidth(77)
+        img_container.installEventFilter(self)
         img_layout = QVBoxLayout(img_container)
         img_layout.setContentsMargins(0, 0, 0, 0)
         img_layout.setSpacing(2)
@@ -43,38 +49,20 @@ class ProductWidget(QWidget):
         self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setMouseTracking(True)
         self.img_label.setFocusPolicy(Qt.StrongFocus)
-        self.img_label.setToolTip("悬停后 Ctrl+V 粘贴图片")
+        self.img_label.setToolTip("Ctrl+V 粘贴换图，双击查看大图")
         self.img_label.installEventFilter(self)
         self.set_image_from_data(image_data)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(2)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-
-        btn_img = QPushButton("🔄")
-        btn_img.setFixedSize(22, 22)
-        btn_img.setToolTip("换图")
-        btn_img.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #6c757d; color: white; border-radius: 2px; } QPushButton:hover { background-color: #5a6268; }")
-        btn_img.clicked.connect(self.change_image)
-
-        btn_copy = QPushButton("📋")
-        btn_copy.setFixedSize(22, 22)
-        btn_copy.setToolTip("复制ID")
-        btn_copy.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #17a2b8; color: white; border-radius: 2px; } QPushButton:hover { background-color: #138496; }")
-        btn_copy.clicked.connect(self.copy_product_id)
-
-        btn_del = QPushButton("🗑️")
-        btn_del.setFixedSize(22, 22)
-        btn_del.setToolTip("删除")
-        btn_del.setStyleSheet("QPushButton { font-size: 15px; padding: 0px; background-color: #dc3545; color: white; border-radius: 2px; } QPushButton:hover { background-color: #c82333; }")
-        btn_del.clicked.connect(self.delete_product)
-
-        btn_layout.addWidget(btn_img)
-        btn_layout.addWidget(btn_copy)
-        btn_layout.addWidget(btn_del)
+        self.category_label = QLabel()
+        self.category_label.setAlignment(Qt.AlignCenter)
+        self.category_label.setWordWrap(True)
+        self.category_label.setMaximumHeight(30)
+        self.category_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.category_label.installEventFilter(self)
+        self.update_product_category_display()
 
         img_layout.addWidget(self.img_label)
-        img_layout.addLayout(btn_layout)
+        img_layout.addWidget(self.category_label)
 
         info_layout = QVBoxLayout()
         info_layout.setContentsMargins(0, 0, 0, 0)
@@ -86,8 +74,8 @@ class ProductWidget(QWidget):
         self.code_label = QLabel(f"🆔 {prod_code}")
         self.code_label.setStyleSheet("font-weight: bold; color: #4a90e2; font-size: 11px;")
         self.code_label.setCursor(Qt.PointingHandCursor)
-        self.code_label.mousePressEvent = self._on_code_click
-        self.code_label.setToolTip("双击修改ID")
+        self.code_label.installEventFilter(self)
+        self.code_label.setToolTip("单击复制 ID，双击复制同款")
 
         tag_layout = QHBoxLayout()
         tag_layout.setSpacing(2)
@@ -123,9 +111,18 @@ class ProductWidget(QWidget):
         self.title_label.setStyleSheet("font-size: 11px; color: #333;")
         self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.title_label.setMaximumHeight(32)
+        self.title_label.installEventFilter(self)
 
         self.original_name = prod_code
         self.original_title = prod_title
+
+        self.memo_label = QLabel()
+        self.memo_label.setWordWrap(True)
+        self.memo_label.setMaximumHeight(30)
+        self.memo_label.setCursor(Qt.PointingHandCursor)
+        self.memo_label.installEventFilter(self)
+        self.memo_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.update_product_memo_display()
 
         margin_row1_layout = QHBoxLayout()
         margin_row1_layout.setSpacing(10)
@@ -133,9 +130,11 @@ class ProductWidget(QWidget):
 
         self.margin_label = QLabel("毛利: -")
         self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 12px;")
+        self.margin_label.installEventFilter(self)
 
         self.link_order_label = QLabel("单量：0单")
         self.link_order_label.setStyleSheet("color: #8b4513; font-size: 12px; font-weight: bold;")
+        self.link_order_label.installEventFilter(self)
 
         margin_row1_layout.addWidget(self.margin_label)
         margin_row1_layout.addWidget(self.link_order_label)
@@ -147,10 +146,12 @@ class ProductWidget(QWidget):
 
         self.net_profit_label = QLabel("净利: -")
         self.net_profit_label.setStyleSheet("color: #28a745; font-weight: bold; font-size: 13px;")
+        self.net_profit_label.installEventFilter(self)
 
         self.roi_label = QLabel("")
         self.roi_label.setStyleSheet("font-family: Microsoft YaHei; color: blue; font-size: 13px;")
         self.roi_label.setTextFormat(Qt.RichText)
+        self.roi_label.installEventFilter(self)
 
         self.margin_left_layout.addWidget(self.net_profit_label)
         self.margin_left_layout.addWidget(self.roi_label)
@@ -163,6 +164,7 @@ class ProductWidget(QWidget):
 
         info_layout.addLayout(top_layout)
         info_layout.addWidget(self.title_label)
+        info_layout.addWidget(self.memo_label)
         info_layout.addLayout(margin_layout)
 
         main_layout.addWidget(img_container)
@@ -171,6 +173,119 @@ class ProductWidget(QWidget):
         self.update_margin_display()
         self.update_promo_badges()
         self.update_link_order_count()
+
+    def recommended_row_height(self, base_height=140):
+        extra_lines = getattr(self, "_memo_extra_lines", 0)
+        if extra_lines <= 0:
+            return base_height
+        return base_height + min(36, extra_lines * 12)
+
+    def update_product_category_display(self):
+        try:
+            rows = self.db.safe_fetchall("SELECT product_category_label FROM products WHERE id=?", (self.prod_id,))
+            category = rows[0][0] if rows and rows[0][0] else ""
+        except Exception as e:
+            print(f"读取链接商品类型失败: {e}")
+            category = ""
+
+        if category:
+            text = str(category).strip()
+            display_text = text[:16] + "..." if len(text) > 16 else text
+            self.category_label.setText(f"类型：{display_text}")
+            self.category_label.setToolTip(f"商品类型：{text}")
+            self.category_label.setStyleSheet(
+                "color: #245269; background-color: #e8f4fb; border: 1px solid #b8dff2; "
+                "border-radius: 3px; padding: 2px 3px; font-size: 10px; font-weight: bold;"
+            )
+        else:
+            self.category_label.setText("类型：未识别")
+            self.category_label.setToolTip("成本库未识别到商品类型")
+            self.category_label.setStyleSheet(
+                "color: #777; background-color: #f5f5f5; border: 1px dashed #d0d0d0; "
+                "border-radius: 3px; padding: 2px 3px; font-size: 10px;"
+            )
+
+    def update_product_memo_display(self):
+        try:
+            rows = self.db.safe_fetchall("SELECT product_memo FROM products WHERE id=?", (self.prod_id,))
+            memo = rows[0][0] if rows and rows[0][0] else ""
+        except Exception as e:
+            print(f"读取链接备注失败: {e}")
+            memo = ""
+
+        if memo:
+            raw_memo = str(memo)
+            compact = " ".join(raw_memo.split())
+            explicit_lines = len([line for line in raw_memo.splitlines() if line.strip()])
+            estimated_lines = max(explicit_lines, (len(compact) + 27) // 28)
+            self._memo_extra_lines = max(0, estimated_lines - 2)
+            if self._memo_extra_lines:
+                self.memo_label.setMinimumHeight(42)
+                self.memo_label.setMaximumHeight(46)
+                self._memo_display_lines = 3
+                limit = 96
+            else:
+                self.memo_label.setMinimumHeight(24)
+                self.memo_label.setMaximumHeight(30)
+                self._memo_display_lines = 2
+                limit = 64
+            display_text = compact[:limit] + "..." if len(compact) > limit else compact
+            self.memo_label.setText(f"📝 {display_text}")
+            self.memo_label.setToolTip(str(memo))
+            self.memo_label.setStyleSheet(
+                "color: #7f4f24; background-color: #fff6df; border: 1px solid #f1d29b; "
+                "border-radius: 3px; padding: 1px 3px; font-size: 11px;"
+            )
+        else:
+            self._memo_extra_lines = 0
+            self._memo_display_lines = 1
+            self.memo_label.setMinimumHeight(18)
+            self.memo_label.setMaximumHeight(30)
+            self.memo_label.setText("📝 点击添加备注")
+            self.memo_label.setToolTip("双击添加链接备注")
+            self.memo_label.setStyleSheet(
+                "color: #999; background-color: #f7f7f7; border: 1px dashed #d0d0d0; "
+                "border-radius: 3px; padding: 1px 3px; font-size: 11px; font-style: italic;"
+            )
+
+    def edit_product_memo(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("链接备注")
+        dialog.resize(500, 320)
+        layout = QVBoxLayout(dialog)
+
+        hint = QLabel("备注只显示在主界面当前链接卡片中。")
+        hint.setStyleSheet("color: #666; font-size: 12px; padding: 4px;")
+        layout.addWidget(hint)
+
+        rows = self.db.safe_fetchall("SELECT product_memo FROM products WHERE id=?", (self.prod_id,))
+        current_memo = rows[0][0] if rows and rows[0][0] else ""
+        text_edit = QTextEdit()
+        text_edit.setPlainText(current_memo)
+        text_edit.setPlaceholderText("输入链接备注...")
+        text_edit.setMaximumHeight(190)
+        layout.addWidget(text_edit)
+
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("保存")
+        btn_save.setStyleSheet("QPushButton { background-color: #27ae60; color: white; padding: 8px 20px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #219a52; }")
+        btn_cancel = QPushButton("取消")
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        def save_memo():
+            memo = text_edit.toPlainText().strip()
+            self.db.safe_execute("UPDATE products SET product_memo=? WHERE id=?", (memo, self.prod_id))
+            self.update_product_memo_display()
+            if hasattr(self.main_app, "update_product_row_height"):
+                self.main_app.update_product_row_height(self.prod_id)
+            self.main_app.show_toast("链接备注已更新")
+            dialog.accept()
+
+        btn_save.clicked.connect(save_memo)
+        btn_cancel.clicked.connect(dialog.reject)
+        dialog.exec_()
 
     def update_promo_badges(self):
         try:
@@ -243,7 +358,10 @@ class ProductWidget(QWidget):
                 self.net_profit_label.setText("净利: -")
                 self.margin_label.hide()
                 self.net_profit_label.hide()
+                self.roi_label.setText("")
                 self.link_order_label.setText("单量：0单")
+                if hasattr(self.main_app, "update_product_row_height"):
+                    self.main_app.update_product_row_height(self.prod_id)
                 return
             product_rows = self.main_app.db.safe_fetchall(
                 "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi FROM products WHERE id=?",
@@ -286,7 +404,6 @@ class ProductWidget(QWidget):
                     final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
                 net_profit_text = self._get_net_profit_status(final_net_margin_pct)
                 self.net_profit_label.setText(f"净利:{final_net_margin_pct:.1f}% {net_profit_text}")
-                roi_multiple_text = ""
                 if current_roi > 0 and net_break_even_roi > 0:
                     roi_multiple = current_roi / net_break_even_roi
                     roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">投产:</span><span style="color: #e74c3c; font-weight: bold;">{current_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">{roi_multiple:.2f}倍</span>'
@@ -315,6 +432,8 @@ class ProductWidget(QWidget):
                 self.net_profit_label.show()
                 self.roi_label.setText("")
             self.update_link_order_count()
+            if hasattr(self.main_app, "update_product_row_height"):
+                self.main_app.update_product_row_height(self.prod_id)
         except Exception as e:
             print(f"更新毛利显示失败：{e}")
             self.margin_label.setText("毛利: 错误")
@@ -323,6 +442,8 @@ class ProductWidget(QWidget):
             self.net_profit_label.show()
             self.roi_label.setText("")
             self.link_order_label.setText("单量：0单")
+            if hasattr(self.main_app, "update_product_row_height"):
+                self.main_app.update_product_row_height(self.prod_id)
 
     def update_link_order_count(self):
         try:
@@ -351,7 +472,28 @@ class ProductWidget(QWidget):
             return "巨亏"
 
     def eventFilter(self, obj, event):
-        if obj == self.img_label:
+        if event.type() == QEvent.ContextMenu:
+            self.show_product_context_menu(event.globalPos())
+            return True
+        if hasattr(self, "code_label") and obj == self.code_label:
+            if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                self._suppress_next_code_click = True
+                self._code_click_timer.stop()
+                self.copy_same_product()
+                return True
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._suppress_next_code_click:
+                    self._suppress_next_code_click = False
+                    return True
+                self._code_click_timer.start(QApplication.doubleClickInterval())
+                return True
+        if hasattr(self, "memo_label") and obj == self.memo_label and event.type() == QEvent.MouseButtonDblClick:
+            self.edit_product_memo()
+            return True
+        if hasattr(self, "img_label") and obj == self.img_label:
+            if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                self.show_product_image_viewer()
+                return True
             if event.type() == QEvent.Enter:
                 self.img_label.setFocus(Qt.MouseFocusReason)
                 return False
@@ -360,6 +502,40 @@ class ProductWidget(QWidget):
                     self._paste_image_from_clipboard()
                     return True
         return super().eventFilter(obj, event)
+
+    def contextMenuEvent(self, event):
+        self.show_product_context_menu(event.globalPos())
+        event.accept()
+
+    def show_product_context_menu(self, global_pos):
+        menu = QMenu(self)
+        delete_action = QAction("删除链接", self)
+        menu.addAction(delete_action)
+        selected = menu.exec_(global_pos)
+        if selected == delete_action:
+            self.delete_product()
+
+    def show_product_image_viewer(self):
+        try:
+            rows = self.db.safe_fetchall("SELECT image_data FROM products WHERE id=?", (self.prod_id,))
+            image_data = rows[0][0] if rows and rows[0][0] else None
+            if not image_data:
+                self.main_app.show_toast("当前链接没有主图")
+                return
+            pixmap = QPixmap()
+            pixmap.loadFromData(image_data)
+            if pixmap.isNull():
+                self.main_app.show_toast("主图读取失败")
+                return
+            try:
+                from manager.dialogs.product_spec import SpecImageViewerDialog
+            except ImportError:
+                from dialogs.product_spec import SpecImageViewerDialog
+            dialog = SpecImageViewerDialog(pixmap, self)
+            dialog.setWindowTitle("链接主图查看")
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"查看主图失败: {e}")
 
     def _paste_image_from_clipboard(self):
         clipboard = QApplication.clipboard()
@@ -403,6 +579,8 @@ class ProductWidget(QWidget):
             QMessageBox.warning(self, "错误", f"粘贴图片失败: {e}")
 
     def update_roi_display(self, margin_rate=None):
+        self.update_margin_display()
+        return
         try:
             rows = self.main_app.db.safe_fetchall(
                 "SELECT current_roi, return_rate FROM products WHERE id=?",
@@ -515,6 +693,8 @@ class ProductWidget(QWidget):
 
     def _on_code_click(self, event):
         self.copy_product_id()
+
+    def copy_same_product(self):
         store_id = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.prod_id,))
         if store_id and store_id[0]:
             self.main_app.add_product(store_id[0][0], copy_from_id=self.prod_id)

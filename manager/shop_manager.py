@@ -82,6 +82,7 @@ try:
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, ProductSpecDialog,
     )
+    from manager.dialogs.cost_import import read_cost_file, read_cost_row_colors
 except ImportError:
     from dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
@@ -89,6 +90,7 @@ except ImportError:
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, ProductSpecDialog,
     )
+    from dialogs.cost_import import read_cost_file, read_cost_row_colors
 
 try:
     from manager.delegates import SpecNameDelegate, CenterAlignDelegate, WeightDelegate
@@ -372,6 +374,8 @@ class SettingsDialog(QDialog):
 
 
 class ShopManagerApp(QMainWindow):
+    PRODUCT_ROW_HEIGHT = 160
+    STORE_ROW_HEIGHT = 140
     
     def __init__(self):
         
@@ -390,6 +394,7 @@ class ShopManagerApp(QMainWindow):
         self.row_store_map = {}
         self.row_data_map = {}
         self.product_store_map = {}
+        self.product_sort_mode = self.db.get_setting("product_sort_mode", "order") or "order"
 
         self.is_loading = False  # 防止重复加载
         self._today_col = -1  # 今日列索引，-1表示不是当月
@@ -618,9 +623,19 @@ class ShopManagerApp(QMainWindow):
                 pass
         super().changeEvent(event)
 
+    def center_on_screen(self):
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if not screen:
+            return
+        screen_rect = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame.moveCenter(screen_rect.center())
+        self.move(frame.topLeft())
+
     def init_ui(self):
         self.setWindowTitle(f"电商店铺操作记录管理工具 v{VERSION}")
-        self.resize(1350, 850)
+        self.resize(1350, 1000)
+        self.center_on_screen()
 
         # 调试标签
         self.debug_label = QLabel("🔧 调试: shop_manager.py (ShopManagerApp)")
@@ -936,6 +951,27 @@ class ShopManagerApp(QMainWindow):
         """)
         self.btn_today.clicked.connect(self.go_to_today)
         toolbar.addWidget(self.btn_today)
+
+        self.product_sort_combo = QComboBox()
+        self.product_sort_combo.addItem("按单量", "order")
+        self.product_sort_combo.addItem("按净利率", "net_margin")
+        self.product_sort_combo.addItem("按商品类型", "category")
+        self.product_sort_combo.setFixedWidth(105)
+        sort_index = self.product_sort_combo.findData(self.product_sort_mode)
+        self.product_sort_combo.setCurrentIndex(sort_index if sort_index >= 0 else 0)
+        self.product_sort_combo.currentIndexChanged.connect(self.on_product_sort_changed)
+        self.product_sort_combo.setToolTip("排序当前店铺内显示的链接")
+        self.product_sort_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #6c757d;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-weight: bold;
+                font-size: 13px;
+                background: white;
+            }
+        """)
+        toolbar.addWidget(self.product_sort_combo)
 
         toolbar.addStretch()
 
@@ -1258,11 +1294,11 @@ class ShopManagerApp(QMainWindow):
         # --- 主表设置 ---
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
         self.table.cellDoubleClicked.connect(self.open_editor)
         self.table.setWordWrap(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows) # 整行选中
-        self.table.verticalHeader().setDefaultSectionSize(100)
+        self.table.verticalHeader().setDefaultSectionSize(self.PRODUCT_ROW_HEIGHT)
         
         # --- 冻结表设置 ---
         self.frozen_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1275,7 +1311,7 @@ class ShopManagerApp(QMainWindow):
         # 【关键】确保冻结表也能整行选中和获取焦点
         self.frozen_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.frozen_table.setFocusPolicy(Qt.StrongFocus)
-        self.frozen_table.verticalHeader().setDefaultSectionSize(100)
+        self.frozen_table.verticalHeader().setDefaultSectionSize(self.PRODUCT_ROW_HEIGHT)
         
         # 样式：右边框加粗
         self.frozen_table.setStyleSheet("QTableWidget { border-right: 2px solid #555; background-color: white; }")
@@ -1463,7 +1499,6 @@ class ShopManagerApp(QMainWindow):
                 widget = self.frozen_table.cellWidget(row, 0)
                 if widget and isinstance(widget, ProductWidget):
                     widget.update_margin_display()
-                    widget.update_roi_display()
                     widget.update_promo_badges()
         except Exception as e:
             print(f"强制刷新frozen_table失败: {e}")
@@ -1476,7 +1511,6 @@ class ShopManagerApp(QMainWindow):
                     widget = self.frozen_table.cellWidget(row, 0)
                     if widget and isinstance(widget, ProductWidget):
                         widget.update_margin_display()
-                        widget.update_roi_display()
                         widget.update_promo_badges()
                         widget.update()
                     self.frozen_table.viewport().update()
@@ -1569,6 +1603,131 @@ class ShopManagerApp(QMainWindow):
             return sum(sc[0] for sc in spec_counts) if spec_counts else 0
         except:
             return 0
+
+    def on_product_sort_changed(self):
+        if not hasattr(self, "product_sort_combo"):
+            return
+        mode = self.product_sort_combo.currentData() or "order"
+        if mode == self.product_sort_mode:
+            return
+        self.product_sort_mode = mode
+        self.db.set_setting("product_sort_mode", mode)
+        self.load_data_safe()
+
+    def _calculate_product_net_margin(self, product_id):
+        try:
+            rows = self.db.safe_fetchall(
+                "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                (product_id,),
+            )
+            if not rows:
+                return None
+            product_rows = self.db.safe_fetchall(
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
+                (product_id,),
+            )
+            if not product_rows:
+                return None
+            coupon = product_rows[0][0] if product_rows[0][0] else 0
+            new_customer = product_rows[0][1] if product_rows[0][1] else 0
+            current_roi = product_rows[0][2] if product_rows[0][2] else 0
+            return_rate = product_rows[0][3] if product_rows[0][3] else 0
+            if current_roi <= 0:
+                return None
+
+            max_discount = max(coupon, new_customer)
+            total_weighted_margin = 0.0
+            total_weight = 0.0
+            for spec_code, sale_price, weight in rows:
+                if sale_price is None or weight is None:
+                    continue
+                cost_res = self.db.safe_fetchall(
+                    "SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,)
+                )
+                cost = cost_res[0][0] if cost_res else 0.0
+                final_price = sale_price - max_discount
+                if final_price > 0 and cost > 0:
+                    margin = (final_price - cost) / final_price
+                    total_weighted_margin += margin * weight
+                    total_weight += weight
+            if total_weight <= 0:
+                return None
+            gross_margin_pct = (total_weighted_margin / total_weight) * 100
+            margin_rate_decimal = gross_margin_pct / 100
+            return (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+        except Exception as e:
+            print(f"计算链接净利率失败: {e}")
+            return None
+
+    def _build_product_sort_info(self, product):
+        product_id, product_code, _title, _image_data, sort_order, category_label = product
+        category_label = str(category_label or "").strip()
+        calculated_category = self.db.calculate_product_category_label(product_id)
+        if calculated_category != category_label:
+            category_label = self.db.update_product_category_label(product_id)
+        order_count = self._get_product_order_count(product_code)
+        net_margin = self._calculate_product_net_margin(product_id)
+        fallback_order = sort_order if sort_order is not None else product_id
+        return {
+            "product": product,
+            "order_count": order_count,
+            "net_margin": net_margin,
+            "category_label": category_label,
+            "fallback_order": fallback_order,
+            "product_id": product_id,
+        }
+
+    def _product_metric_sort_key(self, info):
+        net_margin = info["net_margin"]
+        return (
+            -info["order_count"],
+            1 if net_margin is None else 0,
+            -(net_margin if net_margin is not None else -10**9),
+            info["fallback_order"],
+            info["product_id"],
+        )
+
+    def _sort_products_for_display(self, products_raw):
+        infos = [self._build_product_sort_info(product) for product in products_raw]
+        mode = self.product_sort_mode or "order"
+        if mode == "net_margin":
+            infos.sort(
+                key=lambda info: (
+                    1 if info["net_margin"] is None else 0,
+                    -(info["net_margin"] if info["net_margin"] is not None else -10**9),
+                    -info["order_count"],
+                    info["fallback_order"],
+                    info["product_id"],
+                )
+            )
+        elif mode == "category":
+            group_stats = {}
+            for info in infos:
+                label = info["category_label"]
+                if not label:
+                    continue
+                stat = group_stats.setdefault(label, {"max_order": 0, "max_margin": None})
+                stat["max_order"] = max(stat["max_order"], info["order_count"])
+                margin = info["net_margin"]
+                if margin is not None and (stat["max_margin"] is None or margin > stat["max_margin"]):
+                    stat["max_margin"] = margin
+            infos.sort(
+                key=lambda info: (
+                    1 if not info["category_label"] else 0,
+                    -group_stats.get(info["category_label"], {}).get("max_order", 0),
+                    1 if group_stats.get(info["category_label"], {}).get("max_margin") is None else 0,
+                    -(
+                        group_stats.get(info["category_label"], {}).get("max_margin")
+                        if group_stats.get(info["category_label"], {}).get("max_margin") is not None
+                        else -10**9
+                    ),
+                    info["category_label"],
+                    *self._product_metric_sort_key(info),
+                )
+            )
+        else:
+            infos.sort(key=self._product_metric_sort_key)
+        return [info["product"] for info in infos]
 
     def load_data_safe(self, restore_position=True):
         """安全加载数据，防止闪退"""
@@ -1670,14 +1829,17 @@ class ShopManagerApp(QMainWindow):
                 rec_dict = self.db.get_store_record(store_id, self.year, self.month, 0)
                 self.render_store_records(row_idx, store_id, days_in_month)
                 
-                self.table.setRowHeight(row_idx, 120)  # 调整高度以适应内容
-                self.frozen_table.setRowHeight(row_idx, 120)
+                self.table.setRowHeight(row_idx, self.STORE_ROW_HEIGHT)
+                self.frozen_table.setRowHeight(row_idx, self.STORE_ROW_HEIGHT)
                 row_idx += 1
                 
-                products_raw = self.db.safe_fetchall("SELECT id, name, title, image_data FROM products WHERE store_id=?", (store_id,))
-                products = sorted(products_raw, key=lambda p: self._get_product_order_count(p[1]), reverse=True)
+                products_raw = self.db.safe_fetchall(
+                    "SELECT id, name, title, image_data, sort_order, product_category_label FROM products WHERE store_id=?",
+                    (store_id,),
+                )
+                products = self._sort_products_for_display(products_raw)
                 for prod in products:
-                    p_id, p_code, p_title, p_img = prod  # 注意这里：p_code是商品ID，p_title是商品标题
+                    p_id, p_code, p_title, p_img = prod[:4]  # 注意这里：p_code是商品ID，p_title是商品标题
                     self.table.insertRow(row_idx)
                     self.frozen_table.insertRow(row_idx)
                     
@@ -1686,8 +1848,7 @@ class ShopManagerApp(QMainWindow):
                     self.row_data_map[row_idx] = p_id
                     self.product_store_map[p_id] = store_id
                     
-                    self.table.setRowHeight(row_idx, 100)
-                    self.frozen_table.setRowHeight(row_idx, 100)
+                    self._set_product_display_row_height(row_idx)
                     
                     self.render_records_for_product(row_idx, p_id, days_in_month)
                     
@@ -1724,6 +1885,26 @@ class ShopManagerApp(QMainWindow):
         item.setForeground(QColor("#1f2d3d"))
         item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
 
+    def _get_product_display_row_height(self, row):
+        widget = self.frozen_table.cellWidget(row, 0)
+        if widget and hasattr(widget, "recommended_row_height"):
+            try:
+                return widget.recommended_row_height(self.PRODUCT_ROW_HEIGHT)
+            except Exception as e:
+                print(f"计算商品行高失败: {e}")
+        return self.PRODUCT_ROW_HEIGHT
+
+    def _set_product_display_row_height(self, row):
+        row_height = self._get_product_display_row_height(row)
+        self.table.setRowHeight(row, row_height)
+        self.frozen_table.setRowHeight(row, row_height)
+
+    def update_product_row_height(self, prod_id):
+        for row, row_prod_id in self.row_data_map.items():
+            if row_prod_id == prod_id:
+                self._set_product_display_row_height(row)
+                return
+
     def render_records_for_product(self, row, prod_id, days):
         try:
             # 1. 从数据库获取最新记录
@@ -1740,11 +1921,6 @@ class ShopManagerApp(QMainWindow):
                     rec_dict[r[0]] = []
             
             # 定义基础参数
-            min_row_height = 120
-            pixel_per_line = 30
-            
-            max_needed_height = min_row_height
-
             for day in range(1, days + 1):
                 cell_data = rec_dict.get(day, [])
                 
@@ -1765,29 +1941,12 @@ class ShopManagerApp(QMainWindow):
                 
                 # 强制更新文本
                 item.setText(display_text)
+                item.setToolTip(display_text)
                 
                 # 确保文字靠上对齐，方便多行显示
                 self._apply_record_cell_style(item)
 
-                # 【关键修复 3】更保守的行高计算
-                if display_text:
-                    explicit_lines = display_text.count('\n') + 1
-                    
-                    # 多条记录时额外加缓冲
-                    safety_buffer = 0
-                    if len(cell_data) > 1:
-                        safety_buffer = 15 # 增加缓冲到 15
-                    
-                    needed_height = (explicit_lines * pixel_per_line) + 15 + safety_buffer
-                    
-                    if needed_height > max_needed_height:
-                        max_needed_height = needed_height
-            
-            # 统一设置行高
-            final_height = max(max_needed_height, min_row_height)
-            
-            self.table.setRowHeight(row, final_height)
-            self.frozen_table.setRowHeight(row, final_height)
+            self._set_product_display_row_height(row)
 
         except Exception as e:
             print(f"渲染记录失败：{e}")
@@ -2020,7 +2179,7 @@ class ShopManagerApp(QMainWindow):
             copy_data = {}
             if copy_from_id:
                 rows = self.db.safe_fetchall(
-                    "SELECT name, title, coupon_amount, new_customer_discount, image_path FROM products WHERE id=?",
+                    "SELECT name, title, coupon_amount, new_customer_discount, image_path, product_memo FROM products WHERE id=?",
                     (copy_from_id,)
                 )
                 if rows and rows[0]:
@@ -2029,7 +2188,8 @@ class ShopManagerApp(QMainWindow):
                         'title': rows[0][1],
                         'coupon_amount': rows[0][2],
                         'new_customer_discount': rows[0][3],
-                        'image_path': rows[0][4]
+                        'image_path': rows[0][4],
+                        'product_memo': rows[0][5]
                     }
             
             # 创建一个自定义对话框
@@ -2124,12 +2284,13 @@ class ShopManagerApp(QMainWindow):
             
             # 插入数据库
             self.db.safe_execute(
-                "INSERT INTO products (store_id, name, title, coupon_amount, new_customer_discount, image_path, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                "INSERT INTO products (store_id, name, title, coupon_amount, new_customer_discount, image_path, sort_order, product_memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
                 (store_id, product_id, product_title, 
                  float(coupon_amount) if coupon_amount else None,
                  float(new_customer_discount) if new_customer_discount else None,
                  copy_data.get('image_path') if copy_from_id else None,
-                 max_order + 1)
+                 max_order + 1,
+                 copy_data.get('product_memo') if copy_from_id else None)
             )
             
             # 获取新插入商品的数据库自增ID（不是用户输入的商品ID）
@@ -2746,6 +2907,21 @@ class ShopManagerApp(QMainWindow):
             QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
 
 
+    def _format_cost_quantity(self, value):
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text or text.lower() == "nan":
+            return ""
+        numeric_text = text.replace(",", "")
+        try:
+            number = float(numeric_text)
+        except ValueError:
+            return text
+        if number.is_integer():
+            return str(int(number))
+        return str(int(round(number)))
+
     def import_cost_data(self):
         """导入成本表 - 最终版 (直接全量读取，无预览，只显示结果)"""
         # 1. 检查依赖
@@ -2772,23 +2948,13 @@ class ShopManagerApp(QMainWindow):
         if not file_path:
             return
 
-        # 3. 检查文件占用
-        try:
-            with open(file_path, 'r+b'):
-                pass
-        except PermissionError:
-            QMessageBox.critical(self, "文件被占用", "无法读取文件！\n请**关闭**该 Excel 文件（不要在 WPS/Excel 中打开），然后再试。")
-            return
-        except Exception:
-            pass
-
         # 4. 弹出配置对话框 (选择列)
         try:
             dialog = CostImportDialog(file_path, self)
             if dialog.exec_() != QDialog.Accepted:
                 return
             
-            spec_col_idx, price_col_idx = dialog.get_mapping()
+            spec_col_idx, price_col_idx, name_col_idx, quantity_col_idx, category_col_idx = dialog.get_mapping()
             
             if spec_col_idx is None or price_col_idx is None:
                 QMessageBox.warning(self, "提示", "请先选择【规格编码】和【成本价】所在的列！")
@@ -2803,16 +2969,7 @@ class ShopManagerApp(QMainWindow):
             self.statusBar().showMessage("正在读取并处理数据...", 0)
             QApplication.processEvents()
 
-            # --- 关键修改：读取整个文件，不限制行数 ---
-            if file_path.endswith('.csv'):
-                # CSV 文件尝试多种编码
-                try:
-                    df = pd.read_csv(file_path, encoding='utf-8-sig')
-                except UnicodeDecodeError:
-                    df = pd.read_csv(file_path, encoding='gbk')
-            else:
-                # Excel 文件：读取所有行，指定第一行为表头
-                df = pd.read_excel(file_path, engine='openpyxl')
+            df = read_cost_file(file_path)
 
             if df.empty:
                 QMessageBox.warning(self, "提示", "文件内容为空！")
@@ -2826,15 +2983,23 @@ class ShopManagerApp(QMainWindow):
             # astype(str) 确保规格编码变成字符串，防止数字变科学计数法
             col_spec = df.iloc[:, spec_col_idx].astype(str)
             col_price = df.iloc[:, price_col_idx]
+            col_name = df.iloc[:, name_col_idx] if name_col_idx is not None else None
+            col_quantity = df.iloc[:, quantity_col_idx] if quantity_col_idx is not None else None
+            col_category = df.iloc[:, category_col_idx] if category_col_idx is not None else None
+            row_colors = read_cost_row_colors(file_path, name_col_idx=name_col_idx, spec_col_idx=spec_col_idx)
             
             count_success = 0
             count_skip = 0
             count_error = 0
+            count_history = 0
+            count_changed = 0
+            import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # 批量插入准备 (为了提高速度，可以每100条提交一次，这里为了简单逐条处理但加了事务优化)
             # 实际上 safe_execute 已经是逐条提交，对于几万行数据可能会慢，但最稳定
             
             self.db.conn.execute("BEGIN TRANSACTION") # 开启事务，极大提高写入速度
+            self.db.cursor.execute("UPDATE cost_library SET sort_order=NULL")
 
             for idx in range(total_rows):
                 try:
@@ -2844,6 +3009,32 @@ class ShopManagerApp(QMainWindow):
                         count_skip += 1
                         continue
                     spec_code = spec_val.strip()
+
+                    spec_name = ""
+                    if col_name is not None:
+                        name_val = col_name.iloc[idx]
+                        if not pd.isna(name_val):
+                            spec_name = str(name_val).strip()
+                            if spec_name.lower() == "nan":
+                                spec_name = ""
+
+                    quantity = ""
+                    if col_quantity is not None:
+                        quantity_val = col_quantity.iloc[idx]
+                        if not pd.isna(quantity_val):
+                            quantity = self._format_cost_quantity(quantity_val)
+                            if quantity.lower() == "nan":
+                                quantity = ""
+
+                    category_label = ""
+                    if col_category is not None:
+                        category_val = col_category.iloc[idx]
+                        if not pd.isna(category_val):
+                            category_label = str(category_val).strip()
+                            if category_label.lower() == "nan":
+                                category_label = ""
+                    category_color = self.db.category_color_for_label(category_label)
+                    source_bg_color = row_colors.get(idx, "")
                     
                     # 获取价格
                     price_val = col_price.iloc[idx]
@@ -2857,12 +3048,39 @@ class ShopManagerApp(QMainWindow):
                     except ValueError:
                         cost_price = 0.0 # 如果价格不是数字，记为0
 
-                    # 执行插入/更新
-                    # SQL: 如果 spec_code 已存在则更新 cost_price，不存在则插入
+                    old_rows = self.db.cursor.execute(
+                        "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                        (spec_code,)
+                    ).fetchall()
+                    old_cost = float(old_rows[0][0]) if old_rows and old_rows[0][0] is not None else None
+                    should_record_history = old_cost is not None and abs(cost_price - old_cost) > 0.001
+
                     self.db.cursor.execute(
-                        "INSERT OR REPLACE INTO cost_library (spec_code, cost_price) VALUES (?, ?)",
-                        (spec_code, cost_price)
+                        """INSERT INTO cost_library
+                           (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order, source_bg_color)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(spec_code) DO UPDATE SET
+                               spec_name=excluded.spec_name,
+                               quantity=excluded.quantity,
+                               category_label=excluded.category_label,
+                               category_color=excluded.category_color,
+                               cost_price=excluded.cost_price,
+                               sort_order=excluded.sort_order,
+                               source_bg_color=excluded.source_bg_color""",
+                        (spec_code, spec_name, quantity, category_label, category_color, cost_price, idx + 1, source_bg_color)
                     )
+
+                    if should_record_history:
+                        change_amount = cost_price - old_cost
+                        change_percent = (cost_price - old_cost) / old_cost * 100 if old_cost else None
+                        self.db.cursor.execute(
+                            """INSERT INTO cost_history
+                               (spec_code, old_cost_price, new_cost_price, change_amount, change_percent, source, import_time)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (spec_code, old_cost, cost_price, change_amount, change_percent, "import", import_time)
+                        )
+                        count_history += 1
+                        count_changed += 1
                     
                     count_success += 1
                     
@@ -2880,12 +3098,16 @@ class ShopManagerApp(QMainWindow):
             
             # 提交剩余事务
             self.db.conn.commit()
+            self.db.normalize_cost_category_colors()
+            self.db.update_all_product_category_labels()
             self.statusBar().showMessage("导入完成！", 3000)
 
             # 6. 显示结果
             msg = (f"✅ **导入完成！**\n\n"
                    f"📊 文件总行数：{total_rows}\n"
                    f"✅ 成功入库：{count_success} 条\n"
+                   f"🕘 历史记录：{count_history} 条\n"
+                   f"📈 价格变化：{count_changed} 条\n"
                    f"⏭️ 跳过空行：{count_skip} 条\n"
                    f"❌ 处理异常：{count_error} 条\n\n"
                    f"数据已更新至数据库 cost_library 表。")

@@ -2,7 +2,7 @@
 """表格列代理：规格名、居中、权重（含锁定图标）"""
 from PyQt5.QtWidgets import QStyledItemDelegate, QPlainTextEdit, QLineEdit
 from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QDoubleValidator
+from PyQt5.QtGui import QDoubleValidator, QFont
 
 
 class SpecNameDelegate(QStyledItemDelegate):
@@ -63,11 +63,28 @@ class CenterAlignDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setAlignment(Qt.AlignCenter)
-        editor.setFixedHeight(option.rect.height() - 4)
+        editor.setFont(option.font)
+        editor.setFrame(False)
+        editor.setTextMargins(1, 0, 1, 0)
+        editor.setStyleSheet(
+            "QLineEdit { "
+            "padding: 1px; "
+            "margin: 0px; "
+            "border: none; "
+            "background-color: #eaf8ee; "
+            "font-family: YouYuan, 'Microsoft YaHei UI', sans-serif; "
+            "font-weight: bold; "
+            "}"
+        )
+        editor.setFixedHeight(option.rect.height())
         return editor
 
     def paint(self, painter, option, index):
         painter.save()
+        font = QFont(option.font)
+        font.setFamily("YouYuan")
+        font.setBold(True)
+        painter.setFont(font)
         painter.fillRect(option.rect, option.backgroundBrush)
         text = index.data(Qt.DisplayRole)
         if text:
@@ -86,18 +103,40 @@ class WeightDelegate(QStyledItemDelegate):
         is_locked = text.startswith(self.lock_icon)
         num_text = text.replace(self.lock_icon, "").strip()
         rect = option.rect
-        w = rect.width() - self.icon_width
         h = rect.height()
-        text_rect = QRect(rect.left(), rect.top(), w, h)
-        icon_rect = QRect(rect.right() - self.icon_width, rect.top(), self.icon_width, h)
+        if is_locked:
+            text_rect = QRect(rect.left(), rect.top(), max(1, rect.width() - self.icon_width), h)
+            icon_rect = QRect(rect.right() - self.icon_width, rect.top(), self.icon_width, h)
+        else:
+            text_rect = rect
+            icon_rect = QRect()
+        painter.save()
+        font = QFont(option.font)
+        font.setFamily("YouYuan")
+        font.setBold(True)
+        painter.setFont(font)
         painter.drawText(text_rect, Qt.AlignCenter, num_text)
         if is_locked:
             painter.drawText(icon_rect, Qt.AlignCenter, self.lock_icon)
+        painter.restore()
 
     def createEditor(self, parent, option, index):
         editor = QLineEdit(parent)
         editor.setAlignment(Qt.AlignCenter)
-        editor.setFixedHeight(option.rect.height() - 4)
+        editor.setFont(option.font)
+        editor.setFrame(False)
+        editor.setTextMargins(1, 0, 1, 0)
+        editor.setStyleSheet(
+            "QLineEdit { "
+            "padding: 1px; "
+            "margin: 0px; "
+            "border: none; "
+            "background-color: #eaf8ee; "
+            "font-family: YouYuan, 'Microsoft YaHei UI', sans-serif; "
+            "font-weight: bold; "
+            "}"
+        )
+        editor.setFixedHeight(option.rect.height())
         text = index.data(Qt.DisplayRole) or ""
         num_text = text.replace("🔒", "").strip()
         import re

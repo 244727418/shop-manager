@@ -2,15 +2,16 @@
 """店铺毛利管理对话框"""
 import os
 import json
+import time
 from datetime import datetime
 from PyQt5.QtWidgets import QHeaderView, QAbstractItemView
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
     QAbstractItemView, QFileDialog, QComboBox, QScrollArea, QHeaderView,
-    QApplication
+    QApplication, QPlainTextEdit, QProgressDialog
 )
-from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice
+from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice, QObject, QThread
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator, QFont
 from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
 from PyQt5.QtGui import QClipboard
@@ -20,6 +21,68 @@ try:
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
+
+
+class StoreAiReportWorker(QObject):
+    finished = pyqtSignal(str, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, api_url, headers, data):
+        super().__init__()
+        self.api_url = api_url
+        self.headers = headers
+        self.data = data
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def run(self):
+        try:
+            import requests
+        except ImportError:
+            self.failed.emit("缺少 requests 依赖，无法调用 AI。")
+            return
+
+        response = None
+        try:
+            for attempt in range(3):
+                if self.cancelled:
+                    self.failed.emit("已取消生成报告。")
+                    return
+                response = requests.post(self.api_url, headers=self.headers, json=self.data, timeout=90)
+                if response.status_code not in (500, 503):
+                    break
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+
+            if self.cancelled:
+                self.failed.emit("已取消生成报告。")
+                return
+            if response is not None and response.status_code == 200:
+                result = response.json()
+                usage = result.get("usage") or {}
+                self.finished.emit(result["choices"][0]["message"]["content"].strip(), usage)
+                return
+
+            status = response.status_code if response is not None else "无响应"
+            detail = response.text.strip()[:500] if response is not None and response.text else ""
+            if status == 503:
+                message = "AI调用失败：503\nDeepSeek服务器当前过载，请稍后重试。"
+            else:
+                message = f"AI调用失败：{status}"
+            if detail:
+                message += f"\n\n返回内容：{detail}"
+            self.failed.emit(message)
+        except requests.exceptions.Timeout:
+            if not self.cancelled:
+                self.failed.emit("AI调用超时，请稍后重试。")
+        except requests.exceptions.ConnectionError as e:
+            if not self.cancelled:
+                self.failed.emit(f"AI连接失败：{str(e)}")
+        except Exception as e:
+            if not self.cancelled:
+                self.failed.emit(f"生成报告失败：{str(e)}")
 
 
 class ScalableTableWidget(QTableWidget):
@@ -1327,6 +1390,10 @@ class StoreMarginDialog(QDialog):
         self.save_callback = save_callback
         self.is_reading_mode = False
         self.large_dialog = None
+        self.ai_report_dialog = None
+        self.ai_report_debug_dialog = None
+        self.ai_report_thread = None
+        self.ai_report_worker = None
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
         self.resize(1700, 800)
@@ -2065,6 +2132,26 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_history.clicked.connect(self.show_import_history)
 
+        self.btn_ai_report = QPushButton("AI生成报告")
+        self.btn_ai_report.setStyleSheet("""
+            QPushButton {
+                background-color: #16a085;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #138d75;
+            }
+            QPushButton:pressed {
+                background-color: #117a65;
+            }
+        """)
+        self.btn_ai_report.clicked.connect(self.open_ai_report_dialog)
+
         self.lbl_total_margin = QLabel("综合毛利: 0.00%")
         self.lbl_total_margin.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 6px 12px; border-radius: 6px;"
@@ -2122,6 +2209,7 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_import_orders)
         btn_layout.addWidget(self.btn_history)
+        btn_layout.addWidget(self.btn_ai_report)
         btn_layout.addSpacing(10)
         btn_layout.addWidget(self.lbl_total_margin)
         btn_layout.addWidget(self.lbl_total_orders)
@@ -2653,6 +2741,691 @@ class StoreMarginDialog(QDialog):
                     item.setForeground(GRAY)
 
             self.week_table.setItem(0, col, item)
+
+    def _fmt_money(self, value):
+        try:
+            return f"{float(value or 0):.2f}"
+        except (TypeError, ValueError):
+            return "0.00"
+
+    def _fmt_number(self, value):
+        try:
+            num = float(value or 0)
+            return int(num) if num == int(num) else round(num, 2)
+        except (TypeError, ValueError):
+            return 0
+
+    def _days_between(self, start_date, end_date):
+        if not start_date or not end_date:
+            return 1
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            return max(1, (end_dt - start_dt).days + 1)
+        except Exception:
+            return 1
+
+    def _manual_margin_record_to_dict(self, record):
+        start_date = record[0] or ""
+        end_date = record[1] or ""
+        days = self._days_between(start_date, end_date)
+        net_profit = float(record[17] or 0)
+        return {
+            "date_range": f"{start_date}~{end_date}" if start_date or end_date else "",
+            "days": days,
+            "actual_orders": self._fmt_number(record[2]),
+            "actual_amount": round(float(record[3] or 0), 2),
+            "gross_profit": round(float(record[4] or 0), 2),
+            "gross_margin_rate": round(float(record[11] or 0), 2),
+            "refund_amount": round(float(record[5] or 0), 2),
+            "refund_rate_by_amount": round(float(record[12] or 0), 2),
+            "refund_orders": self._fmt_number(record[6]),
+            "refund_rate_by_orders": round(float(record[13] or 0), 2),
+            "unit_price": round(float(record[14] or 0), 2),
+            "promotion_fee": round(float(record[7] or 0), 2),
+            "promotion_ratio": round(float(record[15] or 0), 2),
+            "tech_fee": round(float(record[16] or 0), 2),
+            "deduction": round(float(record[8] or 0), 2),
+            "other_service": round(float(record[9] or 0), 2),
+            "other": round(float(record[10] or 0), 2),
+            "net_profit": round(net_profit, 2),
+            "net_margin_rate": round(float(record[18] or 0), 2),
+            "profit_per_order": round(float(record[19] or 0), 2),
+            "daily_profit": round(net_profit / days if days > 0 else 0, 2),
+        }
+
+    def _change_summary(self, current, previous):
+        if not previous:
+            return {"available": False, "note": "无上一周对比数据"}
+        metrics = [
+            ("actual_orders", "实发订单", "pct"),
+            ("actual_amount", "实发金额", "pct"),
+            ("gross_profit", "毛利润", "pct"),
+            ("gross_margin_rate", "毛利率", "point"),
+            ("refund_amount", "退款金额", "pct"),
+            ("refund_rate_by_amount", "金额退款率", "point"),
+            ("refund_orders", "退款订单", "pct"),
+            ("refund_rate_by_orders", "订单退款率", "point"),
+            ("unit_price", "件单价", "pct"),
+            ("promotion_fee", "推广费", "pct"),
+            ("promotion_ratio", "推广占比", "point"),
+            ("net_profit", "净利润", "pct"),
+            ("net_margin_rate", "净利率", "point"),
+            ("profit_per_order", "单笔利润", "pct"),
+            ("daily_profit", "日盈亏", "pct"),
+        ]
+        changes = []
+        for key, label, mode in metrics:
+            curr = float(current.get(key) or 0)
+            prev = float(previous.get(key) or 0)
+            diff = curr - prev
+            item = {"metric": label, "current": round(curr, 2), "previous": round(prev, 2), "diff": round(diff, 2)}
+            if mode == "point":
+                item["change"] = f"{diff:+.2f}个百分点"
+            elif prev != 0:
+                item["change"] = f"{(diff / abs(prev) * 100):+.2f}%"
+            else:
+                item["change"] = "上周为0，无法计算百分比"
+            changes.append(item)
+        return {"available": True, "items": changes}
+
+    def _build_historical_margin_summary(self, records):
+        parsed = [self._manual_margin_record_to_dict(r) for r in records]
+        total_amount = sum(float(r["actual_amount"] or 0) for r in parsed)
+        total_orders = sum(float(r["actual_orders"] or 0) for r in parsed)
+        total_net_profit = sum(float(r["net_profit"] or 0) for r in parsed)
+        total_refund_amount = sum(float(r["refund_amount"] or 0) for r in parsed)
+        total_promotion_fee = sum(float(r["promotion_fee"] or 0) for r in parsed)
+        profitable = [r for r in parsed if float(r["net_profit"] or 0) > 0]
+        loss = [r for r in parsed if float(r["net_profit"] or 0) < 0]
+        best = max(parsed, key=lambda r: float(r["net_profit"] or 0)) if parsed else None
+        worst = min(parsed, key=lambda r: float(r["net_profit"] or 0)) if parsed else None
+        return {
+            "period_count": len(parsed),
+            "total_actual_orders": self._fmt_number(total_orders),
+            "total_actual_amount": round(total_amount, 2),
+            "total_net_profit": round(total_net_profit, 2),
+            "overall_net_margin_rate": round((total_net_profit / total_amount * 100) if total_amount else 0, 2),
+            "total_refund_amount": round(total_refund_amount, 2),
+            "overall_refund_rate_by_amount": round((total_refund_amount / total_amount * 100) if total_amount else 0, 2),
+            "total_promotion_fee": round(total_promotion_fee, 2),
+            "overall_promotion_ratio": round((total_promotion_fee / total_amount * 100) if total_amount else 0, 2),
+            "profitable_period_count": len(profitable),
+            "loss_period_count": len(loss),
+            "best_period": best,
+            "worst_period": worst,
+            "recent_periods": parsed[-6:],
+        }
+
+    def _parse_date_safe(self, value):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date() if value else None
+        except Exception:
+            return None
+
+    def _build_operation_record_range(self, current, previous):
+        starts = [self._parse_date_safe(current.get("date_range", "").split("~")[0] if current else "")]
+        ends = [self._parse_date_safe(current.get("date_range", "").split("~")[-1] if current else "")]
+        if previous:
+            starts.append(self._parse_date_safe(previous.get("date_range", "").split("~")[0]))
+            ends.append(self._parse_date_safe(previous.get("date_range", "").split("~")[-1]))
+        starts = [d for d in starts if d]
+        ends = [d for d in ends if d]
+        if not starts or not ends:
+            return None, None, "无有效日期范围"
+        start_date = min(starts)
+        end_date = max(ends)
+        return start_date, end_date, f"{start_date.strftime('%Y-%m-%d')}~{end_date.strftime('%Y-%m-%d')}"
+
+    def _record_text_for_ai(self, record):
+        text = str(record.get("text", "") or "").strip()
+        changes = record.get("changes", []) or []
+        change_texts = []
+        if isinstance(changes, list):
+            for change in changes:
+                if isinstance(change, dict):
+                    change_text = str(change.get("text", "") or "").strip()
+                    metric = str(change.get("metric", "") or "").strip()
+                    old = str(change.get("old", "") or "").strip()
+                    new = str(change.get("new", "") or "").strip()
+                    if change_text:
+                        change_texts.append(change_text)
+                    elif metric or old or new:
+                        change_texts.append(f"{metric}: {old} -> {new}".strip())
+                elif change:
+                    change_texts.append(str(change))
+        if text and change_texts:
+            return f"{text}；结构化变化：{'；'.join(change_texts)}"
+        if change_texts:
+            return "；".join(change_texts)
+        return text
+
+    def _build_product_operation_records(self, current, previous):
+        start_date, end_date, range_text = self._build_operation_record_range(current, previous)
+        if not start_date or not end_date:
+            return {"available": False, "range": range_text, "items": [], "note": "无有效日期范围，未读取商品操作记录"}
+
+        products = self.db.safe_fetchall(
+            "SELECT id, name, title FROM products WHERE store_id=? ORDER BY sort_order",
+            (self.store_id,)
+        )
+        if not products:
+            return {"available": False, "range": range_text, "items": [], "note": "当前店铺没有商品"}
+
+        product_map = {int(row[0]): {"product_id": row[1] or "", "product_title": row[2] or ""} for row in products}
+        rows = self.db.safe_fetchall(
+            "SELECT product_id, year, month, day, records_json FROM records WHERE product_id IN ({})".format(
+                ",".join(["?"] * len(product_map))
+            ),
+            tuple(product_map.keys())
+        )
+        items = []
+        for product_sys_id, year, month, day, records_json in rows:
+            try:
+                record_date = datetime(int(year), int(month), int(day)).date()
+            except Exception:
+                continue
+            if record_date < start_date or record_date > end_date:
+                continue
+            try:
+                day_records = json.loads(records_json) if records_json else []
+            except Exception:
+                day_records = []
+            product_info = product_map.get(int(product_sys_id), {})
+            for record in day_records:
+                if not isinstance(record, dict):
+                    continue
+                content = self._record_text_for_ai(record)
+                if not content:
+                    continue
+                items.append({
+                    "date": record_date.strftime("%Y-%m-%d"),
+                    "time": record.get("time", "") or "",
+                    "product_id": product_info.get("product_id", ""),
+                    "product_title": product_info.get("product_title", ""),
+                    "content": content,
+                })
+
+        items.sort(key=lambda x: (x["date"], x["time"], x["product_id"]))
+        return {
+            "available": bool(items),
+            "range": range_text,
+            "items": items,
+            "note": "本周+上周范围内的当前店铺商品操作记录" if items else "本周+上周范围内没有商品操作记录",
+        }
+
+    def _build_sales_structure_summary(self):
+        rows = self.db.safe_fetchall("""
+            SELECT io.product_id, io.spec_code,
+                   SUM(COALESCE(io.order_count, 0)) AS order_count,
+                   SUM(COALESCE(io.refund_count, 0)) AS refund_count,
+                   p.id, p.title, p.coupon_amount, p.new_customer_discount,
+                   ps.sale_price, cl.cost_price
+            FROM imported_orders io
+            LEFT JOIN products p ON p.store_id = io.store_id AND p.name = io.product_id
+            LEFT JOIN product_specs ps ON ps.product_id = p.id AND ps.spec_code = io.spec_code
+            LEFT JOIN cost_library cl ON cl.spec_code = io.spec_code
+            WHERE io.store_id=?
+            GROUP BY io.product_id, io.spec_code
+        """, (self.store_id,))
+        if not rows:
+            return {"available": False, "note": "无订单规格毛利权重数据"}
+
+        total_orders = sum(int(row[2] or 0) for row in rows)
+        total_refunds = sum(int(row[3] or 0) for row in rows)
+        total_amount = 0.0
+        product_map = {}
+        specs = []
+
+        for row in rows:
+            product_id, spec_code, order_count, refund_count, sys_id, title, coupon, new_customer, sale_price, cost_price = row
+            order_count = int(order_count or 0)
+            refund_count = int(refund_count or 0)
+            sale_price = float(sale_price or 0)
+            cost_price = float(cost_price or 0)
+            discount = max(float(coupon or 0), float(new_customer or 0))
+            final_price = max(0, sale_price - discount)
+            amount = sale_price * order_count
+            total_amount += amount
+            margin_rate = None
+            gross_profit = None
+            if final_price > 0 and cost_price > 0:
+                margin_rate = (final_price - cost_price) / final_price * 100
+                gross_profit = (final_price - cost_price) * order_count
+            refund_rate = (refund_count / order_count * 100) if order_count else 0
+            item = {
+                "product_id": product_id or "",
+                "product_title": title or "",
+                "spec_code": spec_code or "",
+                "orders": order_count,
+                "order_share": round((order_count / total_orders * 100) if total_orders else 0, 2),
+                "sales_amount": round(amount, 2),
+                "sale_price": round(sale_price, 2),
+                "cost_price": round(cost_price, 2),
+                "margin_rate": round(margin_rate, 2) if margin_rate is not None else None,
+                "gross_profit_estimate": round(gross_profit, 2) if gross_profit is not None else None,
+                "refund_orders": refund_count,
+                "refund_rate": round(refund_rate, 2),
+            }
+            specs.append(item)
+
+            prod = product_map.setdefault(product_id or "", {
+                "product_id": product_id or "",
+                "product_title": title or "",
+                "orders": 0,
+                "sales_amount": 0.0,
+                "refund_orders": 0,
+                "specs": [],
+            })
+            prod["orders"] += order_count
+            prod["sales_amount"] += amount
+            prod["refund_orders"] += refund_count
+            prod["specs"].append(item)
+
+        products = []
+        for prod in product_map.values():
+            prod_specs = sorted(prod["specs"], key=lambda x: x["orders"], reverse=True)
+            max_refund_spec = max(prod_specs, key=lambda x: x["refund_rate"]) if prod_specs else None
+            products.append({
+                "product_id": prod["product_id"],
+                "product_title": prod["product_title"],
+                "orders": prod["orders"],
+                "order_share": round((prod["orders"] / total_orders * 100) if total_orders else 0, 2),
+                "sales_amount": round(prod["sales_amount"], 2),
+                "refund_orders": prod["refund_orders"],
+                "refund_rate": round((prod["refund_orders"] / prod["orders"] * 100) if prod["orders"] else 0, 2),
+                "main_spec": prod_specs[0]["spec_code"] if prod_specs else "",
+                "max_refund_spec": max_refund_spec["spec_code"] if max_refund_spec and max_refund_spec["refund_orders"] > 0 else "",
+                "top_specs": prod_specs[:5],
+            })
+
+        return {
+            "available": True,
+            "total_orders": total_orders,
+            "total_sales_amount": round(total_amount, 2),
+            "total_refund_orders": total_refunds,
+            "overall_refund_rate": round((total_refunds / total_orders * 100) if total_orders else 0, 2),
+            "top_products": sorted(products, key=lambda x: x["orders"], reverse=True)[:10],
+            "top_specs": sorted(specs, key=lambda x: x["orders"], reverse=True)[:20],
+        }
+
+    def _build_store_report_context(self, records):
+        current = self._manual_margin_record_to_dict(records[-1])
+        previous = self._manual_margin_record_to_dict(records[-2]) if len(records) >= 2 else None
+        order_range = self.lbl_order_range.text() if hasattr(self, "lbl_order_range") else ""
+        return {
+            "store_name": self.store_name,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_notes": [
+                "最新一周和上一周的财务指标按已发货/已收货维度统计。",
+                "订单规格毛利权重表按已拼单订单统计，订单数量和财务表可能存在误差，分析只看大方向。",
+                "财务数据的退款订单和退款率按本周申请售后维度统计，可能包含很久之前成交但本周退款的顾客。",
+                "订单规格结构主要反映最新一周拼单顾客，不代表历史成交客群。",
+            ],
+            "current_week": current,
+            "previous_week": previous,
+            "week_comparison": self._change_summary(current, previous),
+            "historical_summary": self._build_historical_margin_summary(records),
+            "sales_structure": self._build_sales_structure_summary(),
+            "product_operation_records": self._build_product_operation_records(current, previous),
+            "current_order_range_label": order_range,
+        }
+
+    def _estimate_tokens(self, text):
+        if not text:
+            return 0
+        cjk_chars = 0
+        other_chars = 0
+        for ch in text:
+            if "\u4e00" <= ch <= "\u9fff":
+                cjk_chars += 1
+            elif not ch.isspace():
+                other_chars += 1
+        return int(cjk_chars * 1.15 + other_chars / 4) + 1
+
+    def _estimate_messages_tokens(self, messages):
+        try:
+            text = json.dumps(messages, ensure_ascii=False)
+        except Exception:
+            text = str(messages)
+        return self._estimate_tokens(text)
+
+    def _format_token_status(self, input_estimate, usage=None):
+        usage = usage or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
+            prompt_text = str(prompt_tokens) if prompt_tokens is not None else f"约 {input_estimate}"
+            completion_text = str(completion_tokens) if completion_tokens is not None else "接口未返回"
+            if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+                total_tokens = prompt_tokens + completion_tokens
+            total_text = str(total_tokens) if total_tokens is not None else "接口未返回"
+            return f"输入 {prompt_text} tokens | 输出 {completion_text} tokens | 总计 {total_text} tokens"
+        return f"输入约 {input_estimate} tokens | 输出 未生成 | 总计 未生成"
+
+    def _show_debug_prompt_dialog(self, messages, input_tokens, usage=None):
+        if self.ai_report_debug_dialog and self.ai_report_debug_dialog.isVisible():
+            self.ai_report_debug_dialog.close()
+
+        dialog = QDialog(self.ai_report_dialog or self)
+        dialog.setWindowTitle("调试提示词")
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.resize(900, 680)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        token_label = QLabel(self._format_token_status(input_tokens, usage))
+        token_label.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 6px; background: #f4f6f7; border-radius: 4px;")
+        layout.addWidget(token_label)
+
+        prompt_text = QPlainTextEdit()
+        prompt_text.setReadOnly(True)
+        prompt_text.setPlainText(json.dumps(messages, ensure_ascii=False, indent=2))
+        prompt_text.setStyleSheet("font-size: 12px;")
+        layout.addWidget(prompt_text, 1)
+
+        btn_row = QHBoxLayout()
+        btn_copy = QPushButton("复制提示词")
+        btn_close = QPushButton("关闭")
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(prompt_text.toPlainText()))
+        btn_close.clicked.connect(dialog.close)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+        dialog.finished.connect(lambda _=0: setattr(self, "ai_report_debug_dialog", None))
+        self.ai_report_debug_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_ai_report_dialog(self):
+        if self.ai_report_dialog and self.ai_report_dialog.isVisible():
+            self.ai_report_dialog.raise_()
+            self.ai_report_dialog.activateWindow()
+            return
+
+        api_key = self.db.get_setting("ai_api_key", "")
+        if not api_key:
+            QMessageBox.warning(self, "提示", "请先在 AI API 配置中填写 API Key。")
+            return
+
+        records = self.load_manual_data()
+        if not records:
+            QMessageBox.warning(self, "提示", "需要先录入至少一条店铺毛利数据，才能生成报告。")
+            return
+
+        context = self._build_store_report_context(records)
+        current_range = context["current_week"].get("date_range") or "无"
+        previous = context.get("previous_week")
+        previous_range = previous.get("date_range") if previous else "无上一周数据"
+        order_range = context.get("current_order_range_label") or "无订单数据"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"AI店铺周报 - {self.store_name}")
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.resize(920, 720)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        info = QLabel(
+            f"店铺：{self.store_name}    最新一周：{current_range}    上一周：{previous_range}\n"
+            f"{order_range}"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 8px; background: #f4f6f7; border-radius: 4px;")
+        layout.addWidget(info)
+
+        note_label = QLabel("补充分析要求（可选）：")
+        note_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(note_label)
+
+        note_input = QPlainTextEdit()
+        note_input.setPlaceholderText("例如：重点看利润下滑原因、退款问题、主卖规格是否健康、下周怎么调整。")
+        note_input.setMaximumHeight(90)
+        layout.addWidget(note_input)
+
+        result_label = QLabel("AI生成结果：")
+        result_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(result_label)
+
+        result_text = QPlainTextEdit()
+        result_text.setReadOnly(True)
+        result_text.setPlaceholderText("点击“生成报告”后，报告会显示在这里。")
+        result_text.setStyleSheet("font-size: 13px; line-height: 1.5;")
+        layout.addWidget(result_text, 1)
+
+        token_status_label = QLabel("")
+        token_status_label.setStyleSheet("font-size: 12px; color: #7f8c8d; padding: 4px 2px;")
+        layout.addWidget(token_status_label)
+
+        btn_row = QHBoxLayout()
+        btn_generate = QPushButton("生成报告")
+        btn_debug = QPushButton("调试提示词")
+        btn_copy = QPushButton("复制报告")
+        btn_close = QPushButton("关闭")
+        btn_copy.setEnabled(False)
+        btn_generate.setStyleSheet("QPushButton { background-color: #16a085; color: white; font-weight: bold; padding: 8px 18px; border-radius: 4px; }")
+        btn_debug.setStyleSheet("QPushButton { background-color: #7f8c8d; color: white; font-weight: bold; padding: 8px 18px; border-radius: 4px; }")
+        btn_copy.setStyleSheet("QPushButton { background-color: #3498db; color: white; font-weight: bold; padding: 8px 18px; border-radius: 4px; } QPushButton:disabled { background-color: #bdc3c7; }")
+        btn_close.setStyleSheet("QPushButton { padding: 8px 18px; border-radius: 4px; }")
+        btn_row.addStretch()
+        btn_row.addWidget(btn_generate)
+        btn_row.addWidget(btn_debug)
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        prompt_state = {"messages": [], "input_tokens": 0, "usage": None}
+
+        def refresh_prompt_state(clear_usage=False):
+            if clear_usage:
+                prompt_state["usage"] = None
+            messages = self._build_store_report_messages(context, note_input.toPlainText().strip())
+            input_tokens = self._estimate_messages_tokens(messages)
+            prompt_state["messages"] = messages
+            prompt_state["input_tokens"] = input_tokens
+            token_status_label.setText(self._format_token_status(input_tokens, prompt_state.get("usage")))
+            return messages, input_tokens
+
+        refresh_prompt_state()
+        note_input.textChanged.connect(lambda: refresh_prompt_state(True))
+
+        def generate_report():
+            messages, input_tokens = refresh_prompt_state()
+            prompt_state["usage"] = None
+            token_status_label.setText(self._format_token_status(input_tokens))
+            btn_generate.setEnabled(False)
+            btn_debug.setEnabled(False)
+            btn_copy.setEnabled(False)
+            result_text.setPlainText("正在生成报告...")
+
+            def on_success(report, usage):
+                prompt_state["usage"] = usage or {}
+                result_text.setPlainText(report)
+                btn_copy.setEnabled(True)
+                token_status_label.setText(self._format_token_status(input_tokens, prompt_state["usage"]))
+
+            def on_finished():
+                btn_generate.setEnabled(True)
+                btn_debug.setEnabled(True)
+
+            self._start_ai_store_report(messages, input_tokens, dialog, on_success, on_finished)
+
+        def copy_report():
+            text = result_text.toPlainText().strip()
+            if text:
+                QApplication.clipboard().setText(text)
+                self.show_toast("报告已复制")
+
+        btn_generate.clicked.connect(generate_report)
+        btn_debug.clicked.connect(lambda: self._show_debug_prompt_dialog(prompt_state["messages"], prompt_state["input_tokens"], prompt_state.get("usage")))
+        btn_copy.clicked.connect(copy_report)
+        btn_close.clicked.connect(dialog.close)
+        dialog.finished.connect(lambda _=0: setattr(self, "ai_report_dialog", None))
+        self.ai_report_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _build_store_report_messages(self, context, custom_note):
+        system_prompt = """
+你是电商店铺经营分析助手。只基于用户提供的数据写周报，不要编造没有给出的数字。
+输出要求：
+1. 不要使用 Markdown 格式，不要使用 Markdown 标题、表格、代码块、引用块，也不要把输入表格完整复述出来。
+2. 报告要像一段可以直接转发给别人看的文字，最多使用换行、空格、简单序号和符号来区分层次，比如“一、本周结论”“①”“-”。
+3. 先写本周整体结论，再写核心指标变化，再写售卖结构和主卖规格判断，再结合商品操作记录判断可能影响，最后写下周动作。
+4. 操作记录只能作为解释线索：能对应上数据变化就说明，不能对应就不要硬凑原因。
+5. 只保留必要数字和关键判断，优先总结大方向；不要长篇解释、不要客套话、不要营销腔。
+6. 订单规格数据和财务数据口径不同，出现订单数差异时只提醒一次，不要反复解释。
+7. 如果没有商品操作记录，要明确说“本周和上周没有可参考的商品操作记录”，不要臆测操作原因。
+""".strip()
+        user_prompt = {
+            "任务": "生成店铺本周经营文字报告",
+            "用户补充分析要求": custom_note or "无",
+            "数据": context,
+        }
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False, indent=2)},
+        ]
+
+    def _call_ai_for_store_report(self, context, custom_note, parent_dialog):
+        try:
+            import requests
+        except ImportError:
+            QMessageBox.warning(parent_dialog, "错误", "缺少 requests 依赖，无法调用 AI。")
+            return ""
+
+        api_key = self.db.get_setting("ai_api_key", "")
+        api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
+        model = self.db.get_setting("ai_model", "deepseek-v4-flash")
+        if not api_key:
+            QMessageBox.warning(parent_dialog, "提示", "请先在 AI API 配置中填写 API Key。")
+            return ""
+
+        progress = QProgressDialog("正在调用 AI 生成报告...", "取消", 0, 0, parent_dialog)
+        progress.setWindowTitle("AI处理中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": model,
+            "messages": self._build_store_report_messages(context, custom_note),
+            "max_tokens": 4096,
+            "temperature": 0.35,
+        }
+
+        response = None
+        try:
+            for attempt in range(3):
+                if progress.wasCanceled():
+                    progress.close()
+                    return ""
+                response = requests.post(api_url, headers=headers, json=data, timeout=90)
+                if response.status_code not in (500, 503):
+                    break
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+            progress.close()
+
+            if response is not None and response.status_code == 200:
+                result = response.json()
+                return result["choices"][0]["message"]["content"].strip()
+
+            status = response.status_code if response is not None else "无响应"
+            detail = response.text.strip()[:500] if response is not None and response.text else ""
+            if status == 503:
+                message = "AI调用失败：503\nDeepSeek服务器当前过载，请稍后重试。"
+            else:
+                message = f"AI调用失败：{status}"
+            if detail:
+                message += f"\n\n返回内容：{detail}"
+            QMessageBox.warning(parent_dialog, "错误", message)
+            return ""
+        except requests.exceptions.Timeout:
+            progress.close()
+            QMessageBox.warning(parent_dialog, "错误", "AI调用超时，请稍后重试。")
+            return ""
+        except requests.exceptions.ConnectionError as e:
+            progress.close()
+            QMessageBox.warning(parent_dialog, "错误", f"AI连接失败：{str(e)}")
+            return ""
+        except Exception as e:
+            progress.close()
+            QMessageBox.warning(parent_dialog, "错误", f"生成报告失败：{str(e)}")
+            return ""
+
+    def _start_ai_store_report(self, messages, input_tokens, parent_dialog, on_success, on_finished):
+        api_key = self.db.get_setting("ai_api_key", "")
+        api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
+        model = self.db.get_setting("ai_model", "deepseek-v4-flash")
+        if not api_key:
+            QMessageBox.warning(parent_dialog, "提示", "请先在 AI API 配置中填写 API Key。")
+            on_finished()
+            return
+
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 4096,
+            "temperature": 0.35,
+        }
+
+        progress = QProgressDialog("正在调用 AI 生成报告...", "取消", 0, 0, parent_dialog)
+        progress.setWindowTitle("AI处理中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        thread = QThread(parent_dialog)
+        worker = StoreAiReportWorker(api_url, headers, data)
+        worker.moveToThread(thread)
+        self.ai_report_thread = thread
+        self.ai_report_worker = worker
+
+        def cleanup():
+            progress.close()
+            on_finished()
+            worker.deleteLater()
+            thread.quit()
+            thread.wait()
+            thread.deleteLater()
+            if self.ai_report_worker is worker:
+                self.ai_report_worker = None
+            if self.ai_report_thread is thread:
+                self.ai_report_thread = None
+
+        def handle_success(report, usage):
+            on_success(report, usage)
+            cleanup()
+
+        def handle_failure(message):
+            if message != "已取消生成报告。":
+                QMessageBox.warning(parent_dialog, "错误", message)
+            cleanup()
+
+        progress.canceled.connect(worker.cancel)
+        progress.canceled.connect(lambda: progress.setLabelText("正在取消..."))
+        thread.started.connect(worker.run)
+        worker.finished.connect(handle_success)
+        worker.failed.connect(handle_failure)
+        thread.start()
 
     def load_manual_data(self):
         """从数据库加载手动录入数据"""

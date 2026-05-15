@@ -59,7 +59,7 @@ class CloudSyncManager:
         if value is None:
             return None
         # 图片相关字段需要转回bytes
-        if column_name in ('image_data', 'image', 'thumbnail', 'icon'):
+        if column_name in ('image_data', 'spec_image_data', 'image', 'thumbnail', 'icon'):
             if isinstance(value, str):
                 try:
                     return base64.b64decode(value)
@@ -366,12 +366,14 @@ class CloudSyncManager:
 
             if data.get('cost_library'):
                 for item in data['cost_library']:
-                    spec_code = item.get('spec_code')
-                    cost_price = item.get('cost_price', 0)
-                    self.db.safe_execute(
-                        "INSERT OR REPLACE INTO cost_library (spec_code, cost_price, spec_name) VALUES (?, ?, ?)",
-                        (spec_code, cost_price, item.get('spec_name'))
-                    )
+                    columns = [col for col in item.keys() if col]
+                    if columns:
+                        placeholders = ','.join(['?'] * len(columns))
+                        vals = [self._safe_deserialize_value(item.get(col), col) for col in columns]
+                        self.db.safe_execute(
+                            f"INSERT OR REPLACE INTO cost_library ({','.join(columns)}) VALUES ({placeholders})",
+                            vals,
+                        )
 
             if data.get('imported_orders'):
                 for order in data['imported_orders']:
@@ -513,6 +515,7 @@ class CloudSyncManager:
                         placeholders = ','.join(['?'] * len(cols_with_id))
                         self.db.safe_execute(f"INSERT OR REPLACE INTO knowledge_base ({','.join(cols_with_id)}) VALUES ({placeholders})", vals)
 
+            self.db.update_all_product_category_labels()
             self.db.conn.commit()
             return True
         except Exception as e:

@@ -8,11 +8,18 @@ import sys
 import re
 import json
 import sqlite3
+import hashlib
 from datetime import datetime
 
 
 class SafeDatabaseManager:
     """安全的数据库管理类，增加错误处理"""
+
+    CATEGORY_COLORS = [
+        "#FFF2CC", "#DDEBF7", "#E2F0D9", "#FCE4D6", "#E4DFEC",
+        "#D9EAD3", "#F4CCCC", "#D0E0E3", "#FCE5CD", "#D9D2E9",
+        "#CFE2F3", "#EADCF8", "#D5E8D4", "#FFE599", "#D9EAF7",
+    ]
 
     def __init__(self, db_name="shop_manager.db"):
         try:
@@ -138,8 +145,45 @@ class SafeDatabaseManager:
                 except Exception as e:
                     print(f"添加image_data字段失败: {e}")
 
+            if 'product_category_label' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN product_category_label TEXT")
+                    print("✅ 已添加product_category_label字段到products表")
+                except Exception as e:
+                    print(f"添加product_category_label字段失败: {e}")
+            if 'product_memo' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN product_memo TEXT")
+                    print("✅ 已添加product_memo字段到products表")
+                except Exception as e:
+                    print(f"添加product_memo字段失败: {e}")
+            if 'link_combo_id' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN link_combo_id INTEGER")
+                    print("已添加link_combo_id字段到products表")
+                except Exception as e:
+                    print(f"添加link_combo_id字段失败: {e}")
+            if 'link_type' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN link_type TEXT")
+                    print("已添加link_type字段到products表")
+                except Exception as e:
+                    print(f"添加link_type字段失败: {e}")
+
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
-                                (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL)''')
+                                (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL, test_price REAL,
+                                 quantity TEXT, sort_order INTEGER, source_bg_color TEXT,
+                                 category_label TEXT, category_color TEXT)''')
+
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_history (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                spec_code TEXT NOT NULL,
+                                old_cost_price REAL,
+                                new_cost_price REAL NOT NULL,
+                                change_amount REAL,
+                                change_percent REAL,
+                                source TEXT NOT NULL,
+                                import_time TEXT NOT NULL)''')
 
             self.cursor.execute("PRAGMA table_info(cost_library)")
             cost_columns = [col[1] for col in self.cursor.fetchall()]
@@ -149,6 +193,62 @@ class SafeDatabaseManager:
                     print("✅ 已添加spec_name字段到cost_library表")
                 except Exception as e:
                     print(f"添加spec_name字段失败: {e}")
+            if 'test_price' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN test_price REAL")
+                    print("✅ 已添加test_price字段到cost_library表")
+                except Exception as e:
+                    print(f"添加test_price字段失败: {e}")
+            if 'quantity' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN quantity TEXT")
+                    print("✅ 已添加quantity字段到cost_library表")
+                except Exception as e:
+                    print(f"添加quantity字段失败: {e}")
+            if 'sort_order' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN sort_order INTEGER")
+                    print("✅ 已添加sort_order字段到cost_library表")
+                except Exception as e:
+                    print(f"添加sort_order字段失败: {e}")
+            if 'source_bg_color' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN source_bg_color TEXT")
+                    print("✅ 已添加source_bg_color字段到cost_library表")
+                except Exception as e:
+                    print(f"添加source_bg_color字段失败: {e}")
+            if 'category_label' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN category_label TEXT")
+                    print("✅ 已添加category_label字段到cost_library表")
+                except Exception as e:
+                    print(f"添加category_label字段失败: {e}")
+            if 'category_color' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN category_color TEXT")
+                    print("✅ 已添加category_color字段到cost_library表")
+                except Exception as e:
+                    print(f"添加category_color字段失败: {e}")
+            if 'manual_sort_order' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN manual_sort_order INTEGER")
+                    print("✅ 已添加manual_sort_order字段到cost_library表")
+                except Exception as e:
+                    print(f"添加manual_sort_order字段失败: {e}")
+
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_categories (
+                label TEXT PRIMARY KEY,
+                color TEXT,
+                sort_order INTEGER,
+                created_at TEXT
+            )''')
+
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS link_combinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                sort_order INTEGER,
+                created_at TEXT
+            )''')
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS product_specs 
                                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +258,7 @@ class SafeDatabaseManager:
                                 sale_price REAL,
                                 weight_percent REAL,
                                 is_locked INTEGER DEFAULT 0,
+                                spec_image_data BLOB,
                                 FOREIGN KEY (product_id) REFERENCES products (id))''')
 
             self.cursor.execute("PRAGMA table_info(product_specs)")
@@ -168,6 +269,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加is_locked字段到product_specs表")
                 except Exception as e:
                     print(f"添加is_locked字段失败: {e}")
+            if 'spec_image_data' not in spec_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE product_specs ADD COLUMN spec_image_data BLOB")
+                    print("✅ 已添加spec_image_data字段到product_specs表")
+                except Exception as e:
+                    print(f"添加spec_image_data字段失败: {e}")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS profit_records 
                                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -678,6 +785,279 @@ class SafeDatabaseManager:
             self.safe_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         except Exception as e:
             print(f"保存设置失败: {e}")
+
+    def category_color_for_label(self, label):
+        label = str(label or "").strip()
+        if not label:
+            return ""
+        try:
+            rows = self.safe_fetchall("SELECT color FROM cost_categories WHERE label=?", (label,))
+            if rows and rows[0][0]:
+                return rows[0][0]
+        except Exception:
+            pass
+        digest = hashlib.md5(label.encode("utf-8")).hexdigest()
+        return self.CATEGORY_COLORS[int(digest[:8], 16) % len(self.CATEGORY_COLORS)]
+
+    def ensure_cost_category(self, label, color=None):
+        label = str(label or "").strip()
+        if not label:
+            return ""
+        existing = self.safe_fetchall("SELECT color FROM cost_categories WHERE label=?", (label,))
+        if existing:
+            existing_color = existing[0][0]
+            if existing_color:
+                return existing_color
+            digest = hashlib.md5(label.encode("utf-8")).hexdigest()
+            generated_color = self.CATEGORY_COLORS[int(digest[:8], 16) % len(self.CATEGORY_COLORS)]
+            self.cursor.execute("UPDATE cost_categories SET color=? WHERE label=?", (generated_color, label))
+            self.conn.commit()
+            return generated_color
+        if not color:
+            digest = hashlib.md5(label.encode("utf-8")).hexdigest()
+            color = self.CATEGORY_COLORS[int(digest[:8], 16) % len(self.CATEGORY_COLORS)]
+        max_order_rows = self.safe_fetchall("SELECT MAX(sort_order) FROM cost_categories")
+        next_order = (max_order_rows[0][0] if max_order_rows and max_order_rows[0][0] is not None else 0) + 1
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO cost_categories (label, color, sort_order, created_at) VALUES (?, ?, ?, ?)",
+            (label, color, next_order, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.conn.commit()
+        return color
+
+    def sync_cost_categories(self):
+        try:
+            rows = self.safe_fetchall(
+                """SELECT category_label, MAX(COALESCE(category_color, ''))
+                   FROM cost_library
+                   WHERE COALESCE(category_label, '') <> ''
+                   GROUP BY category_label"""
+            )
+            for label, existing_color in rows:
+                self.ensure_cost_category(label, existing_color or None)
+            self.cursor.execute(
+                """UPDATE cost_library
+                   SET category_color = (
+                       SELECT color FROM cost_categories
+                       WHERE cost_categories.label = cost_library.category_label
+                   )
+                   WHERE COALESCE(category_label, '') <> ''"""
+            )
+            self.conn.commit()
+            return len(rows)
+        except Exception as e:
+            print(f"同步成本库商品类型失败: {e}")
+            return 0
+
+    def normalize_cost_category_colors(self):
+        """统一旧版本由不同入口生成的商品类型颜色。"""
+        try:
+            return self.sync_cost_categories()
+        except Exception as e:
+            print(f"统一成本库商品类型颜色失败: {e}")
+            return 0
+
+    def update_cost_category_color(self, label, color):
+        label = str(label or "").strip()
+        color = str(color or "").strip()
+        if not label or not color:
+            return False
+        self.ensure_cost_category(label, color)
+        try:
+            self.cursor.execute("UPDATE cost_categories SET color=? WHERE label=?", (color, label))
+            self.cursor.execute("UPDATE cost_library SET category_color=? WHERE category_label=?", (color, label))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"更新商品类型颜色失败: {e}")
+            return False
+
+    def update_cost_spec_category(self, spec_code, label):
+        spec_code = str(spec_code or "").strip()
+        label = str(label or "").strip()
+        if not spec_code:
+            return False
+        color = self.ensure_cost_category(label) if label else ""
+        try:
+            self.cursor.execute(
+                "UPDATE cost_library SET category_label=?, category_color=? WHERE spec_code=?",
+                (label, color, spec_code),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"更新规格商品类型失败: {e}")
+            return False
+
+    def update_cost_manual_sort_orders(self, ordered_spec_codes):
+        try:
+            for index, spec_code in enumerate(ordered_spec_codes, start=1):
+                self.cursor.execute(
+                    "UPDATE cost_library SET manual_sort_order=? WHERE spec_code=?",
+                    (index, spec_code),
+                )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"保存成本库手动排序失败: {e}")
+            return False
+
+    def get_cost_categories_with_counts(self):
+        try:
+            self.sync_cost_categories()
+            self.update_all_product_category_labels()
+            return self.safe_fetchall(
+                """SELECT cc.label, cc.color,
+                          COALESCE(spec_counts.spec_count, 0) AS spec_count,
+                          COALESCE(link_counts.link_count, 0) AS link_count
+                   FROM cost_categories cc
+                   LEFT JOIN (
+                       SELECT category_label, COUNT(*) AS spec_count
+                       FROM cost_library
+                       WHERE COALESCE(category_label, '') <> ''
+                       GROUP BY category_label
+                   ) spec_counts ON spec_counts.category_label = cc.label
+                   LEFT JOIN (
+                       SELECT product_category_label, COUNT(*) AS link_count
+                       FROM products
+                       WHERE COALESCE(product_category_label, '') <> ''
+                       GROUP BY product_category_label
+                   ) link_counts ON link_counts.product_category_label = cc.label
+                   WHERE COALESCE(cc.label, '') <> ''
+                   ORDER BY cc.sort_order, cc.label"""
+            )
+        except Exception as e:
+            print(f"读取商品类型统计失败: {e}")
+            return []
+
+    def ensure_link_combination(self, name):
+        name = str(name or "").strip()
+        if not name:
+            return None
+        rows = self.safe_fetchall("SELECT id FROM link_combinations WHERE name=?", (name,))
+        if rows:
+            return rows[0][0]
+        max_order_rows = self.safe_fetchall("SELECT MAX(sort_order) FROM link_combinations")
+        next_order = (max_order_rows[0][0] if max_order_rows and max_order_rows[0][0] is not None else 0) + 1
+        self.cursor.execute(
+            "INSERT INTO link_combinations (name, sort_order, created_at) VALUES (?, ?, ?)",
+            (name, next_order, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.conn.commit()
+        return self.cursor.lastrowid
+
+    def get_link_combinations_with_counts(self):
+        try:
+            return self.safe_fetchall(
+                """SELECT lc.id, lc.name, COALESCE(lc.sort_order, 0), COUNT(p.id) AS link_count
+                   FROM link_combinations lc
+                   LEFT JOIN products p ON p.link_combo_id = lc.id
+                   GROUP BY lc.id, lc.name, lc.sort_order
+                   ORDER BY COALESCE(lc.sort_order, 0), lc.name"""
+            )
+        except Exception as e:
+            print(f"读取链接组合失败: {e}")
+            return []
+
+    def rename_link_combination(self, combo_id, name):
+        name = str(name or "").strip()
+        if not combo_id or not name:
+            return False
+        try:
+            self.cursor.execute("UPDATE link_combinations SET name=? WHERE id=?", (name, combo_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"重命名链接组合失败: {e}")
+            return False
+
+    def update_product_link_combo(self, product_id, combo_id):
+        try:
+            self.cursor.execute("UPDATE products SET link_combo_id=? WHERE id=?", (combo_id, product_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"移动链接组合失败: {e}")
+            return False
+
+    def update_product_link_type(self, product_id, link_type):
+        try:
+            self.cursor.execute("UPDATE products SET link_type=? WHERE id=?", (str(link_type or "").strip(), product_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"更新链接类型失败: {e}")
+            return False
+
+    def calculate_product_category_label(self, product_id):
+        """Return the hidden product type label inferred from spec cost-library categories."""
+        try:
+            rows = self.safe_fetchall(
+                """SELECT ps.spec_code, ps.sale_price, cl.category_label
+                   FROM product_specs ps
+                   LEFT JOIN cost_library cl ON ps.spec_code = cl.spec_code
+                   WHERE ps.product_id=?
+                   ORDER BY ps.id""",
+                (product_id,),
+            )
+            buckets = {}
+            for idx, (_spec_code, sale_price, category_label) in enumerate(rows):
+                label = str(category_label or "").strip()
+                if not label:
+                    continue
+                try:
+                    price = float(sale_price) if sale_price is not None else 0.0
+                except (TypeError, ValueError):
+                    price = 0.0
+                info = buckets.setdefault(
+                    label,
+                    {"count": 0, "max_price": 0.0, "first_index": idx},
+                )
+                info["count"] += 1
+                if price > info["max_price"]:
+                    info["max_price"] = price
+            if not buckets:
+                return ""
+            return sorted(
+                buckets.items(),
+                key=lambda item: (
+                    -item[1]["count"],
+                    -item[1]["max_price"],
+                    item[1]["first_index"],
+                    item[0],
+                ),
+            )[0][0]
+        except Exception as e:
+            print(f"计算链接商品类型失败: {e}")
+            return ""
+
+    def update_product_category_label(self, product_id):
+        try:
+            label = self.calculate_product_category_label(product_id)
+            self.safe_execute(
+                "UPDATE products SET product_category_label=? WHERE id=?",
+                (label, product_id),
+            )
+            return label
+        except Exception as e:
+            print(f"更新链接商品类型失败: {e}")
+            return ""
+
+    def update_all_product_category_labels(self, store_id=None):
+        try:
+            products = (
+                self.safe_fetchall("SELECT id FROM products WHERE store_id=?", (store_id,))
+                if store_id
+                else self.safe_fetchall("SELECT id FROM products")
+            )
+            count = 0
+            for (product_id,) in products:
+                self.update_product_category_label(product_id)
+                count += 1
+            return count
+        except Exception as e:
+            print(f"批量更新链接商品类型失败: {e}")
+            return 0
 
     def get_all_prompts(self):
         try:

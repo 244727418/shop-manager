@@ -5,7 +5,7 @@ import re
 import json
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
@@ -13,10 +13,10 @@ from PyQt5.QtWidgets import (
     QComboBox, QCheckBox, QFrame, QGridLayout, QAbstractItemView, QFileDialog,
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
-    QPlainTextEdit, QSlider,
+    QPlainTextEdit, QSlider, QSplitter, QButtonGroup, QDateEdit, QMenu, QAction,
 )
-from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator
+from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve, QDate, QByteArray, QBuffer, QIODevice
+from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator, QKeySequence, QPalette, QFontMetrics
 
 try:
     from ..delegates import CenterAlignDelegate, WeightDelegate
@@ -82,15 +82,16 @@ class InlineTextEditDelegate(QStyledItemDelegate):
             editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
             editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            editor.document().setDocumentMargin(0)
+            editor.document().setDocumentMargin(1)
             editor.setStyleSheet(
                 "QPlainTextEdit {"
-                "padding: 0px; "
+                "padding: 1px; "
                 "margin: 0px; "
                 "border: none; "
-                "background-color: white; "
+                "background-color: #eaf8ee; "
                 "font-size: 13px; "
-                "font-weight: normal; "
+                "font-family: YouYuan, 'Microsoft YaHei UI', sans-serif; "
+                "font-weight: bold; "
                 "}"
             )
             return editor
@@ -99,17 +100,18 @@ class InlineTextEditDelegate(QStyledItemDelegate):
         editor.setFrame(False)
         editor.setAlignment(self.alignment)
         editor.setFont(option.font)
-        editor.setTextMargins(0, 0, 0, 0)
+        editor.setTextMargins(1, 0, 1, 0)
         if self.max_length is not None:
             editor.setMaxLength(self.max_length)
         editor.setStyleSheet(
             "QLineEdit {"
-            "padding: 0px; "
+            "padding: 1px; "
             "margin: 0px; "
             "border: none; "
-            "background-color: white; "
+            "background-color: #eaf8ee; "
             "font-size: 13px; "
-            "font-weight: normal; "
+            "font-family: YouYuan, 'Microsoft YaHei UI', sans-serif; "
+            "font-weight: bold; "
             "}"
         )
         return editor
@@ -135,26 +137,193 @@ class InlineTextEditDelegate(QStyledItemDelegate):
         editor.setGeometry(rect)
 
 
+class SpecImageCell(QLabel):
+    """规格图缩略图单元格，负责接收粘贴和双击查看。"""
+    def __init__(self, table, paste_callback, view_callback, parent=None):
+        super().__init__(parent)
+        self.table = table
+        self.paste_callback = paste_callback
+        self.view_callback = view_callback
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(54, 46)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("鼠标悬停后 Ctrl+V 粘贴规格图；双击查看大图")
+        self.setStyleSheet("""
+            QLabel {
+                background: #f8f9fa;
+                border: 1px solid #d9dee5;
+                border-radius: 4px;
+                color: #8c98a4;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+
+    def _current_row(self):
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, ProductSpecDialog.COL_SPEC_IMAGE) is self:
+                return row
+        return -1
+
+    def mousePressEvent(self, event):
+        row = self._current_row()
+        if row >= 0:
+            self.table.setCurrentCell(row, ProductSpecDialog.COL_SPEC_IMAGE)
+        self.setFocus(Qt.MouseFocusReason)
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        row = self._current_row()
+        if row >= 0:
+            self.table.setCurrentCell(row, ProductSpecDialog.COL_SPEC_IMAGE)
+        self.setFocus(Qt.MouseFocusReason)
+        super().enterEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        row = self._current_row()
+        if row >= 0:
+            self.view_callback(row)
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Paste):
+            row = self._current_row()
+            if row >= 0:
+                self.paste_callback(row)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class SpecImageViewerDialog(QDialog):
+    """可滚轮缩放的规格图查看器。"""
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self.original_pixmap = pixmap
+        self.scale_factor = 1.0
+        self._dragging = False
+        self._drag_start_pos = None
+        self._drag_start_h = 0
+        self._drag_start_v = 0
+        self.setWindowTitle("规格图查看")
+        self.resize(760, 620)
+
+        layout = QVBoxLayout(self)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.viewport().setCursor(Qt.OpenHandCursor)
+        self.scroll_area.viewport().installEventFilter(self)
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setBackgroundRole(QPalette.Base)
+        self.image_label.setCursor(Qt.OpenHandCursor)
+        self.image_label.installEventFilter(self)
+        self.scroll_area.setWidget(self.image_label)
+        layout.addWidget(self.scroll_area)
+        self._refresh_image()
+        self._resize_to_image()
+        QTimer.singleShot(0, self._center_image_view)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+            self._zoom_by_wheel(event)
+            return True
+        if obj in (self.scroll_area.viewport(), self.image_label):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._dragging = True
+                self._drag_start_pos = event.globalPos()
+                self._drag_start_h = self.scroll_area.horizontalScrollBar().value()
+                self._drag_start_v = self.scroll_area.verticalScrollBar().value()
+                self.scroll_area.viewport().setCursor(Qt.ClosedHandCursor)
+                self.image_label.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return True
+            if event.type() == QEvent.MouseMove and self._dragging and self._drag_start_pos is not None:
+                delta = event.globalPos() - self._drag_start_pos
+                self.scroll_area.horizontalScrollBar().setValue(self._drag_start_h - delta.x())
+                self.scroll_area.verticalScrollBar().setValue(self._drag_start_v - delta.y())
+                event.accept()
+                return True
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton and self._dragging:
+                self._dragging = False
+                self._drag_start_pos = None
+                self.scroll_area.viewport().setCursor(Qt.OpenHandCursor)
+                self.image_label.setCursor(Qt.OpenHandCursor)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            self._zoom_by_wheel(event)
+            return
+        super().wheelEvent(event)
+
+    def _zoom_by_wheel(self, event):
+        if event.angleDelta().y() > 0:
+            self.scale_factor *= 1.15
+        else:
+            self.scale_factor *= 0.85
+        self.scale_factor = max(0.2, min(8.0, self.scale_factor))
+        self._refresh_image()
+        self._center_image_view()
+        event.accept()
+
+    def _refresh_image(self):
+        if self.original_pixmap.isNull():
+            return
+        base_size = self.original_pixmap.size()
+        size = QSize(
+            max(1, int(base_size.width() * self.scale_factor)),
+            max(1, int(base_size.height() * self.scale_factor))
+        )
+        scaled = self.original_pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+
+    def _resize_to_image(self):
+        if self.original_pixmap.isNull():
+            return
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        image_size = self.original_pixmap.size()
+        target_width = image_size.width() + 42
+        target_height = image_size.height() + 62
+        if available:
+            target_width = min(target_width, int(available.width() * 0.85))
+            target_height = min(target_height, int(available.height() * 0.85))
+        self.resize(max(320, target_width), max(240, target_height))
+
+    def _center_image_view(self):
+        h_bar = self.scroll_area.horizontalScrollBar()
+        v_bar = self.scroll_area.verticalScrollBar()
+        h_bar.setValue((h_bar.maximum() + h_bar.minimum()) // 2)
+        v_bar.setValue((v_bar.maximum() + v_bar.minimum()) // 2)
+
+
 class ProductSpecDialog(QDialog):
     """商品规格管理与毛利计算器"""
-    SPEC_PROMPT_VERSION = "sku_axis_no_style_label_v3"
+    SPEC_PROMPT_VERSION = "sku_axis_product_memo_deterrence_v4"
     COL_AI = 0
-    COL_SPEC_NAME = 1
-    COL_SPEC_NAME_2 = 2
-    COL_SPEC_CODE = 3
-    COL_COST = 4
-    COL_SALE_PRICE = 5
-    COL_FINAL_PRICE = 6
-    COL_MARGIN_RATE = 7
-    COL_GROSS_PROFIT = 8
-    COL_WEIGHT = 9
-    COL_WEIGHT_COMPARE = 10
-    COL_ORDER_COUNT = 11
-    COL_ORDER_COMPARE = 12
-    COL_REFUND_ORDERS = 13
-    COL_REFUND_RATIO = 14
-    COL_ACTION = 15
+    COL_SPEC_IMAGE = 1
+    COL_SPEC_NAME = 2
+    COL_SPEC_NAME_2 = 3
+    COL_SPEC_CODE = 4
+    COL_COST = 5
+    COL_SALE_PRICE = 6
+    COL_FINAL_PRICE = 7
+    COL_MARGIN_RATE = 8
+    COL_GROSS_PROFIT = 9
+    COL_WEIGHT = 10
+    COL_WEIGHT_COMPARE = 11
+    COL_ORDER_COUNT = 12
+    COL_ORDER_COMPARE = 13
+    COL_REFUND_ORDERS = 14
+    COL_REFUND_RATIO = 15
     SPEC_TABLE_COLUMN_COUNT = 16
+    EDITABLE_SPEC_BG = QColor("#eaf8ee")
 
     def __init__(self, db_manager, product_id, product_code, product_name, parent=None):
         super().__init__(parent)
@@ -167,12 +336,18 @@ class ProductSpecDialog(QDialog):
         self.two_level_specs = self.db.get_setting(f"product_spec_two_level_{self.product_id}", "0") == "1"
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
         self.setWindowFlags(Qt.Window)
-        self.resize(1380, 900)
+        self.resize(1720, 930)
+        self.setMinimumWidth(1500)
         self._code_click_timer = QTimer(self)
         self._code_click_timer.setSingleShot(True)
         self._code_click_timer.timeout.connect(self._copy_product_code_to_clipboard)
         self._copy_toast = None
         self._copy_toast_animations = []
+        self.roi_input_mode = "roi"
+        self._roi_bid_syncing = False
+        self._initial_roi_input_mode = self.roi_input_mode
+        self._roi_bid_manual_source = None
+        self._roi_bid_mode_switches = []
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -207,6 +382,7 @@ class ProductSpecDialog(QDialog):
         """延迟刷新表格"""
         try:
             self.table.resizeRowsToContents()
+            self._resize_spec_table_columns_to_content()
             self.table.viewport().update()
             if hasattr(self, 'lbl_gross_break_even'):
                 self.calculate_roi_metrics()
@@ -214,7 +390,15 @@ class ProductSpecDialog(QDialog):
             pass
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.main_splitter = QSplitter(Qt.Horizontal, self)
+        left_widget = QWidget()
+        layout = QVBoxLayout(left_widget)
+        layout.setContentsMargins(8, 8, 6, 8)
+        self.main_splitter.addWidget(left_widget)
+        root_layout.addWidget(self.main_splitter)
 
         # 调试标签
         debug_widget = QWidget()
@@ -406,7 +590,7 @@ class ProductSpecDialog(QDialog):
         
         roi_grid = QGridLayout()
         
-        roi_grid.addWidget(QLabel("当前投产 (ROI):"), 0, 0)
+        roi_grid.addWidget(QLabel("当前投产:"), 0, 0)
         
         # 创建水平布局容器用于当前投产输入框和按钮
         current_roi_container = QWidget()
@@ -419,6 +603,7 @@ class ProductSpecDialog(QDialog):
         self.current_roi_input.setFixedWidth(120)
         self.current_roi_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 3px;")
         self.current_roi_input.textChanged.connect(self.on_current_roi_changed)
+        self.current_roi_input.installEventFilter(self)
         current_roi_layout.addWidget(self.current_roi_input)
         
         # 添加涨5%按钮
@@ -466,6 +651,56 @@ class ProductSpecDialog(QDialog):
         current_roi_layout.addWidget(self.btn_decrease_5)
         
         roi_grid.addWidget(current_roi_container, 0, 1)
+
+        roi_grid.addWidget(QLabel("成交出价:"), 1, 0)
+
+        bid_container = QWidget()
+        bid_layout = QHBoxLayout(bid_container)
+        bid_layout.setContentsMargins(0, 0, 0, 0)
+        bid_layout.setSpacing(5)
+
+        self.transaction_bid_input = QLineEdit()
+        self.transaction_bid_input.setPlaceholderText("自动计算...")
+        self.transaction_bid_input.setFixedWidth(120)
+        self.transaction_bid_input.textChanged.connect(self.on_transaction_bid_changed)
+        self.transaction_bid_input.installEventFilter(self)
+        bid_layout.addWidget(self.transaction_bid_input)
+
+        self.btn_bid_increase_5 = QPushButton("涨5%")
+        self.btn_bid_increase_5.setFixedWidth(60)
+        self.btn_bid_increase_5.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+                border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #219a52; }
+            QPushButton:pressed { background-color: #1e8449; }
+        """)
+        self.btn_bid_increase_5.clicked.connect(self.increase_bid_5_percent)
+        bid_layout.addWidget(self.btn_bid_increase_5)
+
+        self.btn_bid_decrease_5 = QPushButton("降5%")
+        self.btn_bid_decrease_5.setFixedWidth(60)
+        self.btn_bid_decrease_5.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+                border-radius: 3px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #c0392b; }
+            QPushButton:pressed { background-color: #a93226; }
+        """)
+        self.btn_bid_decrease_5.clicked.connect(self.decrease_bid_5_percent)
+        bid_layout.addWidget(self.btn_bid_decrease_5)
+
+        roi_grid.addWidget(bid_container, 1, 1)
         
         roi_grid.addWidget(QLabel("退货率 (%):"), 0, 2)
         self.return_rate_input = QLineEdit()
@@ -487,11 +722,11 @@ class ProductSpecDialog(QDialog):
         self.lbl_net_break_even.setAlignment(Qt.AlignCenter)
         roi_grid.addWidget(self.lbl_net_break_even, 0, 7)
 
-        roi_grid.addWidget(QLabel("最佳投产:"), 1, 0)
+        roi_grid.addWidget(QLabel("最佳投产:"), 0, 8)
         self.lbl_best_roi = QLabel("0.00")
         self.lbl_best_roi.setStyleSheet("font-weight: bold; color: #27ae60; background-color: #e8f8f5; padding: 5px 10px; border-radius: 3px;")
         self.lbl_best_roi.setAlignment(Qt.AlignCenter)
-        roi_grid.addWidget(self.lbl_best_roi, 1, 1)
+        roi_grid.addWidget(self.lbl_best_roi, 0, 9)
 
         roi_grid.addWidget(QLabel("净利率:"), 1, 2)
         self.lbl_net_profit_rate = QLabel("0.00%")
@@ -524,6 +759,7 @@ class ProductSpecDialog(QDialog):
         roi_grid.setColumnStretch(8, 1)
         roi_grid.setColumnStretch(9, 1)
 
+        self._apply_roi_bid_input_mode()
         roi_layout.addLayout(roi_grid)
         
         roi_widget.setStyleSheet("background-color: #f8f9fa; border-radius: 5px; border: 1px solid #dee2e6;")
@@ -577,40 +813,24 @@ class ProductSpecDialog(QDialog):
         # 2. 规格表格
         self.table = QTableWidget()
         self.table.setColumnCount(self.SPEC_TABLE_COLUMN_COUNT)
-        self.table.setHorizontalHeaderLabels([
-            "", "规格名称", "第二层规格", "关联编码", "自动成本", "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
-        ])
         
-        # 设置列宽策略 - AI列和规格名称列固定宽度，其他列自适应拉伸
-        header = self.table.horizontalHeader()
-
-        # AI按钮列(索引0)固定宽度
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        self.table.setColumnWidth(0, 50)
-
-        # 规格名称列(索引1)固定宽度（增加40像素）
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        self.table.setColumnWidth(1, 180)
-        header.setSectionResizeMode(self.COL_SPEC_NAME_2, QHeaderView.Fixed)
-        self.table.setColumnWidth(self.COL_SPEC_NAME_2, 110)
-
-        # 其他列自适应拉伸
-        for i in range(3, self.SPEC_TABLE_COLUMN_COUNT):
-            header.setSectionResizeMode(i, QHeaderView.Stretch)
-        # 关联编码列按内容自动扩展，避免省略显示
-        header.setSectionResizeMode(self.COL_SPEC_CODE, QHeaderView.ResizeToContents)
-
         self.table.setAlternatingRowColors(False)
         self.table.setWordWrap(True)
+        self.table.installEventFilter(self)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_spec_row_context_menu)
+        self._apply_spec_table_headers_and_column_sizing()
 
         # 设置表格字体和样式
         self.table.setStyleSheet("""
             QTableWidget {
                 font-size: 13px;
+                font-family: YouYuan, "Microsoft YaHei UI", sans-serif;
+                font-weight: bold;
             }
             QTableWidget::item {
                 text-align: center;
-                font-weight: normal;
+                font-weight: bold;
                 padding: 0px;
             }
             QTableWidget::item:selected {
@@ -621,7 +841,9 @@ class ProductSpecDialog(QDialog):
             }
             QHeaderView::section {
                 font-size: 13px;
+                font-family: YouYuan, "Microsoft YaHei UI", sans-serif;
                 font-weight: bold;
+                padding: 3px 2px;
             }
         """)
         
@@ -631,9 +853,9 @@ class ProductSpecDialog(QDialog):
         # 启用自动行高调整
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         
-        # 设置数值列居中显示（自动成本、手动售价、券后价、毛利率、毛利润、权重%）
+        # 设置数值列居中显示（权重列使用专用代理处理锁图标）
         self.center_delegate = CenterAlignDelegate(self)
-        for col in [self.COL_COST, self.COL_SALE_PRICE, self.COL_FINAL_PRICE, self.COL_MARGIN_RATE, self.COL_GROSS_PROFIT, self.COL_WEIGHT]:
+        for col in [self.COL_COST, self.COL_SALE_PRICE, self.COL_FINAL_PRICE, self.COL_MARGIN_RATE, self.COL_GROSS_PROFIT]:
             self.table.setItemDelegateForColumn(col, self.center_delegate)
         
         layout.addWidget(self.table)
@@ -746,6 +968,368 @@ class ProductSpecDialog(QDialog):
         # 5. 信号连接
         self.table.cellChanged.connect(self.on_cell_change)
 
+        self.metric_range_mode = "week"
+        self.metric_panel = self._create_metric_change_panel()
+        self.main_splitter.addWidget(self.metric_panel)
+        self.main_splitter.setStretchFactor(0, 7)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setSizes([1460, 240])
+        self.refresh_metric_change_panel()
+
+    def _create_metric_change_panel(self):
+        panel = QFrame()
+        panel.setMinimumWidth(220)
+        panel.setStyleSheet("""
+            QFrame {
+                background: #fbfcfe;
+                border: 1px solid #dfe6ee;
+                border-radius: 4px;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(8)
+
+        title = QLabel("指标变化")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #2c3e50;")
+        panel_layout.addWidget(title)
+
+        range_buttons = QWidget()
+        range_layout = QGridLayout(range_buttons)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setHorizontalSpacing(5)
+        range_layout.setVerticalSpacing(5)
+
+        self.metric_range_group = QButtonGroup(self)
+        self.metric_range_group.setExclusive(True)
+        for index, (mode, text) in enumerate([("week", "近一周"), ("month", "近一个月"), ("custom", "手动时间"), ("all", "全部")]):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setFixedHeight(28)
+            btn.setStyleSheet("""
+                QPushButton {
+                    border: 1px solid #b8c7d6;
+                    background: white;
+                    color: #34495e;
+                    border-radius: 3px;
+                    padding: 3px 8px;
+                    font-size: 12px;
+                }
+                QPushButton:checked {
+                    background: #3498db;
+                    color: white;
+                    border-color: #3498db;
+                    font-weight: bold;
+                }
+            """)
+            btn.clicked.connect(lambda checked=False, m=mode: self._set_metric_range_mode(m))
+            self.metric_range_group.addButton(btn)
+            range_layout.addWidget(btn, index // 2, index % 2)
+            if mode == "week":
+                btn.setChecked(True)
+
+        panel_layout.addWidget(range_buttons)
+
+        custom_widget = QWidget()
+        custom_layout = QGridLayout(custom_widget)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        custom_layout.setHorizontalSpacing(6)
+        custom_layout.setVerticalSpacing(4)
+
+        custom_layout.addWidget(QLabel("开始"), 0, 0)
+        self.metric_start_date = QDateEdit()
+        self.metric_start_date.setCalendarPopup(True)
+        self.metric_start_date.setDisplayFormat("yyyy-MM-dd")
+        self.metric_start_date.setDate(QDate.currentDate().addDays(-6))
+        self.metric_start_date.dateChanged.connect(lambda: self._on_metric_custom_date_changed())
+        custom_layout.addWidget(self.metric_start_date, 0, 1)
+
+        custom_layout.addWidget(QLabel("结束"), 1, 0)
+        self.metric_end_date = QDateEdit()
+        self.metric_end_date.setCalendarPopup(True)
+        self.metric_end_date.setDisplayFormat("yyyy-MM-dd")
+        self.metric_end_date.setDate(QDate.currentDate())
+        self.metric_end_date.dateChanged.connect(lambda: self._on_metric_custom_date_changed())
+        custom_layout.addWidget(self.metric_end_date, 1, 1)
+        self.metric_custom_widget = custom_widget
+        self.metric_custom_widget.setVisible(False)
+        panel_layout.addWidget(self.metric_custom_widget)
+
+        self.metric_range_label = QLabel("")
+        self.metric_range_label.setWordWrap(True)
+        self.metric_range_label.setStyleSheet("font-size: 12px; color: #607d8b; padding: 2px 0;")
+        panel_layout.addWidget(self.metric_range_label)
+
+        self.metric_scroll = QScrollArea()
+        self.metric_scroll.setWidgetResizable(True)
+        self.metric_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.metric_scroll_widget = QWidget()
+        self.metric_list_layout = QVBoxLayout(self.metric_scroll_widget)
+        self.metric_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.metric_list_layout.setSpacing(7)
+        self.metric_list_layout.setAlignment(Qt.AlignTop)
+        self.metric_scroll.setWidget(self.metric_scroll_widget)
+        panel_layout.addWidget(self.metric_scroll, 1)
+
+        return panel
+
+    def _set_metric_range_mode(self, mode):
+        self.metric_range_mode = mode
+        if hasattr(self, "metric_custom_widget"):
+            self.metric_custom_widget.setVisible(mode == "custom")
+        self.refresh_metric_change_panel()
+
+    def _on_metric_custom_date_changed(self):
+        if getattr(self, "metric_range_mode", "week") == "custom":
+            self.refresh_metric_change_panel()
+
+    def _get_metric_date_range(self):
+        mode = getattr(self, "metric_range_mode", "week")
+        today = date.today()
+        if mode == "all":
+            return None, None, "全部记录"
+        if mode == "month":
+            start = today - timedelta(days=29)
+            return start, today, f"{start.strftime('%Y-%m-%d')} 至 {today.strftime('%Y-%m-%d')}"
+        if mode == "custom":
+            start = self.metric_start_date.date().toPyDate()
+            end = self.metric_end_date.date().toPyDate()
+            if start > end:
+                start, end = end, start
+            return start, end, f"{start.strftime('%Y-%m-%d')} 至 {end.strftime('%Y-%m-%d')}"
+        start = today - timedelta(days=6)
+        return start, today, f"{start.strftime('%Y-%m-%d')} 至 {today.strftime('%Y-%m-%d')}"
+
+    def _load_metric_changes(self, start_date, end_date):
+        rows = self.db.safe_fetchall(
+            "SELECT year, month, day, records_json FROM records WHERE product_id=?",
+            (self.product_id,)
+        )
+        changes = []
+        legacy_count = 0
+
+        for year, month, day, records_json in rows:
+            try:
+                record_date = date(int(year), int(month), int(day))
+            except Exception:
+                continue
+
+            if start_date and record_date < start_date:
+                continue
+            if end_date and record_date > end_date:
+                continue
+
+            try:
+                records = json.loads(records_json) if records_json else []
+            except Exception:
+                records = []
+
+            for rec_index, rec in enumerate(records):
+                rec_changes = rec.get("changes", []) or []
+                if not rec_changes:
+                    if rec.get("text"):
+                        legacy_count += 1
+                    continue
+
+                time_text = rec.get("time", "")
+                for change_index, change in enumerate(rec_changes):
+                    item = dict(change)
+                    item["date"] = record_date
+                    item["date_text"] = record_date.strftime("%Y-%m-%d")
+                    item["time"] = item.get("time") or time_text
+                    item["sort_key"] = f"{item['date_text']} {item.get('time', '')}"
+                    item["_record_index"] = rec_index
+                    item["_change_index"] = change_index
+                    changes.append(item)
+
+        changes.sort(key=lambda item: item.get("sort_key", ""), reverse=True)
+        return changes, legacy_count
+
+    def _clear_metric_change_list(self):
+        if not hasattr(self, "metric_list_layout"):
+            return
+        while self.metric_list_layout.count():
+            item = self.metric_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def refresh_metric_change_panel(self):
+        if not hasattr(self, "metric_list_layout"):
+            return
+
+        start_date, end_date, range_text = self._get_metric_date_range()
+        self.metric_range_label.setText(f"当前范围：{range_text}")
+        self._clear_metric_change_list()
+
+        changes, legacy_count = self._load_metric_changes(start_date, end_date)
+        if not changes:
+            empty = QLabel("当前时间范围内暂无指标变化")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setWordWrap(True)
+            empty.setStyleSheet("color: #95a5a6; padding: 28px 12px; font-size: 13px;")
+            self.metric_list_layout.addWidget(empty)
+        else:
+            for change in changes:
+                self.metric_list_layout.addWidget(self._create_metric_change_card(change))
+
+        if legacy_count > 0:
+            hint = QLabel(f"有 {legacy_count} 条旧文字记录无结构化指标明细")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: #95a5a6; font-size: 11px; padding: 6px;")
+            self.metric_list_layout.addWidget(hint)
+
+    def _create_metric_change_card(self, change):
+        color_map = {
+            "price_increase": "#e74c3c",
+            "price_decrease": "#27ae60",
+            "price_set": "#3498db",
+            "roi": "#9b59b6",
+            "transaction_bid": "#8e44ad",
+            "gross_margin": "#d35400",
+            "return_rate": "#f39c12",
+            "coupon": "#16a085",
+            "new_customer_discount": "#2980b9",
+            "limited_time": "#c0392b",
+            "marketing": "#7d3c98",
+            "spec_deleted": "#7f8c8d",
+            "roi_bid_mode": "#2c7be5",
+        }
+        change_type = change.get("type", "")
+        accent = color_map.get(change_type, "#3498db")
+
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: white;
+                border: 1px solid #dfe6ee;
+                border-left: 4px solid {accent};
+                border-radius: 4px;
+            }}
+            QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+        card.setContextMenuPolicy(Qt.CustomContextMenu)
+        card.customContextMenuRequested.connect(
+            lambda pos, item=dict(change), widget=card: self._show_metric_change_context_menu(
+                item, widget.mapToGlobal(pos)
+            )
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(3)
+
+        top = QLabel(f"{change.get('date_text', '')} {change.get('time', '')}  {change.get('metric', '指标变化')}")
+        top.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50;")
+        top.setWordWrap(True)
+        layout.addWidget(top)
+
+        old_value = change.get("old", "")
+        new_value = change.get("new", "")
+        if old_value != "" or new_value != "":
+            value = QLabel(f"{old_value}  ->  {new_value}")
+            value.setWordWrap(True)
+            value.setStyleSheet(f"font-size: 12px; color: {accent}; font-weight: bold;")
+            layout.addWidget(value)
+
+        text = QLabel(change.get("text", ""))
+        text.setWordWrap(True)
+        text.setStyleSheet("font-size: 12px; color: #34495e; line-height: 1.35;")
+        layout.addWidget(text)
+        return card
+
+    def _show_metric_change_context_menu(self, change, global_pos):
+        menu = QMenu(self)
+        delete_action = QAction("删除", self)
+        delete_action.triggered.connect(lambda: self._delete_metric_change(change))
+        menu.addAction(delete_action)
+        menu.exec_(global_pos)
+
+    def _delete_metric_change(self, change):
+        try:
+            record_date = change.get("date")
+            if not record_date:
+                record_date = datetime.strptime(change.get("date_text", ""), "%Y-%m-%d").date()
+            year, month, day = record_date.year, record_date.month, record_date.day
+
+            rows = self.db.safe_fetchall(
+                "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+                (self.product_id, year, month, day)
+            )
+            if not rows:
+                return
+
+            try:
+                records = json.loads(rows[0][0]) if rows[0][0] else []
+            except Exception:
+                records = []
+
+            rec_index = change.get("_record_index")
+            change_index = change.get("_change_index")
+            removed = False
+
+            if isinstance(rec_index, int) and 0 <= rec_index < len(records):
+                changes = records[rec_index].get("changes", []) or []
+                if isinstance(change_index, int) and 0 <= change_index < len(changes):
+                    candidate = changes[change_index]
+                    if self._metric_change_matches(candidate, change):
+                        changes.pop(change_index)
+                        removed = True
+                if not removed:
+                    for idx, candidate in enumerate(changes):
+                        if self._metric_change_matches(candidate, change):
+                            changes.pop(idx)
+                            removed = True
+                            break
+                if removed:
+                    self._sync_metric_record_after_delete(records, rec_index, changes)
+
+            if not removed:
+                for idx, rec in enumerate(records):
+                    changes = rec.get("changes", []) or []
+                    for change_idx, candidate in enumerate(changes):
+                        if self._metric_change_matches(candidate, change):
+                            changes.pop(change_idx)
+                            self._sync_metric_record_after_delete(records, idx, changes)
+                            removed = True
+                            break
+                    if removed:
+                        break
+
+            if not removed:
+                return
+
+            self.db.safe_execute(
+                "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
+                (self.product_id, year, month, day, json.dumps(records, ensure_ascii=False))
+            )
+            self.refresh_metric_change_panel()
+            self._show_action_bubble("已删除指标变化")
+        except Exception as e:
+            print(f"删除指标变化失败: {e}")
+
+    def _metric_change_matches(self, candidate, target):
+        for key in ("time", "metric", "old", "new", "text", "type"):
+            if str(candidate.get(key, "")) != str(target.get(key, "")):
+                return False
+        return True
+
+    def _sync_metric_record_after_delete(self, records, rec_index, changes):
+        if not changes:
+            records.pop(rec_index)
+            return
+        records[rec_index]["changes"] = changes
+        texts = [str(change.get("text", "")).strip() for change in changes if str(change.get("text", "")).strip()]
+        records[rec_index]["text"] = "；".join(texts)
+
     def _split_two_level_spec_name(self, spec_name):
         """按最后一个空格拆分两层规格名。"""
         text = (spec_name or "").strip()
@@ -765,6 +1349,12 @@ class ProductSpecDialog(QDialog):
         second = second_item.text().strip() if second_item else ""
         return f"{first} {second}".strip() if second else first
 
+    def _mark_editable_spec_item(self, item):
+        """给规格表可手动编辑单元格统一浅绿色背景。"""
+        if item:
+            item.setBackground(self.EDITABLE_SPEC_BG)
+        return item
+
     def _set_spec_name_cells(self, row, spec_name):
         """按当前模式写入规格名单元格。"""
         if self.two_level_specs:
@@ -774,11 +1364,136 @@ class ProductSpecDialog(QDialog):
 
         first_item = QTableWidgetItem(first)
         first_item.setToolTip("规格名称（最大40字符）")
+        self._mark_editable_spec_item(first_item)
         self.table.setItem(row, self.COL_SPEC_NAME, first_item)
 
         second_item = QTableWidgetItem(second)
         second_item.setToolTip("第二层规格")
+        self._mark_editable_spec_item(second_item)
         self.table.setItem(row, self.COL_SPEC_NAME_2, second_item)
+
+    def _get_spec_table_headers(self, enabled=None):
+        """返回规格表格表头；指标列用换行适配数据优先的列宽。"""
+        two_level = self.two_level_specs if enabled is None else bool(enabled)
+        first_spec_header = "第一层\n规格" if two_level else "规格\n名称"
+        return [
+            "",
+            "规格\n图",
+            first_spec_header,
+            "第二层\n规格",
+            "关联\n编码",
+            "自动\n成本",
+            "手动\n售价",
+            "券后\n价",
+            "毛利\n率",
+            "毛利润",
+            "权重\n%",
+            "权重\n对比\n(较上周)",
+            "单量",
+            "单量\n对比\n(较上周)",
+            "退款\n订单",
+            "退款\n占比\n(单规格)",
+        ]
+
+    def _apply_spec_table_headers_and_column_sizing(self, enabled=None):
+        """统一应用表头；列宽按当前内容动态测量。"""
+        if not hasattr(self, "table"):
+            return
+
+        self.table.setHorizontalHeaderLabels(self._get_spec_table_headers(enabled))
+
+        header = self.table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignCenter)
+        header.setMinimumHeight(62)
+        header.setFixedHeight(64)
+        header.setMinimumSectionSize(42)
+        header.setStretchLastSection(False)
+        for col in range(self.SPEC_TABLE_COLUMN_COUNT):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        self._resize_spec_table_columns_to_content()
+
+    def _schedule_spec_table_column_resize(self):
+        if not hasattr(self, "table"):
+            return
+        if not hasattr(self, "_spec_content_resize_timer"):
+            self._spec_content_resize_timer = QTimer(self)
+            self._spec_content_resize_timer.setSingleShot(True)
+            self._spec_content_resize_timer.timeout.connect(self._resize_spec_table_columns_to_content)
+        self._spec_content_resize_timer.start(80)
+
+    def _text_width_for_column(self, metrics, text):
+        lines = str(text or "").splitlines() or [""]
+        return max(metrics.horizontalAdvance(line) for line in lines)
+
+    def _resize_spec_table_columns_to_content(self):
+        """按当前表头、可见数据和单元格控件宽度计算列宽。"""
+        if not hasattr(self, "table"):
+            return
+
+        header_metrics = QFontMetrics(self.table.horizontalHeader().font())
+        cell_metrics = QFontMetrics(self.table.font())
+        headers = self._get_spec_table_headers()
+
+        min_widths = {
+            self.COL_AI: 48,
+            self.COL_SPEC_IMAGE: 62,
+            self.COL_WEIGHT: 64,
+        }
+        max_widths = {
+            self.COL_SPEC_NAME: 520,
+            self.COL_SPEC_NAME_2: 360,
+            self.COL_SPEC_CODE: 300,
+            self.COL_WEIGHT_COMPARE: 150,
+            self.COL_ORDER_COMPARE: 150,
+            self.COL_REFUND_RATIO: 150,
+        }
+        default_min = 58
+        default_max = 220
+
+        visible_rows = [row for row in range(self.table.rowCount()) if not self.table.isRowHidden(row)]
+        rows_to_measure = visible_rows if visible_rows else list(range(self.table.rowCount()))
+
+        column_widths = {}
+        for col in range(self.SPEC_TABLE_COLUMN_COUNT):
+            if self.table.isColumnHidden(col):
+                continue
+
+            header_width = self._text_width_for_column(header_metrics, headers[col] if col < len(headers) else "")
+            width = header_width + 16
+
+            for row in rows_to_measure:
+                item = self.table.item(row, col)
+                if item:
+                    display = item.data(Qt.DisplayRole)
+                    if display is None:
+                        display = item.text()
+                    width = max(width, self._text_width_for_column(cell_metrics, display) + 18)
+
+                widget = self.table.cellWidget(row, col)
+                if widget:
+                    hint = widget.sizeHint()
+                    widget_width = max(hint.width(), widget.minimumWidth())
+                    width = max(width, widget_width + 8)
+
+            min_width = min_widths.get(col, default_min)
+            max_width = max_widths.get(col, default_max)
+            column_widths[col] = max(min_width, min(width, max_width))
+
+        remaining = self.table.viewport().width() - sum(column_widths.values()) - 2
+        if remaining > 0 and column_widths:
+            flexible_columns = [
+                col for col in (self.COL_SPEC_NAME, self.COL_SPEC_NAME_2, self.COL_SPEC_CODE)
+                if col in column_widths and not self.table.isColumnHidden(col)
+            ]
+            if not flexible_columns:
+                flexible_columns = [max(column_widths)]
+            base_extra = remaining // len(flexible_columns)
+            leftover = remaining % len(flexible_columns)
+            for index, col in enumerate(flexible_columns):
+                column_widths[col] += base_extra + (1 if index < leftover else 0)
+
+        for col, width in column_widths.items():
+            self.table.setColumnWidth(col, width)
 
     def _on_two_level_mode_toggled(self, checked):
         self.db.set_setting(f"product_spec_two_level_{self.product_id}", "1" if checked else "0")
@@ -787,11 +1502,7 @@ class ProductSpecDialog(QDialog):
     def _set_two_level_mode(self, enabled, transform_rows=True):
         old_mode = self.two_level_specs
         self.two_level_specs = bool(enabled)
-        self.table.setHorizontalHeaderLabels([
-            "", "第一层规格" if enabled else "规格名称", "第二层规格", "关联编码", "自动成本",
-            "手动售价", "券后价", "毛利率", "毛利润", "权重%", "权重对比\n(较上周)",
-            "单量", "单量对比\n(较上周)", "退款订单", "退款占比\n(单规格)", "操作"
-        ])
+        self._apply_spec_table_headers_and_column_sizing(enabled)
         self.table.setColumnHidden(self.COL_SPEC_NAME_2, not enabled)
         self.two_level_controls.setVisible(enabled)
 
@@ -816,6 +1527,7 @@ class ProductSpecDialog(QDialog):
         else:
             self._refresh_spec_filter_options()
             self._apply_spec_filters()
+        self._schedule_spec_table_column_resize()
 
     def _set_combo_items(self, combo, values):
         current = combo.currentText()
@@ -868,6 +1580,7 @@ class ProductSpecDialog(QDialog):
             match_first = not first_filter or first_filter == first
             match_second = not second_filter or second_filter == second
             self.table.setRowHidden(row, not (match_first and match_second))
+        self._schedule_spec_table_column_resize()
 
     def _batch_update_visible_prices(self):
         if not self.two_level_specs:
@@ -898,6 +1611,7 @@ class ProductSpecDialog(QDialog):
                 item = self.table.item(row, self.COL_SALE_PRICE)
                 if not item:
                     item = QTableWidgetItem()
+                    self._mark_editable_spec_item(item)
                     self.table.setItem(row, self.COL_SALE_PRICE, item)
                 item.setText(f"{new_price:.2f}")
                 self.calculate_row_margin(row)
@@ -915,10 +1629,39 @@ class ProductSpecDialog(QDialog):
         self._refresh_spec_filter_options()
         self._apply_spec_filters()
         self.batch_price_value.clear()
+        self._schedule_spec_table_column_resize()
         self._show_action_bubble(f"已批量修改 {changed} 行价格")
 
     def eventFilter(self, obj, event):
         """事件过滤器：处理标签双击事件"""
+        if obj == getattr(self, "table", None) and event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
+            row = self.table.currentRow()
+            col = self.table.currentColumn()
+            if row >= 0 and col == self.COL_SPEC_IMAGE:
+                self._paste_spec_image_from_clipboard(row)
+                return True
+
+        if event.type() == QEvent.MouseButtonPress:
+            if obj == getattr(self, "current_roi_input", None):
+                if getattr(self, "roi_input_mode", "roi") != "roi":
+                    self._set_roi_bid_input_mode("roi", user_action=True)
+                    self.current_roi_input.setFocus()
+                    QTimer.singleShot(0, self.current_roi_input.selectAll)
+                    return True
+                self._mark_roi_bid_manual_source("roi")
+            elif obj == getattr(self, "transaction_bid_input", None):
+                if getattr(self, "roi_input_mode", "roi") != "bid":
+                    self._set_roi_bid_input_mode("bid", user_action=True)
+                    self.transaction_bid_input.setFocus()
+                    QTimer.singleShot(0, self.transaction_bid_input.selectAll)
+                    return True
+                self._mark_roi_bid_manual_source("transaction_bid")
+        elif event.type() == QEvent.FocusIn:
+            if obj == getattr(self, "current_roi_input", None) and getattr(self, "roi_input_mode", "roi") == "roi":
+                self._mark_roi_bid_manual_source("roi")
+            elif obj == getattr(self, "transaction_bid_input", None) and getattr(self, "roi_input_mode", "roi") == "bid":
+                self._mark_roi_bid_manual_source("transaction_bid")
+
         if event.type() == QEvent.MouseButtonDblClick:
             if obj == self.lbl_code:
                 self._code_click_timer.stop()
@@ -926,6 +1669,16 @@ class ProductSpecDialog(QDialog):
                 return True
             elif obj == self.lbl_name:
                 self.edit_product_name()
+                return True
+            elif obj == getattr(self, "current_roi_input", None):
+                self._set_roi_bid_input_mode("roi", user_action=True)
+                self.current_roi_input.setFocus()
+                QTimer.singleShot(0, self.current_roi_input.selectAll)
+                return True
+            elif obj == getattr(self, "transaction_bid_input", None):
+                self._set_roi_bid_input_mode("bid", user_action=True)
+                self.transaction_bid_input.setFocus()
+                QTimer.singleShot(0, self.transaction_bid_input.selectAll)
                 return True
         elif event.type() == QEvent.MouseButtonRelease and obj == self.lbl_code:
             self._code_click_timer.start(QApplication.doubleClickInterval())
@@ -1097,6 +1850,81 @@ class ProductSpecDialog(QDialog):
         self.table.setItem(row, column, self._make_unselectable_item())
         self.table.setCellWidget(row, column, widget)
 
+    def _pixmap_from_spec_image_data(self, image_data):
+        pixmap = QPixmap()
+        if image_data:
+            pixmap.loadFromData(bytes(image_data))
+        return pixmap
+
+    def _get_spec_image_data(self, row):
+        item = self.table.item(row, self.COL_SPEC_IMAGE)
+        if not item:
+            return None
+        image_data = item.data(Qt.UserRole)
+        return bytes(image_data) if image_data else None
+
+    def _set_spec_image_cell(self, row, image_data=None):
+        item = self._make_unselectable_item()
+        item.setData(Qt.UserRole, bytes(image_data) if image_data else None)
+        self.table.setItem(row, self.COL_SPEC_IMAGE, item)
+
+        label = SpecImageCell(self.table, self._paste_spec_image_from_clipboard, self._show_spec_image_viewer, self.table)
+        self._refresh_spec_image_label(label, image_data)
+        self.table.setCellWidget(row, self.COL_SPEC_IMAGE, label)
+        self.table.setRowHeight(row, max(self.table.rowHeight(row), 52))
+
+    def _refresh_spec_image_label(self, label, image_data):
+        pixmap = self._pixmap_from_spec_image_data(image_data)
+        if pixmap.isNull():
+            label.setPixmap(QPixmap())
+            label.setText("粘贴\n图片")
+            return
+        label.setText("")
+        label.setPixmap(pixmap.scaled(48, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _paste_spec_image_from_clipboard(self, row):
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if not mime_data.hasImage():
+            self._show_action_bubble("剪贴板没有图片")
+            return
+
+        pixmap = QPixmap.fromImage(clipboard.image())
+        if pixmap.isNull():
+            self._show_action_bubble("图片读取失败")
+            return
+
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        if not buffer.open(QIODevice.WriteOnly):
+            self._show_action_bubble("图片读取失败")
+            return
+        pixmap.save(buffer, "PNG")
+        image_data = bytes(byte_array)
+        if not image_data:
+            self._show_action_bubble("图片读取失败")
+            return
+
+        item = self.table.item(row, self.COL_SPEC_IMAGE)
+        if not item:
+            item = self._make_unselectable_item()
+            self.table.setItem(row, self.COL_SPEC_IMAGE, item)
+        item.setData(Qt.UserRole, image_data)
+
+        label = self.table.cellWidget(row, self.COL_SPEC_IMAGE)
+        if label:
+            self._refresh_spec_image_label(label, image_data)
+        self._show_action_bubble("规格图已粘贴，保存后生效")
+
+    def _show_spec_image_viewer(self, row):
+        image_data = self._get_spec_image_data(row)
+        pixmap = self._pixmap_from_spec_image_data(image_data)
+        if pixmap.isNull():
+            self._show_action_bubble("该规格暂无图片")
+            return
+        dialog = SpecImageViewerDialog(pixmap, self)
+        dialog.exec_()
+
     def load_specs(self):
         """从数据库加载规格数据到表格，并初始化删除功能"""
         try:
@@ -1133,7 +1961,7 @@ class ProductSpecDialog(QDialog):
             
             # 3. 查询数据库（包含is_locked字段）
             rows = self.db.safe_fetchall(
-                "SELECT spec_name, spec_code, sale_price, weight_percent, is_locked FROM product_specs WHERE product_id=?",
+                "SELECT spec_name, spec_code, sale_price, weight_percent, is_locked, spec_image_data FROM product_specs WHERE product_id=?",
                 (self.product_id,)
             )
             
@@ -1182,6 +2010,7 @@ class ProductSpecDialog(QDialog):
                 sale_price = float(row_data[2]) if row_data[2] else 0.0
                 weight_percent = float(row_data[3]) if row_data[3] else 0.0
                 is_locked = row_data[4] if row_data[4] else 0  # 读取锁定状态
+                spec_image_data = row_data[5] if len(row_data) > 5 else None
                 
                 # 记录原始编码
                 if spec_code:
@@ -1230,17 +2059,20 @@ class ProductSpecDialog(QDialog):
                 
                 self.table.setCellWidget(row_idx, self.COL_AI, ai_widget)
                 
-                # 第1/2列：规格名称
+                # 规格图列
+                self._set_spec_image_cell(row_idx, spec_image_data)
+
+                # 规格名称列
                 self._set_spec_name_cells(row_idx, spec_name)
-                # 第2列：关联编码
-                self.table.setItem(row_idx, self.COL_SPEC_CODE, QTableWidgetItem(spec_code))
+                # 关联编码列
+                self.table.setItem(row_idx, self.COL_SPEC_CODE, self._mark_editable_spec_item(QTableWidgetItem(spec_code)))
                 
                 # 成本列 (不可编辑)
                 cost_item = QTableWidgetItem(f"{cost_price:.2f}")
                 cost_item.setFlags(cost_item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row_idx, self.COL_COST, cost_item)
                 
-                self.table.setItem(row_idx, self.COL_SALE_PRICE, QTableWidgetItem(f"{sale_price:.2f}"))
+                self.table.setItem(row_idx, self.COL_SALE_PRICE, self._mark_editable_spec_item(QTableWidgetItem(f"{sale_price:.2f}")))
                 
                 # 券后价列 (不可编辑) = 手动售价 - 最大优惠
                 coupon_amount = discount_rows[0][0] if discount_rows and discount_rows[0][0] else 0
@@ -1286,6 +2118,8 @@ class ProductSpecDialog(QDialog):
                         weight_text = f"{display_weight:.2f}%"
                     weight_item = QTableWidgetItem(weight_text)
                 weight_item.setData(Qt.UserRole, display_weight)
+                if weight_item.flags() & Qt.ItemIsEditable:
+                    self._mark_editable_spec_item(weight_item)
                 if order_count > 0:
                     weight_item.setToolTip(f"订单数: {order_count}单")
                 elif has_imported_orders:
@@ -1337,19 +2171,6 @@ class ProductSpecDialog(QDialog):
                 refund_ratio_item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_idx, self.COL_REFUND_RATIO, refund_ratio_item)
 
-                # 第 14 列添加删除按钮
-                btn_delete = QPushButton("🗑️")
-                btn_delete.setToolTip("删除此规格")
-                btn_delete.setStyleSheet("""
-                    QPushButton {
-                        background-color: #ff4d4f; color: white; border-radius: 4px; font-weight: bold; font-size: 12px;
-                    }
-                    QPushButton:hover { background-color: #ff7875; }
-                    QPushButton:pressed { background-color: #d9363e; }
-                """)
-                btn_delete.clicked.connect(lambda checked=False, button=btn_delete: self._delete_spec_by_button(button))
-                self.table.setCellWidget(row_idx, self.COL_ACTION, btn_delete)
-                
                 # 🔑【关键修复】强制更新表格
                 self.table.update()
             
@@ -1360,6 +2181,7 @@ class ProductSpecDialog(QDialog):
             self.update_compare_columns()
             self._refresh_spec_filter_options()
             self._apply_spec_filters()
+            self._schedule_spec_table_column_resize()
 
             # 🔑【关键修复】恢复之前选中的行
             if self._saved_current_row > 0 and self._saved_current_row < self.table.rowCount():
@@ -1376,18 +2198,22 @@ class ProductSpecDialog(QDialog):
             print(f"加载规格失败：{traceback.format_exc()}")
             QMessageBox.warning(self, "错误", f"加载数据失败：{e}")
 
-    def _delete_spec_by_button(self, button):
-        """根据删除按钮当前所在的表格行执行删除，避免删除后行号错位。"""
-        for row in range(self.table.rowCount()):
-            if self.table.cellWidget(row, self.COL_ACTION) is button:
-                self.delete_spec_row(row)
-                return
+    def _show_spec_row_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.selectRow(row)
+        menu = QMenu(self)
+        delete_action = QAction("删除规格", self)
+        delete_action.triggered.connect(lambda: self.delete_spec_row(row))
+        menu.addAction(delete_action)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def delete_spec_row(self, row):
         """
         【中文功能说明】
         删除指定行的规格。
-        逻辑：确认 -> 移除行 -> 自动重算剩余权重 (归一化到 100%) -> 更新界面
+        逻辑：右键菜单 -> 移除行 -> 自动重算剩余权重 (归一化到 100%) -> 更新界面
         """
         if row < 0 or row >= self.table.rowCount():
             return
@@ -1395,24 +2221,15 @@ class ProductSpecDialog(QDialog):
         # 1. 获取该行信息
         code_item = self.table.item(row, self.COL_SPEC_CODE)
         spec_name = self._compose_spec_name(row) or "未知"
-        spec_code = code_item.text() if code_item else "未知"
-        
-        # 2. 二次确认
-        reply = QMessageBox.question(
-            self, '确认删除', 
-            f'确定要删除规格 "{spec_name}" ({spec_code}) 吗？\n\n删除后，剩余规格的权重将自动按比例重新分配为 100%。',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            # 3. 移除行
-            self.table.removeRow(row)
-            
-            # 4. 自动重算权重 (归一化)
-            # 这里直接调用一个简单的归一化逻辑，或者复用 average_weights 的逻辑
-            self.normalize_weights_after_delete()
-            
-            self._show_action_bubble(f"已删除规格：{spec_name}")
+
+        # 2. 移除行
+        self.table.removeRow(row)
+
+        # 3. 自动重算权重 (归一化)
+        self.normalize_weights_after_delete()
+
+        self._schedule_spec_table_column_resize()
+        self._show_copy_bubble(f"已删除规格：{spec_name}", fade_in_ms=80, hold_ms=360, fade_out_ms=60)
 
     def normalize_weights_after_delete(self):
         """
@@ -1553,6 +2370,7 @@ class ProductSpecDialog(QDialog):
             self.lbl_roi_multiple.setText("--")
             self.lbl_scale_roi.setText("--")
             self.lbl_promotion_ratio.setText("--")
+            self._refresh_auto_roi_bid_field()
             return
         
         # 毛保本投产 = 1 / 毛利率
@@ -1597,76 +2415,19 @@ class ProductSpecDialog(QDialog):
 
     def on_current_roi_changed(self):
         """当前投产输入变化时，计算净利率和投产倍数"""
-        try:
-            current_roi_text = self.current_roi_input.text().strip()
-            if not current_roi_text:
-                self.lbl_net_profit_rate.setText("0.00%")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
-                self.lbl_roi_multiple.setText("--")
-                return
-            
-            current_roi = float(current_roi_text)
-            
-            if current_roi <= 0:
-                self.lbl_net_profit_rate.setText("0.00%")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
-                self.lbl_roi_multiple.setText("--")
-                return
-            
-            margin_rate = self.get_current_margin_rate()
-            if margin_rate <= 0:
-                self.lbl_net_profit_rate.setText("请设置毛利")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
-                self.lbl_roi_multiple.setText("--")
-                return
-            
-            return_rate = self.get_return_rate()
-            
-            # 计算净保本投产
-            net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.0006
-            net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0
-            
-            # 净利率 = 毛利率×(1-退货率)-0.006-(1÷投产比)
-            net_profit_rate = margin_rate * (1 - return_rate / 100) - 0.006 - (1 / current_roi)
-            net_profit_rate = net_profit_rate * 100
-            
-            if net_profit_rate > 0:
-                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #27ae60; background-color: #e8f8f5; padding: 5px 10px; border-radius: 3px;")
-            elif net_profit_rate == 0:
-                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e67e22; background-color: #fef5e7; padding: 5px 10px; border-radius: 3px;")
-            else:
-                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
-                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
-            
-            # 计算并显示投产倍数
-            if net_break_even > 0:
-                roi_multiple = current_roi / net_break_even
-                self.lbl_roi_multiple.setText(f"{roi_multiple:.2f}倍")
-            else:
-                self.lbl_roi_multiple.setText("--")
-            
-            # 计算放量投产（净保本投产的0.8倍）
-            if net_break_even > 0:
-                scale_roi = net_break_even * 0.8
-                self.lbl_scale_roi.setText(f"{scale_roi:.2f}")
-            else:
-                self.lbl_scale_roi.setText("--")
-            
-            # 计算推广占比（1/当前投产）
-            if current_roi > 0:
-                promotion_ratio = (1 / current_roi) * 100
-                self.lbl_promotion_ratio.setText(f"{promotion_ratio:.2f}%")
-            else:
-                self.lbl_promotion_ratio.setText("--")
-                
-        except ValueError:
-            self.lbl_net_profit_rate.setText("0.00%")
-            self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
-            self.lbl_roi_multiple.setText("--")
-            self.lbl_scale_roi.setText("--")
-            self.lbl_promotion_ratio.setText("--")
+        if not self._roi_bid_syncing and getattr(self, "roi_input_mode", "roi") == "roi":
+            if self.current_roi_input.hasFocus():
+                self._mark_roi_bid_manual_source("roi")
+            self._sync_bid_from_roi()
+        self._update_roi_derived_metrics()
+
+    def on_transaction_bid_changed(self):
+        """成交出价输入变化时，反算当前投产。"""
+        if not self._roi_bid_syncing and getattr(self, "roi_input_mode", "roi") == "bid":
+            if self.transaction_bid_input.hasFocus():
+                self._mark_roi_bid_manual_source("transaction_bid")
+            self._sync_roi_from_bid()
+        self._update_roi_derived_metrics()
     
     def on_return_rate_changed(self):
         """退货率输入变化时，重新计算所有指标"""
@@ -1708,10 +2469,13 @@ class ProductSpecDialog(QDialog):
         
         self.table.setCellWidget(idx, self.COL_AI, ai_widget)
         
-        # 第1/2列：规格名称
+        # 规格图列
+        self._set_spec_image_cell(idx)
+
+        # 规格名称列
         self._set_spec_name_cells(idx, f"新规格{idx+1}")
-        # 第2列：关联编码
-        self.table.setItem(idx, self.COL_SPEC_CODE, QTableWidgetItem(""))
+        # 关联编码列
+        self.table.setItem(idx, self.COL_SPEC_CODE, self._mark_editable_spec_item(QTableWidgetItem("")))
         
         # 第3列：自动成本（不可编辑）
         cost_item = QTableWidgetItem("")
@@ -1719,7 +2483,7 @@ class ProductSpecDialog(QDialog):
         self.table.setItem(idx, self.COL_COST, cost_item)
         
         # 第4列：手动售价
-        self.table.setItem(idx, self.COL_SALE_PRICE, QTableWidgetItem(""))
+        self.table.setItem(idx, self.COL_SALE_PRICE, self._mark_editable_spec_item(QTableWidgetItem("")))
         
         # 第5列：券后价（不可编辑）
         final_price_item = QTableWidgetItem("0.00")
@@ -1737,7 +2501,7 @@ class ProductSpecDialog(QDialog):
         self.table.setItem(idx, self.COL_GROSS_PROFIT, profit_item)
         
         # 第8列：权重
-        self.table.setItem(idx, self.COL_WEIGHT, QTableWidgetItem("0"))
+        self.table.setItem(idx, self.COL_WEIGHT, self._mark_editable_spec_item(QTableWidgetItem("0")))
 
         # 第9列：权重对比
         weight_compare_widget = QWidget()
@@ -1782,21 +2546,9 @@ class ProductSpecDialog(QDialog):
         refund_ratio_item.setForeground(QColor("#95a5a6"))
         self.table.setItem(idx, self.COL_REFUND_RATIO, refund_ratio_item)
 
-        # 第14列：删除按钮
-        btn_delete = QPushButton("🗑️")
-        btn_delete.setToolTip("删除此规格")
-        btn_delete.setStyleSheet("""
-            QPushButton {
-                background-color: #ff4d4f; color: white; border-radius: 4px; font-weight: bold; font-size: 12px;
-            }
-            QPushButton:hover { background-color: #ff7875; }
-            QPushButton:pressed { background-color: #d9363e; }
-        """)
-        btn_delete.clicked.connect(lambda checked=False, button=btn_delete: self._delete_spec_by_button(button))
-        self.table.setCellWidget(idx, self.COL_ACTION, btn_delete)
-
         self._refresh_spec_filter_options()
         self._apply_spec_filters()
+        self._schedule_spec_table_column_resize()
         self.table.scrollToBottom()
 
     def on_cell_change(self, row, col):
@@ -1851,6 +2603,7 @@ class ProductSpecDialog(QDialog):
         # 确保毛保本等指标实时更新
         if hasattr(self, 'lbl_gross_break_even'):
             self.calculate_roi_metrics()
+        self._schedule_spec_table_column_resize()
     
     def calculate_locked_weight_sum(self):
         """计算所有已锁定规格的权重总和"""
@@ -2422,6 +3175,12 @@ class ProductSpecDialog(QDialog):
         relation_label.setStyleSheet(f"font-size: 12px; color: {relation_color}; font-weight: bold; padding: 8px; background-color: #f8f9fa; border-radius: 4px;")
         scroll_layout.addWidget(relation_label)
 
+        product_memo = self._get_product_memo()
+        product_memo_label = QLabel(f"🎯 主界面图片备注：{product_memo if product_memo else '未填写主界面图片备注'}")
+        product_memo_label.setWordWrap(True)
+        product_memo_label.setStyleSheet("font-size: 12px; color: #155724; font-weight: bold; padding: 8px; background-color: #f3fbf5; border-radius: 4px;")
+        scroll_layout.addWidget(product_memo_label)
+
         hint_text = custom_hint.strip() if custom_hint else ""
         hint_label = QLabel(f"📝 本次补充提示：{hint_text if hint_text else '未填写本次补充提示'}")
         hint_label.setWordWrap(True)
@@ -2444,15 +3203,8 @@ class ProductSpecDialog(QDialog):
 
         tag_configs = []
 
-        store_memo = ""
-        try:
-            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
-            if store_rows and store_rows[0]:
-                store_id = store_rows[0][0]
-                memo_rows = self.db.safe_fetchall("SELECT memo FROM stores WHERE id=?", (store_id,))
-                store_memo = memo_rows[0][0] if memo_rows and memo_rows[0][0] else ""
-        except Exception:
-            pass
+        product_memo = self._get_product_memo()
+        store_memo = self._get_store_memo()
 
         forbidden = self.db.get_setting("ai_spec_forbidden_words", "")
         if forbidden:
@@ -2465,6 +3217,9 @@ class ProductSpecDialog(QDialog):
         product_attr = self.db.get_setting("ai_spec_attr_prompt", "")
         if product_attr:
             tag_configs.append(("📦 商品属性", "#9b59b6"))
+
+        if product_memo:
+            tag_configs.append(("🎯 主界面图片备注", "#1e8449"))
 
         if self.db.get_setting("ai_spec_base_prompt", ""):
             tag_configs.append(("🧩 基础生成规则", "#16a085"))
@@ -2844,12 +3599,18 @@ class ProductSpecDialog(QDialog):
 你是电商SKU规格命名专家，也是一名懂消费者心理的运营策划。请围绕当前规格生成10个不同风格的新规格名称。
 
 【内部发散步骤】（只在心里完成，不要输出分析过程）
-1. 先识别产品主体词：从商品标题、产品信息、本次补充提示、原规格中提取最短但清楚的商品主体名。
+1. 先识别产品主体词：从商品标题、产品信息、主界面图片备注、本次补充提示、原规格中提取最短但清楚的商品主体名。
 2. 每条SKU正文都必须包含产品主体词或更明确的同义主体，不能优化后只剩精品装、家庭装、尝鲜款、礼盒装这类空泛规格。
-3. 再识别购买人群和购买痛点：谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
+3. 再识别购买人群和购买痛点：优先结合主界面图片备注判断该链接主要针对的人群，再思考谁会买、为什么买、担心什么、在什么场景用、和其他规格怎么比较。
 4. 针对不同品类提取可感知价值：食品看口感、营养成分、烹饪/食用场景；日用品看材质、耐用、收纳、家庭场景；服饰看面料、版型、季节、人群；工具看效率、适配、耐用和使用场景。
 5. 10个结果必须覆盖不同角度，例如品质型、场景型、人群型、规格对比型、礼赠型、安心型、复购型、尝鲜型、家庭囤货型、专业推荐型。
 6. 禁止10条只是替换少量形容词，禁止全部堆叠甄选、精品、高品质这类同质词。
+
+【目标人群备注】
+主界面图片备注：{product_memo}
+这条备注代表当前商品链接长期想打的目标人群，是命名的重要方向。
+如果本次补充提示和主界面图片备注同时存在，本次补充提示用于临时细化，主界面图片备注用于判断长期目标人群和核心消费场景。
+正向转化时围绕该目标人群的痛点、期待和购买理由发散；负向转化时让该目标人群之外的用户感觉当前规格不适合自己。
 
 【合规边界】
 可以基于已给出的商品信息发散表达，但不能编造具体产地、认证、检测、治疗功效、药效、销量数据、获奖背书。
@@ -2873,7 +3634,11 @@ SKU名称尽量接近35字，最多不超过40字。
 数值在+1到+5时，只做轻度购买引导，不要过度促销。
 数值为0时，保持客观中性，只优化清晰度、主体识别和规格差异。
 负向转化：目标不是说产品差，而是让非目标用户主动放弃当前规格，倾向选择其他规格。
-数值越接近-10，劝退越明显：必须写出选择门槛、适用限制或需求不匹配，不能写成人人都想买的强转化文案。
+负向转化必须按强度分层：
+-1到-4：轻度筛选，表达更适合特定需求，避免人人适合。
+-5到-7：明显劝退，必须让非目标用户感觉不太适合自己，可写需求不匹配、轻用无需、先看其他规格。
+-8到-10：强劝退，必须出现筛选门槛词，例如慎选、先别选、轻需求无需、普通家用看基础款、仅适合高频、仅适合送礼、仅适合囤货、仅适合重度需求。
+数值越接近-10，越不能写成促进购买文案，禁止出现放心选、值得入、强推、闭眼入、必选、人人适合、品质必选等强转化表达。
 高价人群负向时尤其要强调只适合高频使用、重度需求、送礼、囤货、大规格、高标准用户；普通用户会觉得用不上、没必要、需求不匹配。
 低价人群负向时强调预算不匹配、轻用无需选、先看基础规格、入门不建议。
 负向表达必须合规：不能编造质量问题、瑕疵、假货、风险、差评，只能用规格小/大、预算不匹配、使用频率不匹配、场景不匹配、建议对比其他规格等表达。"""
@@ -2885,7 +3650,9 @@ SKU名称尽量接近35字，最多不超过40字。
 高价人群不强调便宜、优惠、低价、划算，重点表达值不值、好不好、适不适合、是否省心。
 当转化方向为负数且价格人群偏高时，劝退方式要变成“高门槛筛选”：强调该规格更适合高标准用户、重度使用者、礼赠场景、大规格需求、明确品质追求者，让普通用户觉得没必要选它。
 高价人群劝退不要说贵、不划算、质量差，而要用“更适合懂品质/送礼/长期囤用/高频使用/对口感材质有要求的人”来抬高选择门槛。
-高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合”等促进转化表达。
+高价人群负向必须是筛选式劝退，不要写成高端推荐，不要夸到所有人都想买。
+高价人群负向禁止写成“值得买、放心选、推荐入手、品质必选、人人适合、闭眼入、强推、放心囤”等促进转化表达。
+如果转化方向接近-10且价格人群偏高，SKU中应体现门槛或限制，例如“高频才合适”“送礼再选”“大规格慎选”“轻需求先别选”“普通家用看基础款”。
 数值越接近-10，越面向低价敏感人群：可以使用实惠、优惠、性价比、入门、尝鲜、囤货、家庭装等表达，但必须受价格相对位置限制。
 当转化方向为负数且价格人群偏低时，可以强调预算不匹配、入门不建议、日常轻用无需选择、可先看更基础规格，但不能误导当前规格是最低价。
 数值为0时，不明显偏向高价或低价，只保证规格名称清楚、真实、易比较。
@@ -2923,6 +3690,7 @@ SKU名称尽量接近35字，最多不超过40字。
         price_audience_desc = self._describe_price_audience_level(price_audience_level)
         price_relation = self._get_price_relation_info(row, original_name)
         spec_price_layout = self._format_spec_price_layout(price_relation.get("specs", []))
+        product_memo = self._get_product_memo()
 
         base_template = self.db.get_setting("ai_spec_base_prompt", "") or self._get_default_spec_base_prompt()
         conversion_template = self.db.get_setting("ai_spec_conversion_axis_prompt", "") or self._get_default_conversion_axis_prompt()
@@ -2939,6 +3707,7 @@ SKU名称尽量接近35字，最多不超过40字。
             "product_name": self.product_name,
             "current_spec_name": original_name,
             "custom_hint": custom_hint.strip() if custom_hint else "未填写本次补充提示",
+            "product_memo": product_memo if product_memo else "未填写主界面图片备注",
         }
 
         return {
@@ -2947,7 +3716,16 @@ SKU名称尽量接近35字，最多不超过40字。
             "price_audience": self._format_template(price_audience_template, **values),
             "price_relation": self._format_template(price_relation_template, **values),
             "price_relation_info": price_relation,
+            "product_memo": product_memo,
         }
+
+    def _get_product_memo(self):
+        try:
+            rows = self.db.safe_fetchall("SELECT product_memo FROM products WHERE id=?", (self.product_id,))
+            return rows[0][0].strip() if rows and rows[0][0] else ""
+        except Exception as e:
+            print(f"获取主界面图片备注失败: {e}")
+        return ""
 
     def _get_store_memo(self):
         try:
@@ -2989,43 +3767,49 @@ SKU名称尽量接近35字，最多不超过40字。
         lines.append(f"商品标题：{self.product_name}")
         lines.append("")
 
-        lines.append("【4. 本次补充提示】")
+        lines.append("【4. 主界面图片备注 / 链接目标人群提示】")
+        lines.append("-" * 40)
+        product_memo = parts.get("product_memo", "") or self._get_product_memo()
+        lines.append(product_memo if product_memo else "未填写主界面图片备注")
+        lines.append("")
+
+        lines.append("【5. 本次补充提示】")
         lines.append("-" * 40)
         lines.append(custom_hint.strip() if custom_hint else "未填写本次补充提示")
         lines.append("")
 
-        lines.append("【5. 所有规格信息】")
+        lines.append("【6. 所有规格信息】")
         lines.append("-" * 40)
         specs_layout = self._get_specs_with_margin()
         lines.append(specs_layout)
         lines.append("")
 
-        lines.append("【6. 当前优化规格】")
+        lines.append("【7. 当前优化规格】")
         lines.append("-" * 40)
         lines.append(f"正在优化：{original_name}")
         lines.append("")
 
-        lines.append("【7. 基础生成规则】")
+        lines.append("【8. 基础生成规则】")
         lines.append("-" * 40)
         lines.append(parts["base"].strip())
         lines.append("")
 
-        lines.append(f"【8. 转化方向标尺：{conversion_level:+d} {self._describe_conversion_level(conversion_level)}】")
+        lines.append(f"【9. 转化方向标尺：{conversion_level:+d} {self._describe_conversion_level(conversion_level)}】")
         lines.append("-" * 40)
         lines.append(parts["conversion"].strip())
         lines.append("")
 
-        lines.append(f"【9. 价格人群标尺：{price_audience_level:+d} {self._describe_price_audience_level(price_audience_level)}】")
+        lines.append(f"【10. 价格人群标尺：{price_audience_level:+d} {self._describe_price_audience_level(price_audience_level)}】")
         lines.append("-" * 40)
         lines.append(parts["price_audience"].strip())
         lines.append("")
 
-        lines.append("【10. 价格相对位置规则】")
+        lines.append("【11. 价格相对位置规则】")
         lines.append("-" * 40)
         lines.append(parts["price_relation"].strip())
         lines.append("")
 
-        lines.append("【11. 店铺运营大纲】")
+        lines.append("【12. 店铺运营大纲】")
         lines.append("-" * 40)
         store_memo = self._get_store_memo()
         if store_memo:
@@ -3050,6 +3834,7 @@ SKU名称尽量接近35字，最多不超过40字。
             QMessageBox.warning(self, "⚠️ 提示", "请先在API配置中设置API Key！")
             return
 
+        product_memo = self._get_product_memo()
         store_memo = self._get_store_memo()
 
         forbidden_words = self.db.get_setting("ai_spec_forbidden_words", "")
@@ -3066,6 +3851,15 @@ SKU名称尽量接近35字，最多不超过40字。
 
         product_attr_prompt = self._build_product_attr_prompt(original_name)
         strategy_parts = self._build_strategy_prompt_parts(original_name, conversion_level, price_audience_level, row, custom_hint)
+
+        product_memo_prompt = ""
+        if product_memo:
+            product_memo_prompt = f"""【主界面图片备注 - 链接目标人群提示 - 高优先级】
+{product_memo}
+这条备注代表当前商品链接主要针对的人群。生成SKU时必须优先围绕这类人群的痛点、使用场景、购买顾虑和筛选门槛来写。
+正向转化时增强该人群的购买理由；负向转化时让该人群之外的用户感觉当前规格不适合自己。
+
+"""
 
         custom_hint_prompt = ""
         if custom_hint and custom_hint.strip():
@@ -3084,6 +3878,7 @@ SKU名称尽量接近35字，最多不超过40字。
 
         prompt_text = (
             forbidden_rule
+            + product_memo_prompt
             + product_attr_prompt
             + custom_hint_prompt
             + priority_prompt
@@ -3549,6 +4344,7 @@ SKU名称尽量接近35字，最多不超过40字。
             ("🚫 违禁词过滤", "ai_spec_forbidden_words", False),
             ("🛒 产品信息", "ai_product_info_prompt", False),
             ("📦 商品属性提示词", "ai_spec_attr_prompt", False),
+            ("🎯 主界面图片备注 / 链接目标人群提示", parts.get("product_memo", "") or "未填写主界面图片备注", True),
             ("📝 本次补充提示", custom_hint.strip() if custom_hint else "未填写本次补充提示", True),
             ("🧩 基础生成规则", parts["base"], True),
             (f"🎯 转化方向：{conversion_level:+d} {self._describe_conversion_level(conversion_level)}", parts["conversion"], True),
@@ -4128,6 +4924,170 @@ SKU名称尽量接近35字，最多不超过40字。
 
             self._update_spec_compare_labels(row, current_count, last_count, current_total, current_weight, last_spec_weight)
 
+    def _editable_input_style(self):
+        return "padding: 5px; border: 1px solid #3498db; border-radius: 3px; background-color: #ffffff; color: #2c3e50;"
+
+    def _auto_input_style(self):
+        return "padding: 5px; border: 1px solid #d0d5da; border-radius: 3px; background-color: #eeeeee; color: #666;"
+
+    def _mark_roi_bid_manual_source(self, source):
+        if source in ("roi", "transaction_bid"):
+            self._roi_bid_manual_source = source
+
+    def _set_roi_bid_input_mode(self, mode, user_action=False):
+        if mode not in ("roi", "bid"):
+            return
+        old_mode = getattr(self, "roi_input_mode", "roi")
+        if user_action:
+            self._mark_roi_bid_manual_source("roi" if mode == "roi" else "transaction_bid")
+            if old_mode != mode:
+                self._roi_bid_mode_switches.append((old_mode, mode))
+        self.roi_input_mode = mode
+        self._apply_roi_bid_input_mode()
+        if mode == "roi":
+            self._sync_bid_from_roi()
+        else:
+            self._sync_roi_from_bid()
+
+    def _apply_roi_bid_input_mode(self):
+        if not hasattr(self, "current_roi_input") or not hasattr(self, "transaction_bid_input"):
+            return
+        roi_manual = self.roi_input_mode == "roi"
+        self.current_roi_input.setReadOnly(not roi_manual)
+        self.transaction_bid_input.setReadOnly(roi_manual)
+        self.current_roi_input.setStyleSheet(self._editable_input_style() if roi_manual else self._auto_input_style())
+        self.transaction_bid_input.setStyleSheet(self._auto_input_style() if roi_manual else self._editable_input_style())
+        self.current_roi_input.setToolTip("双击切换为手动输入当前投产")
+        self.transaction_bid_input.setToolTip("双击切换为手动输入成交出价")
+
+    def _get_avg_price_for_bid(self):
+        try:
+            return float(self.calculate_weighted_avg_price())
+        except Exception:
+            return 0.0
+
+    def _get_return_factor_for_bid(self):
+        return_rate = self.get_return_rate()
+        return max(0.0, 1 - return_rate / 100)
+
+    def _calc_bid_from_roi(self, roi):
+        avg_price = self._get_avg_price_for_bid()
+        return_factor = self._get_return_factor_for_bid()
+        if avg_price <= 0 or roi <= 0 or return_factor <= 0:
+            return None
+        return avg_price / (roi * return_factor)
+
+    def _calc_roi_from_bid(self, bid):
+        avg_price = self._get_avg_price_for_bid()
+        return_factor = self._get_return_factor_for_bid()
+        if avg_price <= 0 or bid <= 0 or return_factor <= 0:
+            return None
+        return avg_price / (bid * return_factor)
+
+    def _sync_bid_from_roi(self):
+        if not hasattr(self, "transaction_bid_input"):
+            return
+        try:
+            roi_text = self.current_roi_input.text().strip()
+            roi = float(roi_text) if roi_text else 0.0
+        except ValueError:
+            roi = 0.0
+        bid = self._calc_bid_from_roi(roi)
+        self._roi_bid_syncing = True
+        try:
+            self.transaction_bid_input.setText(f"{bid:.2f}" if bid is not None else "")
+        finally:
+            self._roi_bid_syncing = False
+
+    def _sync_roi_from_bid(self):
+        if not hasattr(self, "current_roi_input"):
+            return
+        try:
+            bid_text = self.transaction_bid_input.text().strip()
+            bid = float(bid_text) if bid_text else 0.0
+        except ValueError:
+            bid = 0.0
+        roi = self._calc_roi_from_bid(bid)
+        self._roi_bid_syncing = True
+        try:
+            self.current_roi_input.setText(f"{roi:.2f}" if roi is not None else "")
+        finally:
+            self._roi_bid_syncing = False
+
+    def _refresh_auto_roi_bid_field(self):
+        if not hasattr(self, "transaction_bid_input"):
+            return
+        if self.roi_input_mode == "roi":
+            self._sync_bid_from_roi()
+        else:
+            self._sync_roi_from_bid()
+
+    def _update_roi_derived_metrics(self):
+        try:
+            current_roi_text = self.current_roi_input.text().strip()
+            if not current_roi_text:
+                self.lbl_net_profit_rate.setText("0.00%")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
+                self.lbl_roi_multiple.setText("--")
+                self.lbl_scale_roi.setText("--")
+                self.lbl_promotion_ratio.setText("--")
+                return
+
+            current_roi = float(current_roi_text)
+
+            if current_roi <= 0:
+                self.lbl_net_profit_rate.setText("0.00%")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
+                self.lbl_roi_multiple.setText("--")
+                self.lbl_scale_roi.setText("--")
+                self.lbl_promotion_ratio.setText("--")
+                return
+
+            margin_rate = self.get_current_margin_rate()
+            if margin_rate <= 0:
+                self.lbl_net_profit_rate.setText("请设置毛利")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
+                self.lbl_roi_multiple.setText("--")
+                self.lbl_scale_roi.setText("--")
+                self.lbl_promotion_ratio.setText("--")
+                return
+
+            return_rate = self.get_return_rate()
+
+            net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.0006
+            net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0
+
+            net_profit_rate = margin_rate * (1 - return_rate / 100) - 0.006 - (1 / current_roi)
+            net_profit_rate = net_profit_rate * 100
+
+            if net_profit_rate > 0:
+                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #27ae60; background-color: #e8f8f5; padding: 5px 10px; border-radius: 3px;")
+            elif net_profit_rate == 0:
+                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e67e22; background-color: #fef5e7; padding: 5px 10px; border-radius: 3px;")
+            else:
+                self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
+                self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
+
+            if net_break_even > 0:
+                roi_multiple = current_roi / net_break_even
+                self.lbl_roi_multiple.setText(f"{roi_multiple:.2f}倍")
+                self.lbl_scale_roi.setText(f"{net_break_even * 0.8:.2f}")
+            else:
+                self.lbl_roi_multiple.setText("--")
+                self.lbl_scale_roi.setText("--")
+
+            promotion_ratio = (1 / current_roi) * 100
+            self.lbl_promotion_ratio.setText(f"{promotion_ratio:.2f}%")
+
+        except ValueError:
+            self.lbl_net_profit_rate.setText("0.00%")
+            self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
+            self.lbl_roi_multiple.setText("--")
+            self.lbl_scale_roi.setText("--")
+            self.lbl_promotion_ratio.setText("--")
+
     def calculate_weighted_avg_price(self):
         """根据权重计算加权平均客单价"""
         total_weight = 0.0
@@ -4335,6 +5295,31 @@ SKU名称尽量接近35字，最多不超过40字。
                 continue
         return (total_weighted_margin / total_weight * 100) if total_weight > 0 else 0.0
 
+    def _calculate_weighted_avg_price_from_specs(self, specs):
+        total_weight = 0.0
+        weighted_price = 0.0
+        for spec in specs:
+            try:
+                sale_price = float(spec.get("sale_price") or 0)
+                weight = float(spec.get("weight_percent") or 0)
+                if sale_price > 0 and weight > 0:
+                    weighted_price += sale_price * weight
+                    total_weight += weight
+            except Exception:
+                continue
+        return weighted_price / total_weight if total_weight > 0 else 0.0
+
+    def _calc_bid_for_record(self, avg_price, roi, return_rate):
+        try:
+            roi = float(roi or 0)
+            avg_price = float(avg_price or 0)
+            return_factor = max(0.0, 1 - float(return_rate or 0) / 100)
+            if avg_price <= 0 or roi <= 0 or return_factor <= 0:
+                return 0.0
+            return avg_price / (roi * return_factor)
+        except Exception:
+            return 0.0
+
     def save_data(self):
         """
         【中文功能说明】
@@ -4354,7 +5339,7 @@ SKU名称尽量接近35字，最多不超过40字。
                 "SELECT spec_name, spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", 
                 (self.product_id,)
             )
-            old_price_map = {r[1]: r[2] for r in old_rows} # {编码: 旧价格}
+            old_price_map = {r[1]: float(r[2] or 0) for r in old_rows} # {编码: 旧价格}
             old_name_map = {r[1]: r[0] for r in old_rows}  # {编码: 旧名称}
             old_codes_set = set(old_price_map.keys())       # 旧编码集合
             old_specs_for_margin = [
@@ -4377,6 +5362,10 @@ SKU名称尽量接近35字，最多不超过40字。
             old_return_rate = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
             old_discount_amount = max(old_coupon, old_new_customer)
             old_margin_pct = self._calculate_weighted_margin_from_specs(old_specs_for_margin, old_discount_amount)
+            old_avg_price = self._calculate_weighted_avg_price_from_specs(old_specs_for_margin)
+            old_transaction_bid = self._calc_bid_for_record(old_avg_price, old_roi, old_return_rate)
+            roi_bid_manual_source = getattr(self, "_roi_bid_manual_source", None)
+            roi_bid_mode_switches = list(getattr(self, "_roi_bid_mode_switches", []))
             
             # 准备新数据
             new_specs = []
@@ -4390,6 +5379,7 @@ SKU名称尽量接近35字，最多不超过40字。
                 item_code = self.table.item(r, self.COL_SPEC_CODE)
                 item_price = self.table.item(r, self.COL_SALE_PRICE)
                 item_weight = self.table.item(r, self.COL_WEIGHT)  # 权重列（可能带锁图标）
+                spec_image_data = self._get_spec_image_data(r)
                 
                 if not item_code:
                     continue
@@ -4427,7 +5417,7 @@ SKU名称尽量接近35字，最多不超过40字。
                     continue
                 
                 # 【关键】保存时带上锁定状态
-                new_specs.append((self.product_id, spec_name, spec_code, new_price, weight_percent, is_locked))
+                new_specs.append((self.product_id, spec_name, spec_code, new_price, weight_percent, is_locked, spec_image_data))
                 
                 # 检测价格变化
                 if spec_code in old_price_map:
@@ -4486,10 +5476,20 @@ SKU名称尽量接近35字，最多不超过40字。
                     else:
                         param_change_details.append(f"新客立减: {old_new_customer}→{new_customer_discount}")
                 
-                # 检查投产变化
-                if current_roi != old_roi:
+                # 检查投产/成交出价模式变化。成交出价模式会反算投产并保存，但日志只记录本次人工来源。
+                if current_roi != old_roi and roi_bid_manual_source in ("roi", "transaction_bid"):
                     param_changed = True
-                    param_change_details.append(f"投产: {old_roi}→{current_roi}")
+                    if roi_bid_manual_source == "roi":
+                        param_change_details.append(f"投产: {old_roi}→{current_roi}")
+                    else:
+                        param_change_details.append("成交出价调整")
+
+                if roi_bid_mode_switches:
+                    param_changed = True
+                    for old_mode, new_mode in roi_bid_mode_switches:
+                        old_text = "投产比" if old_mode == "roi" else "成交出价"
+                        new_text = "投产比" if new_mode == "roi" else "成交出价"
+                        param_change_details.append(f"{old_text}转换{new_text}")
                 
                 # 检查退货率变化
                 if return_rate != old_return_rate:
@@ -4538,12 +5538,13 @@ SKU名称尽量接近35字，最多不超过40字。
             self.db.safe_execute("DELETE FROM product_specs WHERE product_id=?", (self.product_id,))
             
             if new_specs:
-                placeholders = ','.join(['(?, ?, ?, ?, ?, ?)'] * len(new_specs))
+                placeholders = ','.join(['(?, ?, ?, ?, ?, ?, ?)'] * len(new_specs))
                 flat_data = [item for spec in new_specs for item in spec]
                 self.db.safe_execute(
-                    f"INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, is_locked) VALUES {placeholders}",
+                    f"INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, is_locked, spec_image_data) VALUES {placeholders}",
                     flat_data
                 )
+            self.db.update_product_category_label(self.product_id)
             
             # 5. 生成并写入日志 (如果有变化或删除)
             if price_changes or deleted_logs or param_changed:
@@ -4559,6 +5560,8 @@ SKU名称尽量接近35字，最多不超过40字。
                     for r in rows
                 ]
                 current_margin_pct = self._calculate_weighted_margin_from_specs(new_specs_for_margin, discount_amount)
+                current_avg_price = self._calculate_weighted_avg_price_from_specs(new_specs_for_margin)
+                current_transaction_bid = self._calc_bid_for_record(current_avg_price, current_roi, return_rate)
                 
                 # 获取当前日期
                 now = datetime.now()
@@ -4635,13 +5638,27 @@ SKU名称尽量接近35字，最多不超过40字。
                     log_parts.append(change_text)
                     metric_changes.append(self._build_metric_change("新客立减", old_text, new_text, change_text, "new_customer_discount", time_str))
 
-                if current_roi != old_roi:
+                for old_mode, new_mode in roi_bid_mode_switches:
+                    old_text = "投产比模式" if old_mode == "roi" else "成交出价模式"
+                    new_text = "投产比模式" if new_mode == "roi" else "成交出价模式"
+                    change_text = f"从{old_text}转换到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("投产/出价模式", old_text, new_text, change_text, "roi_bid_mode", time_str))
+
+                if current_roi != old_roi and roi_bid_manual_source == "roi":
                     old_text = self._format_log_number(old_roi)
                     new_text = self._format_log_number(current_roi)
                     direction = "提高" if current_roi > old_roi else "降低"
                     change_text = f"投产从{old_text}{direction}到{new_text}"
                     log_parts.append(change_text)
                     metric_changes.append(self._build_metric_change("投产", old_text, new_text, change_text, "roi", time_str))
+
+                if abs(current_transaction_bid - old_transaction_bid) >= 0.01 and roi_bid_manual_source == "transaction_bid":
+                    old_text = f"¥{self._format_log_number(old_transaction_bid)}"
+                    new_text = f"¥{self._format_log_number(current_transaction_bid)}"
+                    change_text = f"成交出价从{old_text}调整到{new_text}"
+                    log_parts.append(change_text)
+                    metric_changes.append(self._build_metric_change("成交出价", old_text, new_text, change_text, "transaction_bid", time_str))
 
                 if return_rate != old_return_rate:
                     old_text = self._format_log_number(old_return_rate, "%")
@@ -4694,6 +5711,7 @@ SKU名称尽量接近35字，最多不超过40字。
                 
                 # 刷新主界面
                 self.main_app.load_data_safe()
+                self.refresh_metric_change_panel()
             
             # 6. 成功保存，关闭窗口
             self.accept()
@@ -4767,6 +5785,7 @@ SKU名称尽量接近35字，最多不超过40字。
     def increase_roi_5_percent(self):
         """涨5%投产按钮点击事件"""
         try:
+            self._set_roi_bid_input_mode("roi", user_action=True)
             current_text = self.current_roi_input.text().strip()
             if not current_text:
                 # 如果没有输入，默认从1开始
@@ -4787,6 +5806,7 @@ SKU名称尽量接近35字，最多不超过40字。
     def decrease_roi_5_percent(self):
         """降5%投产按钮点击事件"""
         try:
+            self._set_roi_bid_input_mode("roi", user_action=True)
             current_text = self.current_roi_input.text().strip()
             if not current_text:
                 new_roi = 1.0
@@ -4799,3 +5819,33 @@ SKU名称尽量接近35字，最多不超过40字。
 
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的投产数值")
+
+    def increase_bid_5_percent(self):
+        """涨5%成交出价按钮点击事件"""
+        try:
+            self._set_roi_bid_input_mode("bid", user_action=True)
+            current_text = self.transaction_bid_input.text().strip()
+            if not current_text:
+                new_bid = 1.0
+            else:
+                current_bid = float(current_text)
+                new_bid = round(current_bid * 1.05, 2)
+            self.transaction_bid_input.setText(f"{new_bid:.2f}")
+            self.on_transaction_bid_changed()
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的成交出价")
+
+    def decrease_bid_5_percent(self):
+        """降5%成交出价按钮点击事件"""
+        try:
+            self._set_roi_bid_input_mode("bid", user_action=True)
+            current_text = self.transaction_bid_input.text().strip()
+            if not current_text:
+                new_bid = 1.0
+            else:
+                current_bid = float(current_text)
+                new_bid = max(0.01, round(current_bid * 0.95, 2))
+            self.transaction_bid_input.setText(f"{new_bid:.2f}")
+            self.on_transaction_bid_changed()
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的成交出价")
