@@ -5,7 +5,48 @@ from PyQt5.QtWidgets import (
     QScrollArea, QWidget, QMessageBox, QLineEdit, QTextEdit, QDateEdit, QFrame,
     QTimeEdit, QCheckBox, QSizePolicy
 )
-from PyQt5.QtCore import QDate, Qt, QTime
+from PyQt5.QtCore import QDate, Qt, QTime, QTimer
+from PyQt5.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QTextOption
+from html import escape
+import re
+
+
+METRIC_STYLES = {
+    "规格售价": ("#e8f4ff", "#1f6fb2"),
+    "规格新增": ("#e8f8ef", "#1e8449"),
+    "规格删除": ("#fdecea", "#c0392b"),
+    "规格名称": ("#f3e8ff", "#7d3c98"),
+    "优惠券": ("#fff3cd", "#b7791f"),
+    "新客立减": ("#fce4ec", "#ad1457"),
+    "投产": ("#e8f0fe", "#2f5fb3"),
+    "成交出价": ("#e0f7fa", "#00838f"),
+    "退货率": ("#fff0e6", "#d35400"),
+    "推广模式": ("#eceff1", "#455a64"),
+    "投产/出价模式": ("#e8f0fe", "#2f5fb3"),
+    "主轮播图": ("#e8f5e9", "#2e7d32"),
+    "限时限量购": ("#fdecea", "#c0392b"),
+    "营销活动": ("#f3e8ff", "#7d3c98"),
+    "综合毛利": ("#e8f8ef", "#1e8449"),
+    "商品标题": ("#fff7e6", "#a35f00"),
+    "新建链接": ("#e8f8ef", "#1e8449"),
+}
+
+
+class SpecNameHighlighter(QSyntaxHighlighter):
+    """Bold spec names inside editable operation-record text without changing saved plain text."""
+    def __init__(self, document, terms=None):
+        super().__init__(document)
+        self.terms = [str(term).strip() for term in (terms or []) if str(term).strip()]
+        self.spec_format = QTextCharFormat()
+        self.spec_format.setFontWeight(QFont.Bold)
+
+    def highlightBlock(self, text):
+        for match in re.finditer(r"\[[^\]]+\]", text):
+            self.setFormat(match.start(), match.end() - match.start(), self.spec_format)
+        for term in self.terms:
+            for match in re.finditer(re.escape(term), text):
+                self.setFormat(match.start(), match.end() - match.start(), self.spec_format)
+
 
 class OperationRecordDialog(QDialog):
     """操作记录弹窗编辑对话框"""
@@ -23,8 +64,8 @@ class OperationRecordDialog(QDialog):
         self.rows = []
 
         self.setWindowTitle(f"编辑操作记录 - {year}年{month:02d}月{day:02d}日")
-        self.resize(900, 620)
-        self.setMinimumSize(760, 500)
+        self.resize(1100, 720)
+        self.setMinimumSize(900, 580)
         self.init_ui()
 
     def init_ui(self):
@@ -79,6 +120,20 @@ class OperationRecordDialog(QDialog):
         self.new_text_edit.setMinimumHeight(56)
         self.new_text_edit.setMaximumHeight(80)
         self.new_text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.new_text_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #b8c7d6;
+                border-radius: 4px;
+                background: white;
+                color: #2c3e50;
+                font-size: 13px;
+                padding: 5px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #3498db;
+            }
+        """)
+        self._new_spec_highlighter = SpecNameHighlighter(self.new_text_edit.document())
         input_layout.addWidget(self.new_text_edit, 1)
 
         self.chk_task = QCheckBox("任务")
@@ -134,19 +189,48 @@ class OperationRecordDialog(QDialog):
         manual_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #2c3e50; border: none; background: transparent;")
         manual_layout.addWidget(manual_title)
 
+        table_header = QWidget()
+        table_header.setStyleSheet("""
+            QWidget {
+                background: #eef3f8;
+                border: 1px solid #cfd9e3;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+                color: #34495e;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 5px;
+            }
+        """)
+        header_layout = QHBoxLayout(table_header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+        time_header = QLabel("时间")
+        time_header.setFixedWidth(82)
+        content_header = QLabel("记录内容")
+        action_header = QLabel("操作")
+        action_header.setFixedWidth(58)
+        header_layout.addWidget(time_header)
+        header_layout.addWidget(content_header, 1)
+        header_layout.addWidget(action_header)
+        manual_layout.addWidget(table_header)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll_widget = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
-        self.scroll_layout.setSpacing(6)
+        self.scroll_layout.setSpacing(0)
         self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setAlignment(Qt.AlignTop)
         self.scroll.setWidget(self.scroll_widget)
         self.scroll.setMinimumHeight(260)
+        self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         for rec in self.records:
-            self.add_row(rec.get("time", ""), rec.get("text", ""), rec)
+            self.add_row(rec.get("time", ""), self._record_edit_text(rec), rec)
 
         manual_layout.addWidget(self.scroll, 1)
         body_layout.addWidget(manual_panel, 3)
@@ -239,12 +323,43 @@ class OperationRecordDialog(QDialog):
         self.chk_task.setChecked(False)
         self.chk_reminder.setChecked(False)
         self.new_time_edit.setTime(QTime.currentTime())
+        QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(row, 0, 12))
 
     def add_row(self, time_str="", text="", original_record=None):
-        row = OperationRecordRow(time_str, text, original_record)
+        row = OperationRecordRow(time_str, text, original_record, self._record_spec_terms(original_record))
         self.scroll_layout.addWidget(row)
         self.rows.append(row)
         return row
+
+    def _record_spec_terms(self, record):
+        terms = []
+        if not isinstance(record, dict):
+            return terms
+        for change in record.get("changes", []) or []:
+            if not isinstance(change, dict):
+                continue
+            spec_text, _cleaned = self._extract_spec_text(change.get("metric", ""), change.get("text", ""), change)
+            if spec_text:
+                terms.append(spec_text)
+        return terms
+
+    def _record_edit_text(self, record):
+        changes = record.get("changes") if isinstance(record, dict) else None
+        if not changes:
+            return record.get("text", "") if isinstance(record, dict) else ""
+        lines = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            text = str(change.get("text", "") or "").strip()
+            if not text:
+                metric = str(change.get("metric", "") or "").strip()
+                old_value = str(change.get("old", "") or "").strip()
+                new_value = str(change.get("new", "") or "").strip()
+                text = f"{metric}: {old_value} -> {new_value}".strip()
+            if text:
+                lines.append(text)
+        return "\n".join(lines) if lines else record.get("text", "")
 
     def _collect_metric_changes(self):
         changes = []
@@ -270,26 +385,95 @@ class OperationRecordDialog(QDialog):
             }
         """)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(3)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(6)
 
-        top = QLabel(f"{change.get('time', '')}  {change.get('metric', '指标变化')}")
-        top.setStyleSheet("font-size: 12px; font-weight: bold; color: #34495e;")
-        layout.addWidget(top)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(5)
+
+        time_label = self._create_pill_label(change.get("time", ""), "#eef2f7", "#34495e")
+        metric = change.get("metric", "指标变化")
+        metric_bg, metric_fg = self._metric_colors(metric)
+        metric_label = self._create_pill_label(metric, metric_bg, metric_fg)
+        top_row.addWidget(time_label)
+        top_row.addWidget(metric_label)
+
+        spec_text, cleaned_text = self._extract_spec_text(metric, change.get("text", ""), change)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        if spec_text:
+            spec_label = QLabel(f"规格：<b>{escape(str(spec_text))}</b>")
+            spec_label.setWordWrap(True)
+            spec_label.setTextFormat(Qt.RichText)
+            spec_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            spec_label.setToolTip(spec_text)
+            spec_label.setStyleSheet(
+                "background: #e9f2ff; color: #245269; border-radius: 4px; "
+                "padding: 5px 7px; font-size: 12px; font-weight: normal;"
+            )
+            layout.addWidget(spec_label)
 
         old_value = change.get("old", "")
         new_value = change.get("new", "")
         if old_value != "" or new_value != "":
             value = QLabel(f"{old_value}  ->  {new_value}")
-            value.setStyleSheet("font-size: 12px; color: #8e44ad; font-weight: bold;")
+            value.setStyleSheet("font-size: 12px; color: #6f42c1; font-weight: bold; background: #f8f3ff; border-radius: 3px; padding: 4px 6px;")
             value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
             layout.addWidget(value)
 
-        text = QLabel(change.get("text", ""))
+        text = QLabel(cleaned_text or change.get("text", ""))
         text.setWordWrap(True)
-        text.setStyleSheet("font-size: 12px; color: #2c3e50; line-height: 1.35;")
+        text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        text.setToolTip(change.get("text", ""))
+        text.setStyleSheet("font-size: 12px; color: #2c3e50; line-height: 1.35; padding: 1px 2px;")
         layout.addWidget(text)
         return card
+
+    def _metric_colors(self, metric):
+        for key, colors in METRIC_STYLES.items():
+            if key in str(metric or ""):
+                return colors
+        return "#edf2f7", "#34495e"
+
+    def _create_pill_label(self, text, bg, fg):
+        label = QLabel(str(text or ""))
+        label.setStyleSheet(
+            f"background: {bg}; color: {fg}; border-radius: 4px; "
+            "padding: 3px 7px; font-size: 12px; font-weight: bold;"
+        )
+        label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        return label
+
+    def _extract_spec_text(self, metric, text, change):
+        metric = str(metric or "")
+        text = str(text or "")
+        if "规格" not in metric and "规格" not in text:
+            return "", text
+
+        bracket_matches = re.findall(r"\[([^\]]{1,120})\]", text)
+        if bracket_matches:
+            spec = bracket_matches[0].strip()
+            cleaned = re.sub(r"\s*\[[^\]]{1,120}\]\s*", " ", text, count=1).strip()
+            return spec, cleaned
+
+        old_value = str(change.get("old", "") or "").strip()
+        new_value = str(change.get("new", "") or "").strip()
+        if metric == "规格名称" and (old_value or new_value):
+            return (new_value or old_value), "规格名称已修改"
+
+        for pattern in (
+            r"^(.{1,120}?)(?:售价设置为|设置售价到|从.+?(?:涨价到|降价到))",
+            r"^(?:新增规格|删除规格)\s*[:：]?\s*(.{1,120})$",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                spec = match.group(1).strip()
+                cleaned = text.replace(spec, "", 1).strip()
+                return spec, cleaned
+        return "", text
 
     def save(self):
         data = []
@@ -301,6 +485,8 @@ class OperationRecordDialog(QDialog):
                 row_data = row.get_data()
                 if row_data and row_data.get("text"):
                     record = {"time": row_data.get("time", ""), "text": row_data.get("text", "")}
+                    if row_data.get("history_id"):
+                        record["history_id"] = row_data.get("history_id")
                     if row_data.get("changes"):
                         record["changes"] = row_data.get("changes")
                     data.append(record)
@@ -341,6 +527,8 @@ class OperationRecordDialog(QDialog):
                     self.parent().show_toast(f"✅ 已添加 {len(task_list)} 条到每日任务")
                 if reminder_list:
                     self.parent().show_toast(f"✅ 已设置 {len(reminder_list)} 个提醒")
+                if hasattr(self.parent(), "force_refresh_product_widget"):
+                    self.parent().force_refresh_product_widget(self.prod_id)
 
             except Exception as e:
                 print(f"添加任务/提醒失败: {e}")
@@ -350,7 +538,7 @@ class OperationRecordDialog(QDialog):
 
 class OperationRecordRow(QWidget):
     """操作记录列表中的单条文本记录。"""
-    def __init__(self, time_str="", text="", original_record=None):
+    def __init__(self, time_str="", text="", original_record=None, spec_terms=None):
         super().__init__()
         self.original_record = original_record or {}
         self.pending_task = False
@@ -359,50 +547,97 @@ class OperationRecordRow(QWidget):
         self.deleted = False
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 5, 6, 5)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        self.setObjectName("recordRow")
         self.setStyleSheet("""
-            QWidget {
+            QWidget#recordRow {
                 background: #ffffff;
-                border: 1px solid #e7ebef;
-                border-radius: 4px;
+                border-left: 1px solid #cfd9e3;
+                border-right: 1px solid #cfd9e3;
+                border-bottom: 1px solid #cfd9e3;
+                border-radius: 0px;
             }
-            QTimeEdit, QTextEdit {
-                border: 1px solid #d5dce3;
+            QTimeEdit {
+                border: none;
+                border-radius: 0px;
+                background: white;
+                color: #2c3e50;
+                font-size: 13px;
+                padding: 6px;
+            }
+            QTextEdit {
+                border: 1px solid #b8c7d6;
                 border-radius: 3px;
                 background: white;
+                color: #2c3e50;
+                font-size: 13px;
+                padding: 5px;
+                margin: 2px 4px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #3498db;
             }
         """)
 
         self.time_edit = QTimeEdit()
         self.time_edit.setDisplayFormat("HH:mm")
-        self.time_edit.setFixedWidth(70)
+        self.time_edit.setFixedWidth(82)
+        self.time_edit.setAlignment(Qt.AlignCenter)
         parsed_time = QTime.fromString(time_str or "", "HH:mm")
         self.time_edit.setTime(parsed_time if parsed_time.isValid() else QTime.currentTime())
-        layout.addWidget(self.time_edit)
+        self.time_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.time_edit, 0, Qt.AlignTop)
 
-        self.text_edit = QTextEdit(text)
-        self.text_edit.setMinimumHeight(54)
-        self.text_edit.setMaximumHeight(110)
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(text)
+        self.text_edit.setMinimumHeight(44)
+        self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+        text_option = QTextOption()
+        text_option.setWrapMode(QTextOption.WrapAnywhere)
+        self.text_edit.document().setDefaultTextOption(text_option)
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        layout.addWidget(self.text_edit, 1)
+        self.text_edit.document().setDocumentMargin(4)
+        self._spec_highlighter = SpecNameHighlighter(self.text_edit.document(), spec_terms)
+        self.text_edit.textChanged.connect(self.adjust_text_height)
+        layout.addWidget(self.text_edit, 1, Qt.AlignTop)
 
         self.btn_del = QPushButton("删除")
-        self.btn_del.setFixedSize(48, 28)
+        self.btn_del.setFixedWidth(58)
+        self.btn_del.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_del.setStyleSheet("""
             QPushButton {
                 border: none;
                 background: #e74c3c;
                 color: white;
-                border-radius: 3px;
+                border-radius: 0px;
                 font-size: 12px;
             }
             QPushButton:hover { background: #c0392b; }
         """)
         self.btn_del.clicked.connect(self.mark_deleted)
-        layout.addWidget(self.btn_del)
+        layout.addWidget(self.btn_del, 0, Qt.AlignTop)
+        QTimer.singleShot(0, self.adjust_text_height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.adjust_text_height)
+
+    def adjust_text_height(self):
+        if self.deleted:
+            return
+        document = self.text_edit.document()
+        document.setTextWidth(max(1, self.text_edit.viewport().width()))
+        height = int(document.size().height()) + 16
+        height = max(44, height)
+        self.text_edit.setFixedHeight(height)
+        self.time_edit.setFixedHeight(height)
+        self.btn_del.setFixedHeight(height)
+        self.setMinimumHeight(height)
+        self.updateGeometry()
 
     def mark_deleted(self):
         self.deleted = True
@@ -414,17 +649,32 @@ class OperationRecordRow(QWidget):
         if self.deleted:
             return {}
         text = self.text_edit.toPlainText().strip()
+        time_text = self.time_edit.time().toString("HH:mm")
         data = {
-            "time": self.time_edit.time().toString("HH:mm"),
+            "time": time_text,
             "text": text,
             "add_task": self.pending_task,
             "add_reminder": self.pending_reminder,
         }
+        if self.original_record.get("history_id"):
+            data["history_id"] = self.original_record.get("history_id")
         if self.pending_reminder:
             data["reminder_datetime"] = self.pending_reminder_datetime
         changes = self.original_record.get("changes")
         if changes:
-            data["changes"] = changes
+            synced_changes = []
+            for change in changes:
+                if isinstance(change, dict):
+                    if change.get("type") == "main_carousel_image" and change.get("history_id") and not data.get("history_id"):
+                        data["history_id"] = change.get("history_id")
+                    synced_change = dict(change)
+                    synced_change["time"] = time_text
+                    if data.get("history_id") and synced_change.get("type") == "main_carousel_image":
+                        synced_change["history_id"] = data.get("history_id")
+                    synced_changes.append(synced_change)
+                else:
+                    synced_changes.append(change)
+            data["changes"] = synced_changes
         return data
 
 

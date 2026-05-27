@@ -8,6 +8,91 @@ from PyQt5.QtCore import Qt, QTimer, QDateTime
 from PyQt5.QtGui import QFont
 
 
+class TaskReminderPopupDialog(QDialog):
+    """到时代办提醒强制弹窗。"""
+    def __init__(self, reminder, parent=None):
+        super().__init__(parent)
+        self.reminder = reminder
+        self.completed = False
+        self.setWindowTitle(f"代办提醒 - {reminder.get('store_name', '')}")
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlags((self.windowFlags() | Qt.WindowStaysOnTopHint) & ~Qt.WindowCloseButtonHint)
+        self.resize(560, 420)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("代办提醒时间已到")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #c0392b;")
+        layout.addWidget(title)
+
+        info = QLabel(
+            f"时间：{self.reminder.get('remind_time', '')}\n"
+            f"店铺：{self.reminder.get('store_name', '')}\n"
+            f"链接ID：{self.reminder.get('product_code', '')}\n"
+            f"标题：{self.reminder.get('product_title', '')}"
+        )
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info.setStyleSheet("font-size: 13px; color: #2c3e50; line-height: 1.5;")
+        layout.addWidget(info)
+
+        content = QTextEdit()
+        content.setReadOnly(True)
+        content.setPlainText(str(self.reminder.get("task_content", "") or ""))
+        content.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #d0d7de;
+                border-radius: 4px;
+                padding: 8px;
+                background: #fffdf7;
+                font-size: 13px;
+            }
+        """)
+        layout.addWidget(content, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_copy = QPushButton("复制 ID")
+        btn_copy.clicked.connect(self.copy_product_id)
+        btn_done = QPushButton("已完成")
+        btn_done.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; padding: 6px 18px; border-radius: 4px; }")
+        btn_done.clicked.connect(self.mark_completed)
+        btn_layout.addWidget(btn_copy)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_done)
+        layout.addLayout(btn_layout)
+
+    def copy_product_id(self):
+        from PyQt5.QtWidgets import QApplication
+        QApplication.clipboard().setText(str(self.reminder.get("product_code", "") or ""))
+
+    def mark_completed(self):
+        self.completed = True
+        super().accept()
+
+    def accept(self):
+        if self.completed:
+            super().accept()
+
+    def reject(self):
+        if self.completed:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.completed:
+            event.accept()
+        else:
+            event.ignore()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and not self.completed:
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
+
 class DailyTaskDialog(QDialog):
     """每日任务对话框 - 大盘分析和亏损链接优化"""
     def __init__(self, db_manager, parent=None):
@@ -18,7 +103,6 @@ class DailyTaskDialog(QDialog):
         self.setWindowFlags(Qt.Window)
         self.resize(1000, 700)
         self.init_ui()
-        self.start_reminder_check()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -92,6 +176,8 @@ class DailyTaskDialog(QDialog):
                         "UPDATE task_reminders SET is_reminded = 1 WHERE id = ?",
                         (rem_id,)
                     )
+                    if self.main_app and hasattr(self.main_app, "force_refresh_product_widget"):
+                        self.main_app.force_refresh_product_widget(product_id)
         except Exception as e:
             print(f"检查提醒失败: {e}")
 
@@ -133,7 +219,7 @@ class DailyTaskDialog(QDialog):
         try:
             reminders = self.db.safe_fetchall(
                 """SELECT id, store_id, product_id, task_content, remind_time, is_reminded
-                   FROM task_reminders ORDER BY remind_time DESC LIMIT 50"""
+                   FROM task_reminders WHERE is_reminded = 0 ORDER BY remind_time DESC LIMIT 50"""
             )
 
             for rem_id, store_id, product_id, task_content, remind_time, is_reminded in reminders:
@@ -264,8 +350,12 @@ class DailyTaskDialog(QDialog):
 
     def complete_task(self, task_id):
         try:
+            rows = self.db.safe_fetchall("SELECT product_id FROM daily_tasks WHERE id = ?", (task_id,))
+            product_id = rows[0][0] if rows else None
             self.db.safe_execute("UPDATE daily_tasks SET is_completed = 1 WHERE id = ?", (task_id,))
             self.load_tasks()
+            if product_id and self.main_app and hasattr(self.main_app, "force_refresh_product_widget"):
+                self.main_app.force_refresh_product_widget(product_id)
             self.show_toast("✅ 任务已标记完成")
         except Exception as e:
             print(f"完成任务失败: {e}")

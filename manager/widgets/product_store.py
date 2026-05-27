@@ -3,6 +3,8 @@
 商品与店铺相关 UI 组件：ProductWidget、StoreWidget、RecordRow、InPlaceEditor
 """
 import os
+import json
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
@@ -27,6 +29,8 @@ class ProductWidget(QWidget):
         self.prod_title = prod_title
         self.main_app = main_app
         self.db = main_app.db
+        self.setObjectName("ProductWidget")
+        self._search_highlight_active = False
         self._suppress_next_code_click = False
         self._code_click_timer = QTimer(self)
         self._code_click_timer.setSingleShot(True)
@@ -56,8 +60,9 @@ class ProductWidget(QWidget):
         self.category_label = QLabel()
         self.category_label.setAlignment(Qt.AlignCenter)
         self.category_label.setWordWrap(True)
-        self.category_label.setMaximumHeight(30)
-        self.category_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.category_label.setMinimumHeight(16)
+        self.category_label.setMaximumHeight(16777215)
+        self.category_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.category_label.installEventFilter(self)
         self.update_product_category_display()
 
@@ -96,10 +101,26 @@ class ProductWidget(QWidget):
         self.marketing_badge.setFixedSize(16, 16)
         self.marketing_badge.hide()
 
+        self.natural_flow_badge = QLabel("无推广")
+        self.natural_flow_badge.setStyleSheet("color: white; background-color: #16a085; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: bold;")
+        self.natural_flow_badge.hide()
+
+        self.sitewide_badge = QLabel("全站")
+        self.sitewide_badge.setStyleSheet("color: white; background-color: #8e44ad; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: bold;")
+        self.sitewide_badge.hide()
+
+        self.task_badge = QLabel("任务")
+        self.task_badge.setStyleSheet("color: white; background-color: #e74c3c; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: bold;")
+        self.task_badge.setToolTip("该链接有未完成任务或未提醒的提醒")
+        self.task_badge.hide()
+
         tag_layout.addWidget(self.coupon_badge)
         tag_layout.addWidget(self.new_customer_badge)
         tag_layout.addWidget(self.limited_time_badge)
         tag_layout.addWidget(self.marketing_badge)
+        tag_layout.addWidget(self.natural_flow_badge)
+        tag_layout.addWidget(self.sitewide_badge)
+        tag_layout.addWidget(self.task_badge)
         tag_layout.addStretch()
 
         top_layout.addWidget(self.code_label)
@@ -172,7 +193,39 @@ class ProductWidget(QWidget):
 
         self.update_margin_display()
         self.update_promo_badges()
+        self.update_task_badge()
         self.update_link_order_count()
+
+    def set_search_highlight(self, active):
+        self._search_highlight_active = bool(active)
+        if self._search_highlight_active:
+            self.setStyleSheet(
+                "#ProductWidget { background-color: #fff8d8; "
+                "border: 2px solid #f1c40f; border-radius: 4px; }"
+            )
+        else:
+            self.setStyleSheet("")
+
+    def update_task_badge(self):
+        try:
+            task_rows = self.db.safe_fetchall(
+                "SELECT COUNT(*) FROM daily_tasks WHERE product_id=? AND is_completed=0",
+                (self.prod_id,)
+            )
+            reminder_rows = self.db.safe_fetchall(
+                "SELECT COUNT(*) FROM task_reminders WHERE product_id=? AND is_reminded=0",
+                (self.prod_id,)
+            )
+            task_count = int(task_rows[0][0] or 0) if task_rows else 0
+            reminder_count = int(reminder_rows[0][0] or 0) if reminder_rows else 0
+            total = task_count + reminder_count
+            if total > 0:
+                self.task_badge.setVisible(True)
+                self.task_badge.setToolTip(f"未完成任务 {task_count} 个，未提醒提醒 {reminder_count} 个")
+            else:
+                self.task_badge.hide()
+        except Exception as e:
+            print(f"更新任务标签失败: {e}")
 
     def recommended_row_height(self, base_height=140):
         extra_lines = getattr(self, "_memo_extra_lines", 0)
@@ -191,19 +244,21 @@ class ProductWidget(QWidget):
         if category:
             text = str(category).strip()
             display_text = text[:16] + "..." if len(text) > 16 else text
-            self.category_label.setText(f"类型：{display_text}")
+            self.category_label.setText(display_text)
             self.category_label.setToolTip(f"商品类型：{text}")
             self.category_label.setStyleSheet(
                 "color: #245269; background-color: #e8f4fb; border: 1px solid #b8dff2; "
-                "border-radius: 3px; padding: 2px 3px; font-size: 10px; font-weight: bold;"
+                "border-radius: 4px; padding: 0px; font-size: 12px; font-weight: bold;"
             )
+            self.category_label.adjustSize()
         else:
-            self.category_label.setText("类型：未识别")
+            self.category_label.setText("未识别")
             self.category_label.setToolTip("成本库未识别到商品类型")
             self.category_label.setStyleSheet(
                 "color: #777; background-color: #f5f5f5; border: 1px dashed #d0d0d0; "
-                "border-radius: 3px; padding: 2px 3px; font-size: 10px;"
+                "border-radius: 4px; padding: 0px; font-size: 12px;"
             )
+            self.category_label.adjustSize()
 
     def update_product_memo_display(self):
         try:
@@ -290,7 +345,7 @@ class ProductWidget(QWidget):
     def update_promo_badges(self):
         try:
             discount_rows = self.main_app.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, is_limited_time, is_marketing FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed FROM products WHERE id=?",
                 (self.prod_id,)
             )
             if not discount_rows:
@@ -298,20 +353,25 @@ class ProductWidget(QWidget):
                 self.new_customer_badge.hide()
                 self.limited_time_badge.hide()
                 self.marketing_badge.hide()
+                self.natural_flow_badge.hide()
+                self.sitewide_badge.hide()
                 return
             coupon = discount_rows[0][0] if discount_rows[0][0] else 0
             new_customer = discount_rows[0][1] if discount_rows[0][1] else 0
             is_limited_time = discount_rows[0][2] if discount_rows[0][2] else 0
             is_marketing = discount_rows[0][3] if discount_rows[0][3] else 0
+            is_natural_flow = discount_rows[0][4] if discount_rows[0][4] else 0
+            is_sitewide_managed = discount_rows[0][5] if discount_rows[0][5] else 0
             icons_dir = _icons_dir()
             coupon_icon_path = os.path.join(icons_dir, "coupon.svg")
             new_customer_icon_path = os.path.join(icons_dir, "new_customer.svg")
             limited_time_icon_path = os.path.join(icons_dir, "limited-time.svg")
             marketing_icon_path = os.path.join(icons_dir, "marketing.svg")
+            promo_icon_size = 17
             if coupon and coupon > 0:
                 pixmap = QPixmap(coupon_icon_path)
                 if not pixmap.isNull():
-                    self.coupon_badge.setPixmap(pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.coupon_badge.setPixmap(pixmap.scaled(promo_icon_size, promo_icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     self.coupon_badge.setText(f"¥{int(coupon)}")
                 self.coupon_badge.show()
@@ -320,7 +380,7 @@ class ProductWidget(QWidget):
             if new_customer and new_customer > 0:
                 pixmap = QPixmap(new_customer_icon_path)
                 if not pixmap.isNull():
-                    self.new_customer_badge.setPixmap(pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.new_customer_badge.setPixmap(pixmap.scaled(promo_icon_size, promo_icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     self.new_customer_badge.setText(f"¥{int(new_customer)}")
                 self.new_customer_badge.show()
@@ -329,7 +389,7 @@ class ProductWidget(QWidget):
             if is_limited_time:
                 pixmap = QPixmap(limited_time_icon_path)
                 if not pixmap.isNull():
-                    self.limited_time_badge.setPixmap(pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.limited_time_badge.setPixmap(pixmap.scaled(promo_icon_size, promo_icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     self.limited_time_badge.setText("⏰")
                 self.limited_time_badge.show()
@@ -338,12 +398,14 @@ class ProductWidget(QWidget):
             if is_marketing:
                 pixmap = QPixmap(marketing_icon_path)
                 if not pixmap.isNull():
-                    self.marketing_badge.setPixmap(pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.marketing_badge.setPixmap(pixmap.scaled(promo_icon_size, promo_icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     self.marketing_badge.setText("📢")
                 self.marketing_badge.show()
             else:
                 self.marketing_badge.hide()
+            self.natural_flow_badge.setVisible(bool(is_natural_flow))
+            self.sitewide_badge.setVisible(bool(is_sitewide_managed) and not bool(is_natural_flow))
         except Exception as e:
             print(f"更新促销图标失败：{e}")
 
@@ -364,13 +426,17 @@ class ProductWidget(QWidget):
                     self.main_app.update_product_row_height(self.prod_id)
                 return
             product_rows = self.main_app.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi, is_natural_flow, is_sitewide_managed, store_id FROM products WHERE id=?",
                 (self.prod_id,)
             )
             max_discount = 0
             current_roi = 0
             return_rate = 0
             net_break_even_roi = 0
+            is_natural_flow = 0
+            is_sitewide_managed = 0
+            sitewide_roi = 0
+            store_id = None
             if product_rows:
                 coupon = product_rows[0][0] if product_rows[0][0] else 0
                 new_customer = product_rows[0][1] if product_rows[0][1] else 0
@@ -378,6 +444,12 @@ class ProductWidget(QWidget):
                 current_roi = product_rows[0][2] if product_rows[0][2] else 0
                 return_rate = product_rows[0][3] if product_rows[0][3] else 0
                 net_break_even_roi = product_rows[0][4] if product_rows[0][4] else 0
+                is_natural_flow = product_rows[0][5] if product_rows[0][5] else 0
+                is_sitewide_managed = product_rows[0][6] if product_rows[0][6] else 0
+                store_id = product_rows[0][7] if product_rows[0][7] else None
+                if store_id:
+                    store_rows = self.main_app.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (store_id,))
+                    sitewide_roi = store_rows[0][0] if store_rows and store_rows[0][0] else 0
             total_weighted_margin = 0.0
             total_weight = 0.0
             for r in rows:
@@ -399,16 +471,32 @@ class ProductWidget(QWidget):
                 self.margin_label.setText(f"毛利:{final_margin_pct:.1f}%{discount_info}")
                 self.margin_label.show()
                 final_net_margin_pct = -100
-                if current_roi > 0 and return_rate >= 0:
-                    margin_rate_decimal = final_margin_pct / 100
-                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+                margin_rate_decimal = final_margin_pct / 100
+                effective_roi = sitewide_roi if is_sitewide_managed and not is_natural_flow else current_roi
+                if (
+                    hasattr(self.main_app, "is_real_promotion_data_mode")
+                    and self.main_app.is_real_promotion_data_mode()
+                    and not is_natural_flow
+                ):
+                    self._apply_real_promotion_display(store_id, margin_rate_decimal, net_break_even_roi)
+                    if hasattr(self.main_app, "update_product_row_height"):
+                        self.main_app.update_product_row_height(self.prod_id)
+                    return
+                if is_natural_flow:
+                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006) * 100
+                elif effective_roi > 0 and return_rate >= 0:
+                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / effective_roi)) * 100
                 net_profit_text = self._get_net_profit_status(final_net_margin_pct)
                 self.net_profit_label.setText(f"净利:{final_net_margin_pct:.1f}% {net_profit_text}")
-                if current_roi > 0 and net_break_even_roi > 0:
-                    roi_multiple = current_roi / net_break_even_roi
-                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">投产:</span><span style="color: #e74c3c; font-weight: bold;">{current_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">{roi_multiple:.2f}倍</span>'
-                elif current_roi > 0:
-                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">投产:</span><span style="color: #e74c3c; font-weight: bold;">{current_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">--</span>'
+                if is_natural_flow:
+                    roi_multiple_text = '<span style="color: #16a085; font-weight: bold;">无推广</span>'
+                elif effective_roi > 0 and net_break_even_roi > 0:
+                    roi_multiple = effective_roi / net_break_even_roi
+                    label = "全站投产" if is_sitewide_managed else "投产"
+                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">{label}:</span><span style="color: #e74c3c; font-weight: bold;">{effective_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">{roi_multiple:.2f}倍</span>'
+                elif effective_roi > 0:
+                    label = "全站投产" if is_sitewide_managed else "投产"
+                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">{label}:</span><span style="color: #e74c3c; font-weight: bold;">{effective_roi:.2f}</span> <span style="color: #666666; font-weight: bold;">投产倍数:</span><span style="color: #3498db; font-weight: bold;">--</span>'
                 else:
                     roi_multiple_text = ""
                 self.roi_label.setText(roi_multiple_text)
@@ -447,6 +535,23 @@ class ProductWidget(QWidget):
 
     def update_link_order_count(self):
         try:
+            if (
+                hasattr(self.main_app, "is_real_promotion_data_mode")
+                and self.main_app.is_real_promotion_data_mode()
+                and hasattr(self.main_app, "get_latest_promotion_data")
+            ):
+                product_rows = self.main_app.db.safe_fetchall(
+                    "SELECT store_id, is_natural_flow FROM products WHERE id=?",
+                    (self.prod_id,)
+                )
+                store_id = product_rows[0][0] if product_rows else None
+                is_natural_flow = product_rows[0][1] if product_rows else 0
+                if store_id and not is_natural_flow:
+                    data = self.main_app.get_latest_promotion_data(store_id, self.prod_code)
+                    net_orders = float(data.get("net_orders") or 0) if data else 0
+                    self.link_order_label.setText(f"净成交：{net_orders:.0f}单")
+                    return
+
             spec_counts = self.main_app.db.safe_fetchall(
                 "SELECT spec_code, order_count, refund_count FROM imported_orders WHERE product_id=?",
                 (self.prod_code,)
@@ -471,7 +576,61 @@ class ProductWidget(QWidget):
         else:
             return "巨亏"
 
+    def _apply_real_promotion_display(self, store_id, margin_rate_decimal, net_break_even_roi):
+        data = None
+        if hasattr(self.main_app, "get_latest_promotion_data"):
+            data = self.main_app.get_latest_promotion_data(store_id, self.prod_code)
+        if not data:
+            self.margin_label.setText("真实推广: 无数据")
+            self.margin_label.show()
+            self.net_profit_label.setText("净利: 无真实推广数据")
+            self.net_profit_label.setStyleSheet("color: #999; font-weight: bold; font-size: 13px;")
+            self.net_profit_label.show()
+            self.roi_label.setText("")
+            self.link_order_label.setText("净成交：0单")
+            return True
+
+        cost = float(data.get("cost") or 0)
+        transaction_amount = float(data.get("transaction_amount") or 0)
+        net_amount = float(data.get("net_transaction_amount") or 0)
+        net_roi = float(data.get("net_roi") or 0)
+        net_orders = float(data.get("net_orders") or 0)
+        promotion_share = float(data.get("promotion_impression_share") or 0)
+        tech_fee = net_amount * 0.006
+        if net_amount > 0:
+            net_profit = net_amount * margin_rate_decimal - cost - tech_fee
+            net_margin_pct = net_profit / net_amount * 100
+            net_margin_text = f"{net_margin_pct:.1f}%"
+            status = self._get_net_profit_status(net_margin_pct)
+        else:
+            net_profit = -cost
+            net_margin_text = "无成交"
+            status = "亏损" if net_profit < 0 else "保本"
+        roi_multiple = net_roi / net_break_even_roi if net_break_even_roi and net_break_even_roi > 0 else None
+        date_text = str(data.get("record_date") or "")[-5:]
+        self.margin_label.setText(f"真实:{date_text} 交易¥{transaction_amount:.0f} 花费¥{cost:.0f}")
+        self.margin_label.show()
+        self.net_profit_label.setText(f"净利润:¥{net_profit:.2f} 净利:{net_margin_text} {status}")
+        if net_profit > 0:
+            self.net_profit_label.setStyleSheet("color: #006400; font-weight: bold; font-size: 13px;")
+        elif abs(net_profit) < 0.000001:
+            self.net_profit_label.setStyleSheet("color: #daa520; font-weight: bold; font-size: 13px;")
+        else:
+            self.net_profit_label.setStyleSheet("color: #dc143c; font-weight: bold; font-size: 13px;")
+        self.net_profit_label.show()
+        multiple_text = f"{roi_multiple:.2f}倍" if roi_multiple is not None else "--"
+        self.roi_label.setText(
+            f'<span style="color:#666;font-weight:bold;">净投产:</span><span style="color:#e74c3c;font-weight:bold;">{net_roi:.2f}</span> '
+            f'<span style="color:#666;font-weight:bold;">倍数:</span><span style="color:#3498db;font-weight:bold;">{multiple_text}</span> '
+            f'<span style="color:#666;font-weight:bold;">曝占:</span><span style="color:#8e44ad;font-weight:bold;">{promotion_share * 100:.1f}%</span>'
+        )
+        self.link_order_label.setText(f"净成交：{net_orders:.0f}单")
+        return True
+
     def eventFilter(self, obj, event):
+        if hasattr(self, "img_label") and obj == self.img_label and event.type() == QEvent.ContextMenu:
+            self.show_product_image_history_dialog()
+            return True
         if event.type() == QEvent.ContextMenu:
             self.show_product_context_menu(event.globalPos())
             return True
@@ -509,11 +668,32 @@ class ProductWidget(QWidget):
 
     def show_product_context_menu(self, global_pos):
         menu = QMenu(self)
+        promotion_action = QAction("查看推广数据", self)
         delete_action = QAction("删除链接", self)
+        menu.addAction(promotion_action)
         menu.addAction(delete_action)
         selected = menu.exec_(global_pos)
-        if selected == delete_action:
+        if selected == promotion_action:
+            self.open_promotion_history()
+        elif selected == delete_action:
             self.delete_product()
+
+    def open_promotion_history(self):
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.prod_id,))
+            store_id = store_rows[0][0] if store_rows else None
+            store_name = ""
+            if store_id:
+                name_rows = self.db.safe_fetchall("SELECT name FROM stores WHERE id=?", (store_id,))
+                store_name = name_rows[0][0] if name_rows and name_rows[0][0] else ""
+            try:
+                from manager.dialogs.promotion_data import ProductPromotionHistoryDialog
+            except ImportError:
+                from dialogs.promotion_data import ProductPromotionHistoryDialog
+            dialog = ProductPromotionHistoryDialog(store_id, store_name, self.prod_code, self.prod_title, self.db, self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"打开推广数据失败: {e}")
 
     def show_product_image_viewer(self):
         try:
@@ -536,6 +716,165 @@ class ProductWidget(QWidget):
             dialog.exec_()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"查看主图失败: {e}")
+
+    def show_product_image_history_dialog(self):
+        self._ensure_main_image_history_record_links()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("主图历史")
+        dialog.resize(720, 520)
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel("右键主图历史：可查看大图或删除历史图片")
+        title.setStyleSheet("font-weight: bold; color: #2c3e50; padding: 4px;")
+        layout.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setSpacing(10)
+        grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        def load_items():
+            while grid.count():
+                item = grid.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+
+            rows = self.db.safe_fetchall(
+                "SELECT id, image_data, changed_at, source FROM product_image_history WHERE product_id=? ORDER BY changed_at DESC, id DESC",
+                (self.prod_id,)
+            )
+            if not rows:
+                empty = QLabel("暂无历史图片")
+                empty.setAlignment(Qt.AlignCenter)
+                empty.setStyleSheet("color: #999; font-size: 14px; padding: 30px;")
+                grid.addWidget(empty, 0, 0)
+                return
+
+            for idx, (history_id, image_data, changed_at, source) in enumerate(rows):
+                card = QWidget()
+                card.setFixedSize(154, 226)
+                card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(6, 6, 6, 6)
+                card_layout.setSpacing(5)
+                card.setStyleSheet("QWidget { border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }")
+
+                preview = QLabel()
+                preview.setFixedSize(130, 130)
+                preview.setAlignment(Qt.AlignCenter)
+                preview.setStyleSheet("border: 1px solid #ccc; background: white;")
+                pixmap = QPixmap()
+                pixmap.loadFromData(bytes(image_data))
+                if pixmap.isNull():
+                    preview.setText("图片读取失败")
+                else:
+                    preview.setPixmap(pixmap.scaled(126, 126, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                card_layout.addWidget(preview)
+
+                date_edit = QDateEdit()
+                date_edit.setDisplayFormat("yyyy-MM-dd")
+                date_edit.setCalendarPopup(True)
+                date_edit.setFixedHeight(22)
+                date_edit.setStyleSheet("border: 1px solid #ddd; color: #555; font-size: 11px;")
+
+                time_edit = QTimeEdit()
+                time_edit.setDisplayFormat("HH:mm")
+                time_edit.setFixedHeight(22)
+                parsed_dt = self._parse_history_datetime(changed_at)
+                if parsed_dt:
+                    date_edit.setDate(QDate(parsed_dt.year, parsed_dt.month, parsed_dt.day))
+                    time_edit.setTime(QTime(parsed_dt.hour, parsed_dt.minute))
+                else:
+                    date_edit.setDate(QDate.currentDate())
+                time_edit.setStyleSheet("border: 1px solid #ddd; color: #555; font-size: 11px;")
+                date_edit.setToolTip(str(changed_at))
+                time_edit.setToolTip(str(changed_at))
+                card_layout.addWidget(date_edit)
+                card_layout.addWidget(time_edit)
+
+                btn_row = QHBoxLayout()
+                btn_view = QPushButton("查看")
+                btn_delete = QPushButton("删除")
+                btn_view.setFixedHeight(28)
+                btn_delete.setFixedHeight(28)
+                btn_view.setStyleSheet("padding: 4px 8px;")
+                btn_delete.setStyleSheet("padding: 4px 8px; color: #c0392b;")
+                btn_row.addWidget(btn_view)
+                btn_row.addWidget(btn_delete)
+                card_layout.addLayout(btn_row)
+
+                btn_view.clicked.connect(lambda checked=False, data=bytes(image_data): self._show_history_image_viewer(data))
+                btn_delete.clicked.connect(lambda checked=False, hid=history_id: delete_history_image(hid))
+                date_edit.editingFinished.connect(
+                    lambda hid=history_id, old_changed_at=str(changed_at), date_editor=date_edit, time_editor=time_edit: update_history_time(hid, old_changed_at, date_editor, time_editor)
+                )
+                time_edit.editingFinished.connect(
+                    lambda hid=history_id, old_changed_at=str(changed_at), date_editor=date_edit, time_editor=time_edit: update_history_time(hid, old_changed_at, date_editor, time_editor)
+                )
+
+                grid.addWidget(card, idx // 4, idx % 4)
+
+        def update_history_time(history_id, old_changed_at, date_editor, time_editor):
+            new_date = date_editor.date()
+            new_time = time_editor.time()
+            new_dt = datetime(
+                new_date.year(), new_date.month(), new_date.day(),
+                new_time.hour(), new_time.minute(), 0
+            )
+            new_changed_at = new_dt.strftime("%Y-%m-%d %H:%M:%S")
+            if new_changed_at == old_changed_at:
+                return
+            self.db.safe_execute(
+                "UPDATE product_image_history SET changed_at=? WHERE id=? AND product_id=?",
+                (new_changed_at, history_id, self.prod_id)
+            )
+            self._sync_main_image_operation_record_time(history_id, new_changed_at)
+            load_items()
+            self.main_app.show_toast("历史图片时间已同步")
+
+        def delete_history_image(history_id):
+            reply = QMessageBox.question(dialog, "确认删除", "确定删除这张历史图片吗？")
+            if reply != QMessageBox.Yes:
+                return
+            self.db.safe_execute("DELETE FROM product_image_history WHERE id=?", (history_id,))
+            self._remove_main_image_operation_record(history_id)
+            load_items()
+            self.main_app.show_toast("历史图片已删除")
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        load_items()
+        dialog.exec_()
+
+    def _parse_history_datetime(self, changed_at):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(str(changed_at), fmt)
+            except Exception:
+                pass
+        return None
+
+    def _show_history_image_viewer(self, image_data):
+        pixmap = QPixmap()
+        pixmap.loadFromData(image_data)
+        if pixmap.isNull():
+            self.main_app.show_toast("历史图片读取失败")
+            return
+        try:
+            from manager.dialogs.product_spec import SpecImageViewerDialog
+        except ImportError:
+            from dialogs.product_spec import SpecImageViewerDialog
+        viewer = SpecImageViewerDialog(pixmap, self)
+        viewer.setWindowTitle("历史主图查看")
+        viewer.exec_()
 
     def _paste_image_from_clipboard(self):
         clipboard = QApplication.clipboard()
@@ -569,14 +908,262 @@ class ProductWidget(QWidget):
             if not image_data:
                 self.main_app.show_toast("剪贴板图片保存失败")
                 return
-            self.main_app.db.safe_execute(
-                "UPDATE products SET image_data=? WHERE id=?",
-                (image_data, self.prod_id)
-            )
-            self.set_image_from_data(image_data)
-            self.main_app.show_toast("✅ 图片已粘贴并更新")
+            self._save_product_main_image(image_data, "paste")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"粘贴图片失败: {e}")
+
+    def _save_product_main_image(self, image_data, source):
+        changed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.main_app.db.safe_execute(
+            "UPDATE products SET image_data=? WHERE id=?",
+            (image_data, self.prod_id)
+        )
+        self.main_app.db.safe_execute(
+            "INSERT INTO product_image_history (product_id, image_data, changed_at, source) VALUES (?, ?, ?, ?)",
+            (self.prod_id, image_data, changed_at, source)
+        )
+        history_id = self.main_app.db.cursor.lastrowid
+        self._append_main_image_change_record(changed_at, history_id)
+        self.set_image_from_data(image_data)
+        self.main_app.show_toast("✅ 主轮播图已更新并记录")
+
+    def _append_main_image_change_record(self, changed_at, history_id):
+        change_dt = datetime.strptime(changed_at, "%Y-%m-%d %H:%M:%S")
+        year, month, day = change_dt.year, change_dt.month, change_dt.day
+        time_str = change_dt.strftime("%H:%M")
+        text = "更换了主轮播图"
+        change = {
+            "time": time_str,
+            "metric": "主轮播图",
+            "old": "原图",
+            "new": "新图",
+            "text": text,
+            "type": "main_carousel_image",
+            "history_id": history_id,
+        }
+        rows = self.main_app.db.safe_fetchall(
+            "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+            (self.prod_id, year, month, day)
+        )
+        try:
+            records = json.loads(rows[0][0]) if rows and rows[0][0] else []
+        except Exception:
+            records = []
+        records.append({"time": time_str, "text": text, "history_id": history_id, "changes": [change]})
+        self.main_app.db.safe_execute(
+            "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
+            (self.prod_id, year, month, day, json.dumps(records, ensure_ascii=False))
+        )
+        if getattr(self.main_app, "year", None) == year and getattr(self.main_app, "month", None) == month:
+            for row, row_prod_id in getattr(self.main_app, "row_data_map", {}).items():
+                if row_prod_id == self.prod_id:
+                    self.main_app.render_records_for_product(row, self.prod_id, self.main_app.table.columnCount() - 1)
+                    break
+
+    def _record_main_image_history_id(self, record):
+        if not isinstance(record, dict):
+            return None
+        history_id = record.get("history_id")
+        if history_id:
+            return history_id
+        for change in record.get("changes", []) or []:
+            if isinstance(change, dict) and change.get("type") == "main_carousel_image" and change.get("history_id"):
+                return change.get("history_id")
+        return None
+
+    def _is_main_image_record(self, record):
+        if not isinstance(record, dict):
+            return False
+        if self._record_main_image_history_id(record):
+            return True
+        for change in record.get("changes", []) or []:
+            if isinstance(change, dict) and change.get("type") == "main_carousel_image":
+                return True
+        return False
+
+    def _assign_history_id_to_record(self, record, history_id):
+        record["history_id"] = history_id
+        for change in record.get("changes", []) or []:
+            if isinstance(change, dict) and change.get("type") == "main_carousel_image":
+                change["history_id"] = history_id
+
+    def _main_image_record_payload(self, changed_at, history_id):
+        dt = self._parse_history_datetime(changed_at) or datetime.now()
+        time_str = dt.strftime("%H:%M")
+        text = "更换了主轮播图"
+        change = {
+            "time": time_str,
+            "metric": "主轮播图",
+            "old": "原图",
+            "new": "新图",
+            "text": text,
+            "type": "main_carousel_image",
+            "history_id": history_id,
+        }
+        return {"time": time_str, "text": text, "history_id": history_id, "changes": [change]}
+
+    def _ensure_main_image_history_record_links(self):
+        histories = self.main_app.db.safe_fetchall(
+            "SELECT id, changed_at FROM product_image_history WHERE product_id=? ORDER BY changed_at ASC, id ASC",
+            (self.prod_id,)
+        )
+        if not histories:
+            return
+
+        history_by_id = {history_id: changed_at for history_id, changed_at in histories}
+        history_match = {}
+        for history_id, changed_at in histories:
+            dt = self._parse_history_datetime(changed_at)
+            if dt:
+                history_match.setdefault((dt.year, dt.month, dt.day, dt.strftime("%H:%M")), []).append(history_id)
+
+        rows = self.main_app.db.safe_fetchall(
+            "SELECT year, month, day, records_json FROM records WHERE product_id=?",
+            (self.prod_id,)
+        )
+        used_ids = set()
+        changed_days = {}
+        for year, month, day, records_json in rows:
+            try:
+                records = json.loads(records_json) if records_json else []
+            except Exception:
+                records = []
+            new_records = []
+            changed = False
+            for record in records:
+                if not self._is_main_image_record(record):
+                    new_records.append(record)
+                    continue
+                history_id = self._record_main_image_history_id(record)
+                if history_id in history_by_id:
+                    used_ids.add(history_id)
+                    self._assign_history_id_to_record(record, history_id)
+                    new_records.append(record)
+                    continue
+                key = (year, month, day, record.get("time", ""))
+                candidates = [hid for hid in history_match.get(key, []) if hid not in used_ids]
+                if candidates:
+                    history_id = candidates[0]
+                    used_ids.add(history_id)
+                    self._assign_history_id_to_record(record, history_id)
+                    new_records.append(record)
+                    changed = True
+                else:
+                    changed = True
+            if changed:
+                changed_days[(year, month, day)] = new_records
+
+        for history_id, changed_at in histories:
+            if history_id in used_ids:
+                continue
+            dt = self._parse_history_datetime(changed_at)
+            if not dt:
+                continue
+            key = (dt.year, dt.month, dt.day)
+            if key not in changed_days:
+                existing_rows = self.main_app.db.safe_fetchall(
+                    "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+                    (self.prod_id, dt.year, dt.month, dt.day)
+                )
+                try:
+                    changed_days[key] = json.loads(existing_rows[0][0]) if existing_rows and existing_rows[0][0] else []
+                except Exception:
+                    changed_days[key] = []
+            changed_days[key].append(self._main_image_record_payload(changed_at, history_id))
+
+        for (year, month, day), records in changed_days.items():
+            self._write_records_for_day(year, month, day, records)
+
+    def _write_records_for_day(self, year, month, day, records):
+        records = self._sort_records_by_time(records)
+        if records:
+            self.main_app.db.safe_execute(
+                "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
+                (self.prod_id, year, month, day, json.dumps(records, ensure_ascii=False))
+            )
+        else:
+            self.main_app.db.safe_execute(
+                "DELETE FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+                (self.prod_id, year, month, day)
+            )
+        if getattr(self.main_app, "year", None) == year and getattr(self.main_app, "month", None) == month:
+            for row, row_prod_id in getattr(self.main_app, "row_data_map", {}).items():
+                if row_prod_id == self.prod_id:
+                    self.main_app.render_records_for_product(row, self.prod_id, self.main_app.table.columnCount() - 1)
+                    break
+
+    def _sort_records_by_time(self, records):
+        def key(record):
+            text = str(record.get("time", "") if isinstance(record, dict) else "")
+            try:
+                hour, minute = text.split(":", 1)
+                return (int(hour), int(minute))
+            except Exception:
+                return (99, 99)
+        return sorted(records or [], key=key)
+
+    def _remove_main_image_operation_record(self, history_id):
+        rows = self.main_app.db.safe_fetchall(
+            "SELECT year, month, day, records_json FROM records WHERE product_id=?",
+            (self.prod_id,)
+        )
+        for year, month, day, records_json in rows:
+            try:
+                records = json.loads(records_json) if records_json else []
+            except Exception:
+                records = []
+            new_records = [record for record in records if self._record_main_image_history_id(record) != history_id]
+            if len(new_records) != len(records):
+                self._write_records_for_day(year, month, day, new_records)
+
+    def _sync_main_image_operation_record_time(self, history_id, changed_at):
+        dt = self._parse_history_datetime(changed_at)
+        if not dt:
+            return
+        new_time = dt.strftime("%H:%M")
+        target_key = (dt.year, dt.month, dt.day)
+        rows = self.main_app.db.safe_fetchall(
+            "SELECT year, month, day, records_json FROM records WHERE product_id=?",
+            (self.prod_id,)
+        )
+        moved_records = []
+        changed_days = {}
+        for year, month, day, records_json in rows:
+            try:
+                records = json.loads(records_json) if records_json else []
+            except Exception:
+                records = []
+            kept_records = []
+            for record in records:
+                if self._record_main_image_history_id(record) == history_id:
+                    record["time"] = new_time
+                    record["history_id"] = history_id
+                    for change in record.get("changes", []) or []:
+                        if isinstance(change, dict) and change.get("type") == "main_carousel_image":
+                            change["time"] = new_time
+                            change["history_id"] = history_id
+                    moved_records.append(record)
+                else:
+                    kept_records.append(record)
+            if len(kept_records) != len(records):
+                changed_days[(year, month, day)] = kept_records
+
+        if not moved_records:
+            moved_records.append(self._main_image_record_payload(changed_at, history_id))
+
+        if target_key not in changed_days:
+            existing_rows = self.main_app.db.safe_fetchall(
+                "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+                (self.prod_id, dt.year, dt.month, dt.day)
+            )
+            try:
+                changed_days[target_key] = json.loads(existing_rows[0][0]) if existing_rows and existing_rows[0][0] else []
+            except Exception:
+                changed_days[target_key] = []
+        changed_days[target_key].extend(moved_records)
+
+        for (year, month, day), records in changed_days.items():
+            self._write_records_for_day(year, month, day, records)
 
     def update_roi_display(self, margin_rate=None):
         self.update_margin_display()
@@ -651,11 +1238,7 @@ class ProductWidget(QWidget):
             try:
                 with open(path, 'rb') as f:
                     image_data = f.read()
-                self.main_app.db.safe_execute(
-                    "UPDATE products SET image_data=? WHERE id=?",
-                    (image_data, self.prod_id)
-                )
-                self.set_image_from_data(image_data)
+                self._save_product_main_image(image_data, "file")
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"更新图片失败: {e}")
 
@@ -684,9 +1267,19 @@ class ProductWidget(QWidget):
         reply = QMessageBox.question(self, "确认", "确定删除该商品及其所有记录吗？")
         if reply == QMessageBox.Yes:
             try:
+                product_rows = self.main_app.db.safe_fetchall(
+                    "SELECT store_id, name, title FROM products WHERE id=?",
+                    (self.prod_id,)
+                )
+                store_id = product_rows[0][0] if product_rows else None
+                product_id = product_rows[0][1] if product_rows else self.prod_code
+                product_title = product_rows[0][2] if product_rows else self.prod_title
                 self.main_app.db.safe_execute("DELETE FROM product_specs WHERE product_id=?", (self.prod_id,))
                 self.main_app.db.safe_execute("DELETE FROM records WHERE product_id=?", (self.prod_id,))
+                self.main_app.db.safe_execute("DELETE FROM product_image_history WHERE product_id=?", (self.prod_id,))
                 self.main_app.db.safe_execute("DELETE FROM products WHERE id=?", (self.prod_id,))
+                if store_id and hasattr(self.main_app, "record_store_link_change"):
+                    self.main_app.record_store_link_change(store_id, "delete", product_id, product_title)
                 self.main_app.load_data_safe()
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"删除商品失败: {e}")
@@ -735,7 +1328,7 @@ class StoreWidget(QWidget):
 
         self.label = QLabel(f" {store_name}")
         self.label.setStyleSheet("background-color: #87CEEB; font-weight: bold; padding: 1px; border-radius: 5px;")
-        self.label.setWordWrap(True)
+        self.label.setWordWrap(False)
         self.label.setCursor(Qt.PointingHandCursor)
         self.label.setToolTip("左键双击查看店铺毛利 | 右键双击编辑店铺备注")
         self.label.installEventFilter(self)
@@ -767,22 +1360,43 @@ class StoreWidget(QWidget):
             self.margin_label = QLabel("   综合毛利: --")
             self.margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
 
-        net_margin = self.calculate_store_net_margin()
-        if net_margin is not None:
-            net_margin_color = self._get_net_margin_color(net_margin)
-            self.net_margin_label = QLabel(f"净利率: {net_margin:.1f}%")
-            self.net_margin_label.setStyleSheet(f"background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: {net_margin_color}; font-weight: bold;")
+        if self._is_real_promotion_mode():
+            real_metrics = self.calculate_store_real_promotion_metrics()
+            if real_metrics:
+                net_profit = real_metrics["net_profit"]
+                net_margin = real_metrics["net_margin_pct"]
+                profit_color = "#006400" if net_profit > 0 else ("#daa520" if abs(net_profit) < 0.000001 else "#dc143c")
+                self.net_margin_label = QLabel(f"推广盈亏: ¥{net_profit:.0f} 净利:{net_margin:.1f}%")
+                self.net_margin_label.setStyleSheet(f"background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: {profit_color}; font-weight: bold;")
+                avg_price = real_metrics.get("avg_price")
+                if avg_price is not None:
+                    self.avg_price_label = QLabel(f"真实客单: ¥{avg_price:.1f}")
+                    self.avg_price_label.setStyleSheet("background-color: #e8f8f5; padding: 3px 8px; font-size: 12px; color: #27ae60; font-weight: bold;")
+                else:
+                    self.avg_price_label = QLabel("真实客单: --")
+                    self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+            else:
+                self.net_margin_label = QLabel("推广盈亏: --")
+                self.net_margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+                self.avg_price_label = QLabel("真实客单: --")
+                self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
         else:
-            self.net_margin_label = QLabel("净利率: --")
-            self.net_margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+            net_margin = self.calculate_store_net_margin()
+            if net_margin is not None:
+                net_margin_color = self._get_net_margin_color(net_margin)
+                self.net_margin_label = QLabel(f"净利率: {net_margin:.1f}%")
+                self.net_margin_label.setStyleSheet(f"background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: {net_margin_color}; font-weight: bold;")
+            else:
+                self.net_margin_label = QLabel("净利率: --")
+                self.net_margin_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
 
-        avg_price = self.calculate_store_avg_price()
-        if avg_price is not None:
-            self.avg_price_label = QLabel(f"客单价: ¥{avg_price:.1f}")
-            self.avg_price_label.setStyleSheet("background-color: #e8f8f5; padding: 3px 8px; font-size: 12px; color: #27ae60; font-weight: bold;")
-        else:
-            self.avg_price_label = QLabel("客单价: --")
-            self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
+            avg_price = self.calculate_store_avg_price()
+            if avg_price is not None:
+                self.avg_price_label = QLabel(f"客单价: ¥{avg_price:.1f}")
+                self.avg_price_label.setStyleSheet("background-color: #e8f8f5; padding: 3px 8px; font-size: 12px; color: #27ae60; font-weight: bold;")
+            else:
+                self.avg_price_label = QLabel("客单价: --")
+                self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
 
         label_layout.addWidget(top_row_widget)
         label_layout.addWidget(self.memo_label)
@@ -859,6 +1473,93 @@ class StoreWidget(QWidget):
             return None
         except Exception as e:
             print(f"计算店铺毛利失败: {e}")
+            return None
+
+    def _is_real_promotion_mode(self):
+        return (
+            hasattr(self.main_app, "is_real_promotion_data_mode")
+            and self.main_app.is_real_promotion_data_mode()
+            and hasattr(self.main_app, "get_latest_promotion_data")
+        )
+
+    def _calculate_product_margin_decimal(self, prod_id):
+        specs = self.db.safe_fetchall(
+            "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+            (prod_id,)
+        )
+        if not specs:
+            return None
+        product_rows = self.db.safe_fetchall(
+            "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?",
+            (prod_id,)
+        )
+        coupon = (product_rows[0][0] or 0) if product_rows else 0
+        new_customer = (product_rows[0][1] or 0) if product_rows else 0
+        max_discount = max(coupon, new_customer)
+        total_spec_weight = 0
+        total_weighted_margin = 0
+        for spec_code, sale_price, weight in specs:
+            if sale_price is None or weight is None or sale_price <= 0:
+                continue
+            cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
+            cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
+            final_price = sale_price - max_discount
+            if final_price > 0 and cost > 0:
+                total_weighted_margin += ((final_price - cost) / final_price) * weight
+                total_spec_weight += weight
+        if total_spec_weight <= 0:
+            return None
+        return total_weighted_margin / total_spec_weight
+
+    def calculate_store_real_promotion_metrics(self):
+        try:
+            products = self.db.safe_fetchall(
+                "SELECT id, name, is_natural_flow FROM products WHERE store_id=?",
+                (self.store_id,)
+            )
+            if not products:
+                return None
+            total_net_amount = 0.0
+            total_cost = 0.0
+            total_net_orders = 0.0
+            total_net_profit = 0.0
+            matched_count = 0
+            for prod_id, product_code, is_natural_flow in products:
+                if is_natural_flow:
+                    continue
+                margin_decimal = self._calculate_product_margin_decimal(prod_id)
+                if margin_decimal is None:
+                    continue
+                data = self.main_app.get_latest_promotion_data(self.store_id, product_code)
+                if not data:
+                    continue
+                net_amount = float(data.get("net_transaction_amount") or 0)
+                cost = float(data.get("cost") or 0)
+                net_orders = float(data.get("net_orders") or 0)
+                tech_fee = net_amount * 0.006
+                net_profit = net_amount * margin_decimal - cost - tech_fee
+                total_net_amount += net_amount
+                total_cost += cost
+                total_net_orders += net_orders
+                total_net_profit += net_profit
+                matched_count += 1
+            if matched_count <= 0:
+                return None
+            if total_net_amount > 0:
+                net_margin_pct = total_net_profit / total_net_amount * 100
+            else:
+                net_margin_pct = -100.0 if total_cost > 0 else 0.0
+            avg_price = total_net_amount / total_net_orders if total_net_orders > 0 else None
+            return {
+                "net_profit": total_net_profit,
+                "net_margin_pct": net_margin_pct,
+                "avg_price": avg_price,
+                "net_orders": total_net_orders,
+                "net_amount": total_net_amount,
+                "cost": total_cost,
+            }
+        except Exception as e:
+            print(f"计算店铺真实推广指标失败: {e}")
             return None
 
     def calculate_store_net_margin(self):

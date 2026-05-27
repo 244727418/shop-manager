@@ -105,16 +105,19 @@ class CloudSyncManager:
                     data = json.load(f)
                     self.accounts = data.get('accounts', [])
                     self.current_account_id = data.get('current_account')
+                    self.active_data_account_id = data.get('active_data_account_id')
                     if self.current_account_id:
                         self.current_account = self._find_account_by_id(self.current_account_id)
             except Exception as e:
                 print(f"加载账号文件失败: {e}")
                 self.accounts = []
                 self.current_account_id = None
+                self.active_data_account_id = None
                 self.current_account = None
         else:
             self.accounts = []
             self.current_account_id = None
+            self.active_data_account_id = None
             self.current_account = None
 
     def _save_accounts(self):
@@ -123,10 +126,12 @@ class CloudSyncManager:
             with open(self.accounts_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     'accounts': self.accounts,
-                    'current_account': self.current_account_id
+                    'current_account': self.current_account_id,
+                    'active_data_account_id': self.active_data_account_id
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"保存账号文件失败: {e}")
+            print(f"淇濆瓨璐﹀彿鏂囦欢澶辫触: {e}")
+        return
 
     def _find_account_by_id(self, account_id):
         """根据ID查找账号"""
@@ -220,6 +225,21 @@ class CloudSyncManager:
         """获取当前账号"""
         return self.current_account
 
+    def get_active_data_account(self):
+        """获取当前本地表格数据归属账号"""
+        if not getattr(self, 'active_data_account_id', None):
+            return None
+        return self._find_account_by_id(self.active_data_account_id)
+
+    def set_active_data_account(self, account_id):
+        """设置当前本地表格数据归属账号"""
+        account = self._find_account_by_id(account_id)
+        if not account:
+            return False
+        self.active_data_account_id = account_id
+        self._save_accounts()
+        return True
+
     def get_all_accounts(self):
         """获取所有账号"""
         return self.accounts
@@ -254,6 +274,163 @@ class CloudSyncManager:
                     backup_file = os.path.join(backup_path, "backup.db")
                     import shutil
                     shutil.copy2(self.db.db_path, backup_file)
+                    return True, backup_file
+                except Exception as e:
+                    return False, str(e)
+        return False, "账号不存在"
+
+    def save_local_backup_before_download(self, account_id):
+        """下载覆盖本地前，备份当前本地DB。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                try:
+                    os.makedirs(os.path.join(backup_path, "local_backup_before_download"), exist_ok=True)
+                    backup_file = os.path.join(backup_path, "local_backup_before_download", "backup.db")
+                    import shutil
+                    shutil.copy2(self.db.db_path, backup_file)
+                    return True, backup_file
+                except Exception as e:
+                    return False, str(e)
+        return False, "账号不存在"
+
+    def _get_timestamped_backup_file(self, backup_dir):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        backup_file = os.path.join(backup_dir, f"backup_{timestamp}.db")
+        if not os.path.exists(backup_file):
+            return backup_file
+
+        index = 1
+        while True:
+            backup_file = os.path.join(backup_dir, f"backup_{timestamp}_{index:02d}.db")
+            if not os.path.exists(backup_file):
+                return backup_file
+            index += 1
+
+    def _backup_sort_key(self, file_path):
+        name = os.path.basename(file_path)
+        try:
+            stem = os.path.splitext(name)[0]
+            parts = stem.split("_")
+            if len(parts) >= 3 and parts[0] == "backup":
+                created_at = datetime.strptime(f"{parts[1]}_{parts[2]}", "%Y%m%d_%H%M")
+                suffix = int(parts[3]) if len(parts) >= 4 and parts[3].isdigit() else 0
+                return (created_at.timestamp(), suffix, os.path.getmtime(file_path))
+        except Exception:
+            pass
+        modified_at = os.path.getmtime(file_path)
+        return (modified_at, 0, modified_at)
+
+    def _rotate_timestamped_backups(self, backup_dir, max_backups=5):
+        backup_files = [
+            os.path.join(backup_dir, name)
+            for name in os.listdir(backup_dir)
+            if name.lower().endswith(".db")
+        ]
+        backup_files.sort(key=self._backup_sort_key, reverse=True)
+        for old_file in backup_files[max_backups:]:
+            try:
+                os.remove(old_file)
+            except Exception:
+                pass
+
+    def save_local_backup_before_upload(self, account_id, max_backups=5):
+        """上传覆盖云端前，按时间备份当前本地DB，最多保留最近几份。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                try:
+                    backup_dir = os.path.join(backup_path, "local_backup_before_upload")
+                    os.makedirs(backup_dir, exist_ok=True)
+                    try:
+                        self.db.conn.commit()
+                    except Exception:
+                        pass
+                    backup_file = self._get_timestamped_backup_file(backup_dir)
+                    import shutil
+                    shutil.copy2(self.db.db_path, backup_file)
+                    self._rotate_timestamped_backups(backup_dir, max_backups=max_backups)
+                    return True, backup_file
+                except Exception as e:
+                    return False, str(e)
+        return False, "账号不存在"
+
+    def save_local_profile(self, account_id):
+        """保存当前主库为该账号的本地应用档案。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                try:
+                    profile_dir = os.path.join(backup_path, "local_current")
+                    os.makedirs(profile_dir, exist_ok=True)
+                    profile_file = os.path.join(profile_dir, "backup.db")
+                    try:
+                        self.db.conn.commit()
+                    except Exception:
+                        pass
+                    import shutil
+                    shutil.copy2(self.db.db_path, profile_file)
+                    return True, profile_file
+                except Exception as e:
+                    return False, str(e)
+        return False, "账号不存在"
+
+    def load_local_profile(self, account_id):
+        """返回该账号本地应用档案路径。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                profile_file = os.path.join(backup_path, "local_current", "backup.db")
+                if os.path.exists(profile_file):
+                    return True, profile_file
+                legacy_file = os.path.join(backup_path, "backup.db")
+                if os.path.exists(legacy_file):
+                    return True, legacy_file
+                return False, "该账号暂无本地数据"
+        return False, "账号不存在"
+
+    def has_local_profile(self, account_id):
+        """判断该账号是否已有本地应用档案。"""
+        ok, _ = self.load_local_profile(account_id)
+        return ok
+
+    def ensure_local_profile_normalized(self, account_id, profile_path):
+        """将旧本地档案迁移为标准 local_current/backup.db。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                standard_file = os.path.join(backup_path, "local_current", "backup.db")
+                if os.path.abspath(profile_path) == os.path.abspath(standard_file):
+                    return True, standard_file
+                try:
+                    os.makedirs(os.path.dirname(standard_file), exist_ok=True)
+                    import shutil
+                    shutil.copy2(profile_path, standard_file)
+                    return True, standard_file
+                except Exception as e:
+                    return False, str(e)
+        return False, "账号不存在"
+
+    def get_accounts_with_local_profiles(self):
+        """获取已有本地数据的账号列表。"""
+        result = []
+        for acc in self.accounts:
+            ok, path = self.load_local_profile(acc.get('id'))
+            if ok:
+                result.append((acc, path))
+        return result
+
+    def save_cloud_backup_before_upload(self, account_id, cloud_data):
+        """上传覆盖云端前，备份当前云端JSON数据。"""
+        for acc in self.accounts:
+            if acc.get('id') == account_id:
+                backup_path = acc.get('local_backup_path', os.path.join(self._get_base_dir(), acc['folder']))
+                try:
+                    backup_dir = os.path.join(backup_path, "cloud_backup_before_upload")
+                    os.makedirs(backup_dir, exist_ok=True)
+                    backup_file = os.path.join(backup_dir, "data.json")
+                    with open(backup_file, 'w', encoding='utf-8') as f:
+                        json.dump(cloud_data, f, ensure_ascii=False, indent=2)
                     return True, backup_file
                 except Exception as e:
                     return False, str(e)
@@ -306,6 +483,38 @@ class CloudSyncManager:
             traceback.print_exc()
             return None
 
+    @staticmethod
+    def _quote_identifier(name):
+        return '"' + str(name).replace('"', '""') + '"'
+
+    def _get_existing_table_columns(self, table_name):
+        self.db.cursor.execute(f"PRAGMA table_info({self._quote_identifier(table_name)})")
+        return [row[1] for row in self.db.cursor.fetchall()]
+
+    def _insert_compatible_row(self, table_name, row, table_columns, replace=True):
+        if not isinstance(row, dict):
+            return
+        columns = [col for col in row.keys() if col in table_columns]
+        if not columns:
+            return
+        placeholders = ','.join(['?'] * len(columns))
+        quoted_table = self._quote_identifier(table_name)
+        quoted_columns = ','.join(self._quote_identifier(col) for col in columns)
+        verb = "INSERT OR REPLACE" if replace else "INSERT"
+        values = [self._safe_deserialize_value(row.get(col), col) for col in columns]
+        self.db.cursor.execute(
+            f"{verb} INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})",
+            values,
+        )
+
+    def _delete_table_if_exists(self, table_name, table_columns_cache):
+        columns = self._get_existing_table_columns(table_name)
+        if not columns:
+            return False
+        table_columns_cache[table_name] = columns
+        self.db.cursor.execute(f"DELETE FROM {self._quote_identifier(table_name)}")
+        return True
+
     def import_data_from_json(self, data):
         """从JSON导入数据到数据库（整体覆盖，先清空再导入）"""
         try:
@@ -332,6 +541,7 @@ class CloudSyncManager:
             self.db.safe_execute("DELETE FROM historical_data")
             self.db.safe_execute("DELETE FROM manual_margin_data")
             self.db.safe_execute("DELETE FROM store_temp_images")
+            self.db.safe_execute("DELETE FROM promotion_daily_data")
             self.db.safe_execute("DELETE FROM settings")
 
             if data.get('stores'):
@@ -435,6 +645,17 @@ class CloudSyncManager:
                         vals
                     )
 
+            if data.get('promotion_daily_data'):
+                for promo in data['promotion_daily_data']:
+                    columns = [col for col in promo.keys() if col != 'id']
+                    placeholders = ','.join(['?'] * (len(columns) + 1))
+                    cols_with_id = ['id'] + columns
+                    vals = [promo.get('id')] + [promo.get(col) for col in columns]
+                    self.db.safe_execute(
+                        f"INSERT OR REPLACE INTO promotion_daily_data ({','.join(cols_with_id)}) VALUES ({placeholders})",
+                        vals
+                    )
+
             if data.get('historical_data'):
                 for h in data['historical_data']:
                     columns = [col for col in h.keys() if col != 'id']
@@ -520,6 +741,85 @@ class CloudSyncManager:
             return True
         except Exception as e:
             print(f"导入数据失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    def import_data_from_json(self, data):
+        """从JSON导入数据：事务覆盖，并兼容本地缺失的新字段。"""
+        self.last_import_error = ""
+        current_table = ""
+        try:
+            if not data or 'version' not in data:
+                self.last_import_error = "云端数据格式无效"
+                return False
+
+            if data.get('settings') and isinstance(data['settings'], list):
+                settings_dict = {}
+                for item in data['settings']:
+                    if isinstance(item, dict) and 'key' in item:
+                        settings_dict[item['key']] = item['value']
+                data['settings'] = settings_dict
+
+            table_order = [
+                'stores', 'products', 'product_specs', 'cost_categories',
+                'cost_library', 'cost_history', 'imported_orders', 'import_history',
+                'records', 'store_records', 'daily_records', 'profit_records',
+                'promotion_daily_data', 'historical_data', 'manual_margin_data', 'store_temp_images',
+                'settings', 'ai_prompts', 'ai_common_prompts', 'store_prompts',
+                'knowledge_base', 'link_combinations',
+            ]
+            delete_order = [
+                'imported_orders', 'import_history', 'records', 'store_records',
+                'daily_records', 'profit_records', 'promotion_daily_data', 'historical_data',
+                'manual_margin_data', 'store_temp_images', 'product_specs',
+                'products', 'stores', 'cost_history', 'cost_library',
+                'cost_categories', 'settings', 'ai_prompts', 'ai_common_prompts',
+                'store_prompts', 'knowledge_base', 'link_combinations',
+            ]
+
+            table_columns_cache = {}
+            self.db.conn.execute("BEGIN")
+
+            for table_name in delete_order:
+                current_table = table_name
+                self._delete_table_if_exists(table_name, table_columns_cache)
+
+            for table_name in table_order:
+                current_table = table_name
+                if table_name not in table_columns_cache:
+                    columns = self._get_existing_table_columns(table_name)
+                    if not columns:
+                        continue
+                    table_columns_cache[table_name] = columns
+                columns = table_columns_cache[table_name]
+
+                if table_name == 'settings' and isinstance(data.get('settings'), dict):
+                    for key, value in data['settings'].items():
+                        self._insert_compatible_row(table_name, {'key': key, 'value': value}, columns)
+                    continue
+
+                rows = data.get(table_name)
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    self._insert_compatible_row(table_name, row, columns)
+
+            self.db.conn.commit()
+
+            try:
+                self.db.update_all_product_category_labels()
+            except Exception as e:
+                print(f"更新商品类型标签失败: {e}")
+            return True
+        except Exception as e:
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                pass
+            self.last_import_error = f"{current_table or '未知表'} 导入失败：{e}"
+            print(f"瀵煎叆鏁版嵁澶辫触: {self.last_import_error}")
             import traceback
             traceback.print_exc()
             return False
@@ -753,6 +1053,22 @@ class CloudSyncDialog(QDialog):
         """)
         self.btn_add_account.clicked.connect(self.show_add_account_dialog)
 
+        self.btn_create_new_data = QPushButton("新建空白数据")
+        self.btn_create_new_data.setStyleSheet("""
+            QPushButton {
+                background-color: #16a085;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138d75;
+            }
+        """)
+        self.btn_create_new_data.clicked.connect(self.create_new_blank_data)
+
         self.btn_switch_account = QPushButton("🔄 切换账号")
         self.btn_switch_account.setStyleSheet("""
             QPushButton {
@@ -784,7 +1100,7 @@ class CloudSyncDialog(QDialog):
         """)
         self.btn_delete_account.clicked.connect(self.delete_selected_account)
 
-        self.btn_sync_upload = QPushButton("⬆️ 上传数据")
+        self.btn_sync_upload = QPushButton("⬆️ 上传云端数据")
         self.btn_sync_upload.setStyleSheet("""
             QPushButton {
                 background-color: #3498db;
@@ -800,7 +1116,7 @@ class CloudSyncDialog(QDialog):
         """)
         self.btn_sync_upload.clicked.connect(self.upload_current_data)
 
-        self.btn_sync_download = QPushButton("⬇️ 下载数据")
+        self.btn_sync_download = QPushButton("⬇️ 下载云端数据")
         self.btn_sync_download.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
@@ -817,6 +1133,7 @@ class CloudSyncDialog(QDialog):
         self.btn_sync_download.clicked.connect(self.download_current_data)
 
         btn_layout.addWidget(self.btn_add_account)
+        btn_layout.addWidget(self.btn_create_new_data)
         btn_layout.addWidget(self.btn_delete_account)
         account_layout.addLayout(btn_layout)
 
@@ -916,9 +1233,10 @@ class CloudSyncDialog(QDialog):
         help_layout = QVBoxLayout()
         help_text = QLabel(
             "1. 点击「添加账号」配置腾讯云COS信息\n"
-            "2. 配置好账号后点击「上传数据」备份到云端\n"
-            "3. 在其他设备上添加相同账号，输入COS信息\n"
-            "4. 点击「下载数据」同步云端数据到本地\n\n"
+            "2. 平时切换账号用主界面右下角「切换账号」\n"
+            "3. 需要跨电脑时再点击「上传云端数据」或「下载云端数据」\n"
+            "4. 在其他设备上添加相同账号，输入COS信息\n"
+            "5. 本地切换不会访问云端，速度更快\n\n"
             "📎 腾讯云COS配置说明：\n"
             "- SecretId/SecretKey: 访问密钥管理获取\n"
             "- Bucket: 存储桶名称（如 my-shop-data）\n"
@@ -957,14 +1275,20 @@ class CloudSyncDialog(QDialog):
         self.account_list.clear()
         accounts = self.cloud_manager.get_all_accounts()
         current = self.cloud_manager.get_current_account()
+        current_row = -1
 
-        for acc in accounts:
+        for row, acc in enumerate(accounts):
             is_current = current and current.get('id') == acc.get('id')
             prefix = "⭐ " if is_current else "  "
             last_upload = acc.get('last_upload_time', '从未')
             item = QListWidgetItem(f"{prefix}{acc.get('name', '未知')} (上传:{last_upload})")
             item.setData(Qt.UserRole, acc.get('id'))
             self.account_list.addItem(item)
+            if is_current:
+                current_row = row
+
+        if current_row >= 0:
+            self.account_list.setCurrentRow(current_row)
 
         self.update_sync_info()
 
@@ -1191,6 +1515,273 @@ class CloudSyncDialog(QDialog):
             dialog.accept()
             self.load_accounts_to_list()
 
+    def _read_account_dialog_values(self):
+        name = self.name_input.text().strip()
+        secret_id = self.secret_id_input.text().strip()
+        secret_key = self.secret_key_input.text().strip()
+        bucket = self.bucket_input.text().strip()
+        region = self.region_input.text().strip()
+        folder = self.folder_input.text().strip()
+
+        if not name:
+            self._show_message_box(QMessageBox.Warning, "提示", "请输入账号名称")
+            return None
+        if not secret_id or not secret_key:
+            self._show_message_box(QMessageBox.Warning, "提示", "请输入 SecretId 和 SecretKey")
+            return None
+        if not bucket:
+            self._show_message_box(QMessageBox.Warning, "提示", "请输入 Bucket 名称")
+            return None
+        if not region:
+            self._show_message_box(QMessageBox.Warning, "提示", "请输入地域")
+            return None
+        return name, secret_id, secret_key, bucket, region, folder
+
+    def _prompt_new_account_config(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("创建新数据账号")
+        dialog.resize(500, 400)
+        dialog.setStyleSheet("background-color: white;")
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("请输入新数据的云同步账号配置："))
+        layout.addSpacing(10)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("账号名称："), 0, 0)
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如：new_shop_data")
+        grid.addWidget(self.name_input, 0, 1)
+
+        grid.addWidget(QLabel("SecretId："), 1, 0)
+        self.secret_id_input = QLineEdit()
+        self.secret_id_input.setPlaceholderText("腾讯云 SecretId")
+        grid.addWidget(self.secret_id_input, 1, 1)
+
+        grid.addWidget(QLabel("SecretKey："), 2, 0)
+        self.secret_key_input = QLineEdit()
+        self.secret_key_input.setPlaceholderText("腾讯云 SecretKey")
+        self.secret_key_input.setEchoMode(QLineEdit.Password)
+        grid.addWidget(self.secret_key_input, 2, 1)
+
+        grid.addWidget(QLabel("Bucket："), 3, 0)
+        self.bucket_input = QLineEdit()
+        self.bucket_input.setPlaceholderText("存储桶名称")
+        self.bucket_input.setText("dianpuguanli-1305093930")
+        grid.addWidget(self.bucket_input, 3, 1)
+
+        grid.addWidget(QLabel("Region："), 4, 0)
+        self.region_input = QLineEdit()
+        self.region_input.setPlaceholderText("例如 ap-beijing")
+        self.region_input.setText("ap-beijing")
+        grid.addWidget(self.region_input, 4, 1)
+
+        grid.addWidget(QLabel("数据文件夹："), 5, 0)
+        self.folder_input = QLineEdit()
+        self.folder_input.setPlaceholderText("留空则使用账号名称")
+        grid.addWidget(self.folder_input, 5, 1)
+        layout.addLayout(grid)
+
+        help_label = QLabel("创建后会生成新的空白本地数据，并自动上传空白数据到该云账号。")
+        help_label.setStyleSheet("color: #666; font-size: 12px; padding: 10px; background-color: #f6f8fa; border-radius: 4px;")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("创建新数据")
+        btn_ok.setStyleSheet("QPushButton { background-color: #16a085; color: white; border: none; padding: 10px 30px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #138d75; }")
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setStyleSheet("QPushButton { background-color: #95a5a6; color: white; border: none; padding: 10px 30px; border-radius: 4px; }")
+
+        values = {}
+        def accept_if_valid():
+            form_values = self._read_account_dialog_values()
+            if not form_values:
+                return
+            values['account'] = form_values
+            dialog.accept()
+
+        btn_ok.clicked.connect(accept_if_valid)
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        saved_creds = self.cloud_manager.get_last_used_credentials()
+        if saved_creds:
+            self.secret_id_input.setText(saved_creds.get('secret_id', ''))
+            self.secret_key_input.setText(saved_creds.get('secret_key', ''))
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        return values.get('account')
+
+    def _ask_current_data_save_mode(self):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("创建新数据")
+        box.setText("创建新空白数据前，当前这份数据要怎么处理？")
+        local_btn = box.addButton("只保存本地", QMessageBox.AcceptRole)
+        upload_btn = box.addButton("保存本地并上传", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(local_btn)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == upload_btn:
+            return "upload"
+        if clicked == local_btn:
+            return "local"
+        if clicked == cancel_btn:
+            return None
+        return None
+
+    def _upload_account_snapshot(self, account, data):
+        local_backup_ok, local_backup_result = self.cloud_manager.save_local_backup_before_upload(account['id'])
+        if not local_backup_ok:
+            return False, f"本地上传前备份失败：{local_backup_result}"
+
+        uploader = TencentCOSUploader(
+            account['secret_id'],
+            account['secret_key'],
+            account['bucket'],
+            account['region']
+        )
+
+        cloud_ok, cloud_result = uploader.download_json(account['folder'])
+        if cloud_ok and cloud_result:
+            backup_ok, backup_result = self.cloud_manager.save_cloud_backup_before_upload(account['id'], cloud_result)
+            if not backup_ok:
+                return False, f"云端旧数据备份失败：{backup_result}"
+        elif not cloud_ok and "云端没有数据" not in str(cloud_result) and "浜戠娌℃湁鏁版嵁" not in str(cloud_result):
+            return False, f"云端旧数据读取失败：{cloud_result}"
+
+        success, result = uploader.upload_json(data, account['folder'])
+        if not success:
+            return False, result
+        self.cloud_manager.update_last_upload_time(account['id'])
+        return True, result
+
+    def _create_blank_profile_for_account(self, account):
+        import shutil
+
+        backup_path = account.get('local_backup_path', os.path.join(self.cloud_manager._get_base_dir(), account['folder']))
+        profile_dir = os.path.join(backup_path, "local_current")
+        os.makedirs(profile_dir, exist_ok=True)
+        profile_file = os.path.join(profile_dir, "backup.db")
+        temp_file = os.path.join(profile_dir, "blank_new.db")
+
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+        import contextlib
+        import io
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            temp_db = SafeDatabaseManager(temp_file)
+        try:
+            temp_db.conn.commit()
+        finally:
+            try:
+                temp_db.conn.close()
+            except Exception:
+                pass
+
+        shutil.copy2(temp_file, profile_file)
+        try:
+            os.remove(temp_file)
+        except Exception:
+            pass
+        return profile_file
+
+    def create_new_blank_data(self):
+        active_account = self.cloud_manager.get_active_data_account()
+        if not active_account and self.cloud_manager.get_current_account():
+            active_account = self._ensure_active_account_for_local_save()
+            if not active_account:
+                return
+
+        save_mode = self._ask_current_data_save_mode()
+        if not save_mode:
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(10)
+        try:
+            if active_account:
+                self.lbl_sync_status.setText("正在保存当前数据到本地...")
+                save_ok, save_result = self.cloud_manager.save_local_profile(active_account['id'])
+                if not save_ok:
+                    self._show_message_box(QMessageBox.Critical, "创建已取消", f"当前数据保存本地失败：{save_result}")
+                    return
+
+                if save_mode == "upload":
+                    self.progress_bar.setValue(25)
+                    self.lbl_sync_status.setText("正在上传当前数据...")
+                    current_data = self.cloud_manager.export_data_to_json()
+                    if not current_data:
+                        self._show_message_box(QMessageBox.Critical, "创建已取消", "当前数据导出失败，未创建新数据。")
+                        return
+                    upload_ok, upload_result = self._upload_account_snapshot(active_account, current_data)
+                    if not upload_ok:
+                        self._show_message_box(QMessageBox.Critical, "创建已取消", f"当前数据上传失败：{upload_result}")
+                        return
+
+            values = self._prompt_new_account_config()
+            if not values:
+                return
+
+            self.progress_bar.setValue(45)
+            name, secret_id, secret_key, bucket, region, folder = values
+            account = self.cloud_manager.add_account(name, secret_id, secret_key, bucket, region, folder)
+            if not account:
+                self._show_message_box(QMessageBox.Critical, "错误", "新账号创建失败")
+                return
+
+            self.lbl_sync_status.setText("正在创建空白本地数据...")
+            profile_file = self._create_blank_profile_for_account(account)
+
+            self.progress_bar.setValue(65)
+            if self.parent_window and hasattr(self.parent_window, 'replace_database_from_local_profile'):
+                ok, result = self.parent_window.replace_database_from_local_profile(profile_file, account['id'])
+                if not ok:
+                    self._show_message_box(QMessageBox.Critical, "错误", f"切换到新空白数据失败：{result}")
+                    return
+                self.db = self.parent_window.db
+                self.cloud_manager.db = self.parent_window.db
+            else:
+                self._show_message_box(QMessageBox.Critical, "错误", "主窗口不支持切换到新空白数据")
+                return
+
+            self.cloud_manager.switch_account(account['id'])
+            self.cloud_manager.set_active_data_account(account['id'])
+
+            self.progress_bar.setValue(80)
+            self.lbl_sync_status.setText("正在上传空白数据到云端...")
+            blank_data = self.cloud_manager.export_data_to_json()
+            if not blank_data:
+                self._show_message_box(QMessageBox.Warning, "部分完成", "已创建本地空白数据，但空白数据导出失败，请稍后手动上传。")
+                return
+            blank_upload_ok, blank_upload_result = self._upload_account_snapshot(account, blank_data)
+            if not blank_upload_ok:
+                self._show_message_box(QMessageBox.Warning, "部分完成", f"已创建本地空白数据，但上传空白云端失败：{blank_upload_result}\n\n可稍后手动点击上传。")
+                return
+
+            self.progress_bar.setValue(100)
+            self.load_accounts_to_list()
+            self.update_sync_info()
+            self.update_parent_data()
+            if self.parent_window and hasattr(self.parent_window, 'update_cloud_account_label'):
+                self.parent_window.update_cloud_account_label()
+            self.lbl_sync_status.setText(f"✅ 已创建新空白数据：{account.get('name', '未知')}")
+            self._show_message_box(QMessageBox.Information, "成功", f"已创建新空白数据并上传云端。\n\n账号：{account.get('name', '未知')}")
+        except Exception as e:
+            self._show_message_box(QMessageBox.Critical, "错误", f"创建新数据失败：{e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.progress_bar.setVisible(False)
+            self.load_accounts_to_list()
+
     def delete_selected_account(self):
         """删除选中的账号"""
         current_item = self.account_list.currentItem()
@@ -1211,12 +1802,173 @@ class CloudSyncDialog(QDialog):
             self.load_accounts_to_list()
             self._show_message_box(QMessageBox.Information, "成功", "账号已删除")
 
+    def _ensure_active_account_for_local_save(self):
+        active_account = self.cloud_manager.get_active_data_account()
+        if active_account:
+            return active_account
+
+        current = self.cloud_manager.get_current_account()
+        if not current:
+            self._show_message_box(QMessageBox.Warning, "提示", "请先选择当前本地数据所属账号")
+            return None
+
+        reply = self._show_question_box(
+            "确认当前应用账号",
+            f"当前主表格数据还没有绑定本地账号。\n\n"
+            f"是否确认当前主表格数据属于账号：{current.get('name', '未知')}？"
+        )
+        if reply != QMessageBox.Yes:
+            return None
+
+        if self.cloud_manager.set_active_data_account(current['id']):
+            if self.parent_window and hasattr(self.parent_window, 'update_cloud_account_label'):
+                self.parent_window.update_cloud_account_label()
+            return current
+        self._show_message_box(QMessageBox.Critical, "错误", "绑定当前应用账号失败")
+        return None
+
+    def save_current_local_profile(self):
+        """保存当前主表格数据到当前应用账号的本地档案。"""
+        active_account = self._ensure_active_account_for_local_save()
+        if not active_account:
+            return
+
+        ok, result = self.cloud_manager.save_local_profile(active_account['id'])
+        if ok:
+            self.lbl_sync_status.setText(f"✅ 已保存到本地账号：{active_account.get('name', '未知')}")
+            self._show_message_box(QMessageBox.Information, "成功", f"当前数据已保存到本地账号。\n\n账号：{active_account.get('name', '未知')}\n路径：{result}")
+        else:
+            self._show_message_box(QMessageBox.Critical, "错误", f"保存本地账号失败：{result}")
+
+    def _resolve_local_profile_target(self):
+        """自动推断要应用的本地账号。"""
+        current_item = self.account_list.currentItem()
+        if current_item:
+            target_id = current_item.data(Qt.UserRole)
+            target_account = self.cloud_manager._find_account_by_id(target_id)
+            if not target_account:
+                return None, None, "账号不存在"
+            return target_account, target_id, None
+
+        available_profiles = self.cloud_manager.get_accounts_with_local_profiles()
+        if not available_profiles:
+            return None, None, "没有找到任何本地账号数据。"
+
+        active_account = self.cloud_manager.get_active_data_account()
+        active_id = active_account.get('id') if active_account else None
+        candidates = [
+            (acc, path)
+            for acc, path in available_profiles
+            if acc.get('id') != active_id
+        ]
+        if not candidates:
+            return None, None, "没有其他可切换的本地账号数据。"
+
+        if len(candidates) == 1:
+            target_account, _ = candidates[0]
+            return target_account, target_account.get('id'), None
+
+        current = self.cloud_manager.get_current_account()
+        if current:
+            for acc, _ in candidates:
+                if acc.get('id') == current.get('id'):
+                    return acc, acc.get('id'), None
+
+        target_account, _ = candidates[0]
+        return target_account, target_account.get('id'), None
+
+    def apply_selected_local_profile(self):
+        """应用选中账号的本地档案到主表格。"""
+        target_account, target_id, error = self._resolve_local_profile_target()
+        if error:
+            self._show_message_box(QMessageBox.Warning, "提示", error)
+            return
+
+        profile_ok, profile_path = self.cloud_manager.load_local_profile(target_id)
+        if not profile_ok:
+            self._show_message_box(QMessageBox.Warning, "提示", f"账号「{target_account.get('name', '未知')}」暂无本地数据。\n请先保存该账号本地数据，或从云端下载一次。")
+            return
+
+        normalize_ok, normalized_path = self.cloud_manager.ensure_local_profile_normalized(target_id, profile_path)
+        if not normalize_ok:
+            self._show_message_box(QMessageBox.Critical, "错误", f"本地账号数据迁移失败：{normalized_path}")
+            return
+        profile_path = normalized_path
+
+        active_account = self.cloud_manager.get_active_data_account()
+        if not active_account:
+            self._show_message_box(
+                QMessageBox.Warning,
+                "请先保存当前数据",
+                "当前主表格数据还没有绑定本地账号。\n\n"
+                "为避免把当前数据误保存到要切换的目标账号，请先选择当前数据所属账号并点击「保存到本地账号」，再应用其他本地账号。"
+            )
+            return
+
+        if active_account.get('id') == target_id:
+            self._show_message_box(QMessageBox.Information, "提示", f"当前主表格已经是账号「{target_account.get('name', '未知')}」的数据。")
+            return
+
+        save_ok, save_result = self.cloud_manager.save_local_profile(active_account['id'])
+        if not save_ok:
+            self._show_message_box(QMessageBox.Critical, "切换已取消", f"当前应用账号数据保存失败，已取消切换：\n{save_result}")
+            return
+
+        reply = self._show_question_box(
+            "确认应用本地账号",
+            f"将应用账号「{target_account.get('name', '未知')}」的本地数据到主表格。\n\n"
+            f"当前账号「{active_account.get('name', '未知')}」已先保存到本地。\n"
+            f"是否继续？"
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if self.parent_window and hasattr(self.parent_window, 'replace_database_from_local_profile'):
+            ok, result = self.parent_window.replace_database_from_local_profile(profile_path, target_id)
+        else:
+            ok, result = False, "主窗口不支持安全切换本地账号"
+
+        if ok:
+            self.db = self.parent_window.db
+            self.cloud_manager.db = self.parent_window.db
+            self.cloud_manager.set_active_data_account(target_id)
+            self.cloud_manager.switch_account(target_id)
+            self.load_accounts_to_list()
+            self.lbl_sync_status.setText(f"✅ 已应用本地账号：{target_account.get('name', '未知')}")
+            self._show_message_box(QMessageBox.Information, "成功", f"已应用本地账号：{target_account.get('name', '未知')}")
+        else:
+            self._show_message_box(QMessageBox.Critical, "错误", f"应用本地账号失败：{result}")
+
     def upload_current_data(self):
         """上传当前账号数据"""
         current = self.cloud_manager.get_current_account()
         if not current:
             self._show_message_box(QMessageBox.Warning, "提示", "请先添加并切换到要上传的账号")
             return
+
+        if self.parent_window and hasattr(self.parent_window, 'ensure_upload_account_allowed'):
+            if not self.parent_window.ensure_upload_account_allowed(current):
+                return
+        else:
+            active_account = self.cloud_manager.get_active_data_account()
+            if active_account and active_account.get('id') != current.get('id'):
+                self._show_message_box(
+                    QMessageBox.Warning,
+                    "账号不一致，已取消上传",
+                    f"当前表格数据属于账号：{active_account.get('name', '未知')}\n"
+                    f"你当前选择的云同步账号：{current.get('name', '未知')}\n\n"
+                    f"为避免覆盖错误存档，本次上传已取消。"
+                )
+                return
+            if not active_account:
+                reply = self._show_question_box(
+                    "确认数据归属账号",
+                    f"当前本地表格数据还没有绑定云同步账号。\n\n"
+                    f"是否确认这份本地数据属于账号：{current.get('name', '未知')}？"
+                )
+                if reply != QMessageBox.Yes:
+                    return
+                self.cloud_manager.set_active_data_account(current['id'])
 
         reply = self._show_question_box(
             "确认上传",
@@ -1227,25 +1979,20 @@ class CloudSyncDialog(QDialog):
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(20)
-        self.lbl_sync_status.setText("正在导出本地数据...")
+        self.lbl_sync_status.setText("正在备份本地数据...")
 
         try:
+            local_backup_ok, local_backup_result = self.cloud_manager.save_local_backup_before_upload(current['id'])
+            if not local_backup_ok:
+                self._show_message_box(QMessageBox.Critical, "上传已取消", f"本地上传前备份失败，已取消上传：{local_backup_result}")
+                return
+
+            self.progress_bar.setValue(30)
+            self.lbl_sync_status.setText("正在导出本地数据...")
             data = self.cloud_manager.export_data_to_json()
             if not data:
                 self._show_message_box(QMessageBox.Critical, "错误", "数据导出失败")
                 return
-
-            self.progress_bar.setValue(40)
-            self.lbl_sync_status.setText("正在保存本地备份...")
-
-            local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
-            if local_ok:
-                self.lbl_sync_status.setText(f"本地备份已保存: {local_result}")
-            else:
-                self.lbl_sync_status.setText(f"本地备份保存失败: {local_result}")
-
-            self.progress_bar.setValue(60)
-            self.lbl_sync_status.setText("正在上传到云端...")
 
             uploader = TencentCOSUploader(
                 current['secret_id'],
@@ -1254,6 +2001,23 @@ class CloudSyncDialog(QDialog):
                 current['region']
             )
 
+            self.progress_bar.setValue(40)
+            self.lbl_sync_status.setText("正在备份云端旧数据...")
+            cloud_ok, cloud_result = uploader.download_json(current['folder'])
+            cloud_backup_path = "云端无旧数据"
+            if cloud_ok and cloud_result:
+                backup_ok, backup_result = self.cloud_manager.save_cloud_backup_before_upload(current['id'], cloud_result)
+                if not backup_ok:
+                    self._show_message_box(QMessageBox.Critical, "上传已取消", f"云端旧数据备份失败，已取消上传：{backup_result}")
+                    return
+                cloud_backup_path = backup_result
+            elif not cloud_ok and "云端没有数据" not in str(cloud_result):
+                self._show_message_box(QMessageBox.Critical, "上传已取消", f"云端旧数据读取失败，已取消上传：{cloud_result}")
+                return
+
+            self.progress_bar.setValue(60)
+            self.lbl_sync_status.setText("正在上传到云端...")
+
             success, result = uploader.upload_json(data, current['folder'])
             if success:
                 data_size = len(json.dumps(data, ensure_ascii=False))
@@ -1261,7 +2025,7 @@ class CloudSyncDialog(QDialog):
                 self.cloud_manager.update_last_upload_time(current['id'])
                 self.progress_bar.setValue(100)
                 self.lbl_sync_status.setText(f"✅ 上传成功！({size_mb:.2f} MB)")
-                self._show_message_box(QMessageBox.Information, "成功", f"数据已上传到云端并保存本地备份！\n\n账号：{current['name']}\n文件大小：{size_mb:.2f} MB\n云端路径：{result}\n本地备份：{local_result if local_ok else '保存失败'}")
+                self._show_message_box(QMessageBox.Information, "成功", f"数据已上传到云端，上传前本地数据已备份（最多保留5份）。\n\n账号：{current['name']}\n文件大小：{size_mb:.2f} MB\n云端路径：{result}\n本地备份：{local_backup_result}\n云端旧备份：{cloud_backup_path}")
                 self.update_sync_info()
             else:
                 self._show_message_box(QMessageBox.Critical, "错误", f"上传失败：{result}")
@@ -1322,6 +2086,13 @@ class CloudSyncDialog(QDialog):
                 self.progress_bar.setVisible(False)
                 return
 
+            self.lbl_sync_status.setText("正在备份本地旧数据...")
+            backup_ok, backup_result = self.cloud_manager.save_local_backup_before_download(current['id'])
+            if not backup_ok:
+                self.progress_bar.setVisible(False)
+                self._show_message_box(QMessageBox.Critical, "下载已取消", f"本地旧数据备份失败，已取消下载：{backup_result}")
+                return
+
             self.progress_bar.setValue(30)
             self.lbl_sync_status.setText("正在下载...")
 
@@ -1332,7 +2103,8 @@ class CloudSyncDialog(QDialog):
 
             if self.cloud_manager.import_data_from_json(result):
                 self.cloud_manager.update_last_download_time(current['id'])
-                local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
+                self.cloud_manager.set_active_data_account(current['id'])
+                self.cloud_manager.save_local_profile(current['id'])
                 self.progress_bar.setValue(100)
                 self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB)")
                 if self.parent_window and hasattr(self.parent_window, 'show_toast'):
@@ -1341,8 +2113,119 @@ class CloudSyncDialog(QDialog):
                     self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB) - 数据已导入")
                 self.update_sync_info()
                 self.update_parent_data()
+                if self.parent_window and hasattr(self.parent_window, 'update_cloud_account_label'):
+                    self.parent_window.update_cloud_account_label()
             else:
                 self._show_message_box(QMessageBox.Critical, "错误", "数据导入失败")
+
+        except Exception as e:
+            self._show_message_box(QMessageBox.Critical, "错误", f"下载异常：{str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.progress_bar.setVisible(False)
+            self.load_accounts_to_list()
+
+    def download_current_data(self):
+        """下载当前云账号数据，覆盖前按当前应用账号保存本地档案。"""
+        current = self.cloud_manager.get_current_account()
+        if not current:
+            self._show_message_box(QMessageBox.Warning, "提示", "请先添加并切换到要下载的账号")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(20)
+        self.lbl_sync_status.setText("正在检查云端数据...")
+
+        try:
+            uploader = TencentCOSUploader(
+                current['secret_id'],
+                current['secret_key'],
+                current['bucket'],
+                current['region']
+            )
+
+            success, result = uploader.download_json(current['folder'])
+            if not success:
+                self.progress_bar.setVisible(False)
+                if "云端没有数据" in str(result) or "浜戠娌℃湁鏁版嵁" in str(result):
+                    self.lbl_sync_status.setText("云端没有数据，请先上传")
+                    self._show_message_box(QMessageBox.Information, "提示", "云端没有数据，请先上传。")
+                else:
+                    self._show_message_box(QMessageBox.Critical, "错误", f"下载失败：{result}")
+                return
+
+            if not result or len(result) == 0:
+                self.progress_bar.setVisible(False)
+                self.lbl_sync_status.setText("云端没有数据，请先上传")
+                self._show_message_box(QMessageBox.Information, "提示", "云端没有数据，请先上传。")
+                return
+
+            active_account = self.cloud_manager.get_active_data_account()
+            if not active_account:
+                reply = self._show_question_box(
+                    "确认当前数据归属",
+                    f"当前主表格数据还没有绑定本地账号。\n\n"
+                    f"是否确认当前主表格数据属于账号：{current.get('name', '未知')}？\n"
+                    f"确认后会先保存本地档案，再下载云端数据覆盖。"
+                )
+                if reply != QMessageBox.Yes:
+                    self.progress_bar.setVisible(False)
+                    return
+                if not self.cloud_manager.set_active_data_account(current['id']):
+                    self.progress_bar.setVisible(False)
+                    self._show_message_box(QMessageBox.Critical, "错误", "绑定当前数据归属账号失败")
+                    return
+                active_account = current
+
+            reply = self._show_question_box(
+                "确认下载",
+                f"下载将覆盖当前主表格数据！\n\n"
+                f"当前主表格属于：{active_account.get('name', '未知')}\n"
+                f"将从云端下载账号：{current.get('name', '未知')}\n\n"
+                f"覆盖前会先保存并备份当前主表格数据。是否继续？"
+            )
+            if reply != QMessageBox.Yes:
+                self.progress_bar.setVisible(False)
+                return
+
+            self.lbl_sync_status.setText("正在保存当前账号本地档案...")
+            save_ok, save_result = self.cloud_manager.save_local_profile(active_account['id'])
+            if not save_ok:
+                self.progress_bar.setVisible(False)
+                self._show_message_box(QMessageBox.Critical, "下载已取消", f"当前账号本地档案保存失败，已取消下载：{save_result}")
+                return
+
+            self.lbl_sync_status.setText("正在备份当前账号旧数据...")
+            backup_ok, backup_result = self.cloud_manager.save_local_backup_before_download(active_account['id'])
+            if not backup_ok:
+                self.progress_bar.setVisible(False)
+                self._show_message_box(QMessageBox.Critical, "下载已取消", f"当前账号旧数据备份失败，已取消下载：{backup_result}")
+                return
+
+            self.progress_bar.setValue(30)
+            self.lbl_sync_status.setText("正在导入云端数据...")
+
+            data_size = len(json.dumps(result, ensure_ascii=False))
+            size_mb = data_size / (1024 * 1024)
+
+            self.progress_bar.setValue(50)
+            if self.cloud_manager.import_data_from_json(result):
+                self.cloud_manager.update_last_download_time(current['id'])
+                self.cloud_manager.set_active_data_account(current['id'])
+                self.cloud_manager.switch_account(current['id'])
+                self.cloud_manager.save_local_profile(current['id'])
+                self.progress_bar.setValue(100)
+                self.lbl_sync_status.setText(f"✅ 下载成功！({size_mb:.2f} MB)")
+                if self.parent_window and hasattr(self.parent_window, 'show_toast'):
+                    self.parent_window.show_toast(f"✅ 下载成功！({size_mb:.2f} MB)")
+                self.update_sync_info()
+                self.update_parent_data()
+                if self.parent_window and hasattr(self.parent_window, 'update_cloud_account_label'):
+                    self.parent_window.update_cloud_account_label()
+            else:
+                error = getattr(self.cloud_manager, 'last_import_error', '') or "数据导入失败"
+                self._show_message_box(QMessageBox.Critical, "错误", f"数据导入失败：{error}")
 
         except Exception as e:
             self._show_message_box(QMessageBox.Critical, "错误", f"下载异常：{str(e)}")

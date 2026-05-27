@@ -9,12 +9,15 @@ from PyQt5.QtCore import Qt
 
 class InputDataDialog(QDialog):
     """手动录入数据对话框"""
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_data=None):
         super().__init__(parent)
         self.setWindowTitle("📝 录入数据")
         self.resize(400, 450)
         self.calculated_values = {}
+        self.initial_data = initial_data or {}
         self.init_ui()
+        if self.initial_data:
+            self.apply_initial_data()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -116,6 +119,31 @@ class InputDataDialog(QDialog):
         btn_layout.addWidget(btn_confirm)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
+
+    def apply_initial_data(self):
+        field_map = {
+            "actual_orders": "实发订单",
+            "actual_amount": "实发金额",
+            "gross_profit": "毛利润",
+            "refund_amount": "退款金额",
+            "refund_orders": "退款订单",
+            "promotion_fee": "推广费",
+            "deduction": "扣款",
+            "other_service": "其他服务",
+            "other": "其他",
+        }
+        for key, field_name in field_map.items():
+            if key not in self.initial_data:
+                continue
+            value = self.initial_data.get(key)
+            if value is None or value == "":
+                continue
+            if isinstance(value, float):
+                text = f"{value:.2f}".rstrip("0").rstrip(".")
+            else:
+                text = str(value)
+            self.input_fields[field_name].setText(text)
+        self.calculate()
 
     def calculate(self):
         try:

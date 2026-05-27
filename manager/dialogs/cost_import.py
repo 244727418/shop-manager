@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -17,6 +18,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -142,24 +144,26 @@ def read_cost_row_colors(file_path, name_col_idx=None, spec_col_idx=None):
 class CostImportDialog(QDialog):
     """成本表导入配置对话框。"""
 
-    def __init__(self, file_path, parent=None):
+    def __init__(self, file_path, parent=None, cost_mode="total"):
         super().__init__(parent)
         self.file_path = file_path
         self.column_names = []
+        self.cost_mode = "detail" if str(cost_mode).lower() == "detail" else "total"
 
         self.setWindowTitle("导入成本表 - 选择列")
-        self.resize(540, 455)
+        self.resize(620, 650 if self.cost_mode == "detail" else 595)
         self.init_ui()
         self.load_columns()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        self._debug_cid_label = QLabel("【板块:成本导入对话框\n文件:cost_import.py】商品类型/商品名称/规格编码/数量/成本价/导入执行")
+        self._debug_cid_label = QLabel("【板块:成本导入对话框\n文件:cost_import.py】商品类型/商品名称/规格编码/数量/成本价/重量/导入执行")
         self._debug_cid_label.setStyleSheet("background-color: #DDA0DD; color: #000; font-weight: bold; padding: 1px;")
         self._debug_cid_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._debug_cid_label)
 
-        lbl_info = QLabel(f"文件已加载：{os.path.basename(self.file_path)}\n请选择对应的列。商品类型、商品名称和数量可不导入。")
+        mode_text = "详细成本模式：请选择产品成本和重量列。" if self.cost_mode == "detail" else "总成本模式：请选择总成本列。"
+        lbl_info = QLabel(f"文件已加载：{os.path.basename(self.file_path)}\n{mode_text}\n商品类型、商品名称和数量可不导入。")
         lbl_info.setStyleSheet("font-weight: bold; padding: 10px;")
         layout.addWidget(lbl_info)
 
@@ -192,11 +196,42 @@ class CostImportDialog(QDialog):
         layout.addLayout(layout_quantity)
 
         layout_price = QHBoxLayout()
-        layout_price.addWidget(QLabel("【成本价】"))
+        self.lbl_price = QLabel("【产品成本】" if self.cost_mode == "detail" else "【总成本】")
+        layout_price.addWidget(self.lbl_price)
         self.combo_price = QComboBox()
         self.combo_price.setMinimumWidth(320)
         layout_price.addWidget(self.combo_price)
         layout.addLayout(layout_price)
+
+        layout_weight = QHBoxLayout()
+        self.lbl_weight = QLabel("【单个重量kg】")
+        self.combo_weight = QComboBox()
+        self.combo_weight.setMinimumWidth(320)
+        layout_weight.addWidget(self.lbl_weight)
+        layout_weight.addWidget(self.combo_weight)
+        layout.addLayout(layout_weight)
+        self.lbl_weight.setVisible(self.cost_mode == "detail")
+        self.combo_weight.setVisible(self.cost_mode == "detail")
+
+        self.chk_unit_by_quantity = QCheckBox("导入的成本/重量是整组数量，按数量折算为单个成本和单个重量")
+        self.chk_unit_by_quantity.setChecked(True)
+        self.chk_unit_by_quantity.setVisible(self.cost_mode == "detail")
+        self.chk_unit_by_quantity.setStyleSheet("color: #555; padding: 4px;")
+        layout.addWidget(self.chk_unit_by_quantity)
+
+        self.chk_import_attribute = QCheckBox("导入产品属性")
+        self.chk_import_attribute.toggled.connect(self._toggle_attribute_mapping)
+        layout.addWidget(self.chk_import_attribute)
+
+        self.attribute_widget = QWidget()
+        attribute_layout = QVBoxLayout(self.attribute_widget)
+        attribute_layout.setContentsMargins(18, 0, 0, 0)
+        self.combo_attr_size = self._make_attribute_combo_row(attribute_layout, "尺寸")
+        self.combo_attr_pages = self._make_attribute_combo_row(attribute_layout, "张数")
+        self.combo_attr_cover = self._make_attribute_combo_row(attribute_layout, "封面制作")
+        self.combo_attr_print = self._make_attribute_combo_row(attribute_layout, "印刷工艺")
+        layout.addWidget(self.attribute_widget)
+        self._toggle_attribute_mapping(False)
 
         layout.addStretch()
         btn_layout = QHBoxLayout()
@@ -209,6 +244,18 @@ class CostImportDialog(QDialog):
         btn_layout.addWidget(self.btn_confirm)
         btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
+
+    def _make_attribute_combo_row(self, parent_layout, label):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"【{label}】"))
+        combo = QComboBox()
+        combo.setMinimumWidth(320)
+        row.addWidget(combo)
+        parent_layout.addLayout(row)
+        return combo
+
+    def _toggle_attribute_mapping(self, checked):
+        self.attribute_widget.setVisible(bool(checked))
 
     def _read_columns(self):
         return read_cost_file(self.file_path, nrows=0, header=0).columns.tolist()
@@ -233,9 +280,16 @@ class CostImportDialog(QDialog):
             self.combo_quantity.clear()
             self.combo_price.clear()
             self.combo_category.clear()
+            self.combo_weight.clear()
+            for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_cover, self.combo_attr_print):
+                combo.clear()
+                combo.addItem("（不导入）", None)
             self.combo_name.addItem("（不导入）", None)
             self.combo_quantity.addItem("（不导入）", None)
             self.combo_category.addItem("（不导入）", None)
+            if self.cost_mode == "detail":
+                self.combo_price.addItem("（请选择产品成本列）", None)
+                self.combo_weight.addItem("（请选择重量列）", None)
 
             for idx, name in enumerate(self.column_names):
                 name_str = str(name).strip()
@@ -252,6 +306,9 @@ class CostImportDialog(QDialog):
                 self.combo_quantity.addItem(display_text, idx)
                 self.combo_price.addItem(display_text, idx)
                 self.combo_category.addItem(display_text, idx)
+                self.combo_weight.addItem(display_text, idx)
+                for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_cover, self.combo_attr_print):
+                    combo.addItem(display_text, idx)
 
             if self.combo_spec.count() == 0:
                 raise Exception("所有列名均为空")
@@ -283,15 +340,35 @@ class CostImportDialog(QDialog):
         category_keywords = ["商品类型", "产品类型", "类型", "分类", "类别", "品类", "类目", "category", "type"]
         spec_keywords = ["规格", "编码", "SKU", "Code", "ID", "型号", "商品编号", "SPU", "No"]
         quantity_keywords = ["数量", "件数", "个数", "库存数量", "qty", "quantity", "count", "num"]
-        preferred_price_keywords = ["总成本"]
-        price_keywords = ["成本", "价格", "Price", "Cost", "单价", "进价", "Money"]
-        name_found = category_found = spec_found = quantity_found = price_found = False
+        weight_keywords = ["重量", "单重", "单个重量", "净重", "weight"]
+        attribute_keywords = {
+            "size": ["\u5c3a\u5bf8", "\u89c4\u683c\u5c3a\u5bf8", "\u5927\u5c0f", "\u5c3a\u7801", "size"],
+            "pages": ["\u5f20\u6570", "\u9875\u6570", "\u6570\u91cf\u5f20", "pages", "sheets"],
+            "cover": ["\u5c01\u9762\u5236\u4f5c"],
+            "print": ["\u5370\u5237\u5de5\u827a", "\u5370\u5237", "\u5de5\u827a", "printing", "print"],
+        }
+        preferred_price_keywords = ["产品成本", "单品成本", "单个成本", "产品单价"] if self.cost_mode == "detail" else ["总成本"]
+        price_keywords = ["产品成本", "单品成本", "单个成本", "产品单价", "进价", "成本", "价格", "Price", "Cost", "单价", "Money"] if self.cost_mode == "detail" else ["成本", "价格", "Price", "Cost", "单价", "进价", "Money"]
+        name_found = category_found = spec_found = quantity_found = price_found = weight_found = False
+        attr_found = {"size": False, "pages": False, "cover": False, "print": False}
 
         for idx, name in enumerate(self.column_names):
             name_str = str(name).strip()
             if not name_str or name_str.lower() == "nan":
                 continue
             name_lower = name_str.lower()
+            for key, combo in (
+                ("size", self.combo_attr_size),
+                ("pages", self.combo_attr_pages),
+                ("cover", self.combo_attr_cover),
+                ("print", self.combo_attr_print),
+            ):
+                if not attr_found[key] and any(k.lower() in name_lower for k in attribute_keywords[key]):
+                    i = combo.findData(idx)
+                    if i >= 0:
+                        combo.setCurrentIndex(i)
+                        self.chk_import_attribute.setChecked(True)
+                    attr_found[key] = True
             if not name_found and any(k.lower() in name_lower for k in name_keywords):
                 i = self.combo_name.findData(idx)
                 if i >= 0:
@@ -317,7 +394,16 @@ class CostImportDialog(QDialog):
                 if i >= 0:
                     self.combo_price.setCurrentIndex(i)
                 price_found = True
-            if name_found and category_found and spec_found and quantity_found and price_found:
+            if self.cost_mode == "detail" and not weight_found and any(k.lower() in name_lower for k in weight_keywords):
+                i = self.combo_weight.findData(idx)
+                if i >= 0:
+                    self.combo_weight.setCurrentIndex(i)
+                weight_found = True
+            if (
+                name_found and category_found and spec_found and quantity_found and price_found
+                and (self.cost_mode != "detail" or weight_found)
+                and all(attr_found.values())
+            ):
                 break
 
         if not price_found:
@@ -326,6 +412,8 @@ class CostImportDialog(QDialog):
                 if not name_str or name_str.lower() == "nan":
                     continue
                 name_lower = name_str.lower()
+                if self.cost_mode == "detail" and "总成本" in name_str:
+                    continue
                 if any(k.lower() in name_lower for k in price_keywords):
                     i = self.combo_price.findData(idx)
                     if i >= 0:
@@ -338,12 +426,28 @@ class CostImportDialog(QDialog):
         name_idx = self.combo_name.currentData()
         quantity_idx = self.combo_quantity.currentData()
         category_idx = self.combo_category.currentData()
+        weight_idx = self.combo_weight.currentData() if self.cost_mode == "detail" else None
+        attr_indices = None
+        if self.chk_import_attribute.isChecked():
+            attr_indices = {
+                "size": self.combo_attr_size.currentData(),
+                "pages": self.combo_attr_pages.currentData(),
+                "cover": self.combo_attr_cover.currentData(),
+                "print": self.combo_attr_print.currentData(),
+            }
         if spec_idx is None or price_idx is None:
-            return None, None, None, None, None
+            return None, None, None, None, None, None, None
+        if self.cost_mode == "detail" and weight_idx is None:
+            return int(spec_idx), int(price_idx), (int(name_idx) if name_idx is not None else None), (int(quantity_idx) if quantity_idx is not None else None), (int(category_idx) if category_idx is not None else None), None, attr_indices
         return (
             int(spec_idx),
             int(price_idx),
             (int(name_idx) if name_idx is not None else None),
             (int(quantity_idx) if quantity_idx is not None else None),
             (int(category_idx) if category_idx is not None else None),
+            (int(weight_idx) if weight_idx is not None else None),
+            attr_indices,
         )
+
+    def should_unit_by_quantity(self):
+        return self.cost_mode == "detail" and self.chk_unit_by_quantity.isChecked()

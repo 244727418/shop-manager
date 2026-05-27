@@ -9,6 +9,7 @@ import re
 import json
 import sqlite3
 import hashlib
+import math
 from datetime import datetime
 
 
@@ -20,6 +21,21 @@ class SafeDatabaseManager:
         "#D9EAD3", "#F4CCCC", "#D0E0E3", "#FCE5CD", "#D9D2E9",
         "#CFE2F3", "#EADCF8", "#D5E8D4", "#FFE599", "#D9EAF7",
     ]
+    DEFAULT_COST_SHIPPING_RULES = {
+        "ranges": [
+            {"min": 0, "max": 0.5, "fee": 1.7},
+            {"min": 0.5, "max": 1, "fee": 1.9},
+            {"min": 1, "max": 2, "fee": 2.9},
+            {"min": 2, "max": 3, "fee": 3.2},
+        ],
+        "over": {
+            "threshold": 3,
+            "base_fee": 2.5,
+            "deduct_weight": 1,
+            "step_weight": 1,
+            "step_fee": 1,
+        },
+    }
 
     def __init__(self, db_name="shop_manager.db"):
         try:
@@ -46,6 +62,12 @@ class SafeDatabaseManager:
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS records 
                                 (product_id INTEGER, year INTEGER, month INTEGER, day INTEGER, 
                                 records_json TEXT, PRIMARY KEY(product_id, year, month, day))''')
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS product_image_history
+                                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 product_id INTEGER NOT NULL,
+                                 image_data BLOB NOT NULL,
+                                 changed_at TEXT NOT NULL,
+                                 source TEXT)''')
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS settings 
                                 (key TEXT PRIMARY KEY, value TEXT)''')
 
@@ -60,6 +82,9 @@ class SafeDatabaseManager:
             if 'image_data' not in store_columns:
                 self.cursor.execute("ALTER TABLE stores ADD COLUMN image_data BLOB")
                 print("已添加image_data字段到stores表")
+            if 'sitewide_roi' not in store_columns:
+                self.cursor.execute("ALTER TABLE stores ADD COLUMN sitewide_roi REAL DEFAULT 0")
+                print("已添加sitewide_roi字段到stores表")
 
             self.cursor.execute("PRAGMA table_info(products)")
             columns = [col[1] for col in self.cursor.fetchall()]
@@ -122,6 +147,20 @@ class SafeDatabaseManager:
                     print("✅ 已添加is_marketing字段到products表")
                 except Exception as e:
                     print(f"添加is_marketing字段失败: {e}")
+
+            if 'is_natural_flow' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN is_natural_flow INTEGER DEFAULT 0")
+                    print("✅ 已添加is_natural_flow字段到products表")
+                except Exception as e:
+                    print(f"添加is_natural_flow字段失败: {e}")
+
+            if 'is_sitewide_managed' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN is_sitewide_managed INTEGER DEFAULT 0")
+                    print("✅ 已添加is_sitewide_managed字段到products表")
+                except Exception as e:
+                    print(f"添加is_sitewide_managed字段失败: {e}")
 
             if 'profit_status' not in columns:
                 try:
@@ -229,12 +268,72 @@ class SafeDatabaseManager:
                     print("✅ 已添加category_color字段到cost_library表")
                 except Exception as e:
                     print(f"添加category_color字段失败: {e}")
+            if 'product_attribute' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN product_attribute TEXT")
+                    print("已添加product_attribute字段到cost_library表")
+                except Exception as e:
+                    print(f"添加product_attribute字段失败: {e}")
+            if 'product_attribute_combo_disabled' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN product_attribute_combo_disabled INTEGER DEFAULT 0")
+                    print("已添加product_attribute_combo_disabled字段到cost_library表")
+                except Exception as e:
+                    print(f"添加product_attribute_combo_disabled字段失败: {e}")
             if 'manual_sort_order' not in cost_columns:
                 try:
                     self.cursor.execute("ALTER TABLE cost_library ADD COLUMN manual_sort_order INTEGER")
                     print("✅ 已添加manual_sort_order字段到cost_library表")
                 except Exception as e:
                     print(f"添加manual_sort_order字段失败: {e}")
+            if 'product_cost' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN product_cost REAL")
+                    print("已添加product_cost字段到cost_library表")
+                except Exception as e:
+                    print(f"添加product_cost字段失败: {e}")
+            if 'unit_weight' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN unit_weight REAL")
+                    print("已添加unit_weight字段到cost_library表")
+                except Exception as e:
+                    print(f"添加unit_weight字段失败: {e}")
+            if 'shipping_fee' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN shipping_fee REAL")
+                    print("已添加shipping_fee字段到cost_library表")
+                except Exception as e:
+                    print(f"添加shipping_fee字段失败: {e}")
+            if 'misc_fee' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN misc_fee REAL")
+                    print("已添加misc_fee字段到cost_library表")
+                except Exception as e:
+                    print(f"添加misc_fee字段失败: {e}")
+            if 'cost_calc_mode' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN cost_calc_mode TEXT")
+                    print("已添加cost_calc_mode字段到cost_library表")
+                except Exception as e:
+                    print(f"添加cost_calc_mode字段失败: {e}")
+
+            try:
+                # 老版本数据库可能没有 spec_code 唯一约束；先保留最新 rowid，再补唯一索引。
+                self.cursor.execute("""
+                    DELETE FROM cost_library
+                    WHERE spec_code IS NOT NULL
+                      AND rowid NOT IN (
+                          SELECT MAX(rowid)
+                          FROM cost_library
+                          WHERE spec_code IS NOT NULL
+                          GROUP BY spec_code
+                      )
+                """)
+                self.cursor.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_library_spec_code_unique ON cost_library(spec_code)"
+                )
+            except Exception as e:
+                print(f"修复cost_library规格编码唯一约束失败: {e}")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_categories (
                 label TEXT PRIMARY KEY,
@@ -549,6 +648,42 @@ class SafeDatabaseManager:
             )''')
             print("✅ 店铺临时图片表已创建")
 
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS promotion_daily_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                record_date TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                product_title TEXT,
+                bid_method TEXT,
+                cost REAL DEFAULT 0,
+                transaction_amount REAL DEFAULT 0,
+                roi REAL DEFAULT 0,
+                net_transaction_amount REAL DEFAULT 0,
+                net_roi REAL DEFAULT 0,
+                net_orders REAL DEFAULT 0,
+                cost_per_net_order REAL DEFAULT 0,
+                cpc REAL DEFAULT 0,
+                impressions REAL DEFAULT 0,
+                clicks REAL DEFAULT 0,
+                promotion_impressions REAL DEFAULT 0,
+                promotion_impression_share REAL DEFAULT 0,
+                ctr REAL DEFAULT 0,
+                click_conversion_rate REAL DEFAULT 0,
+                imported_at TEXT NOT NULL,
+                UNIQUE(store_id, record_date, product_id)
+            )''')
+            self.cursor.execute("PRAGMA table_info(promotion_daily_data)")
+            promo_columns = [col[1] for col in self.cursor.fetchall()]
+            if 'product_title' not in promo_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE promotion_daily_data ADD COLUMN product_title TEXT")
+                    print("✅ 已添加product_title字段到promotion_daily_data表")
+                except Exception as e:
+                    print(f"添加product_title字段失败: {e}")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_promotion_daily_store_date ON promotion_daily_data(store_id, record_date)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_promotion_daily_product ON promotion_daily_data(store_id, product_id, record_date)")
+            print("✅ 推广日报数据表已创建")
+
             # 每日任务表
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS daily_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -785,6 +920,132 @@ class SafeDatabaseManager:
             self.safe_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         except Exception as e:
             print(f"保存设置失败: {e}")
+
+    def get_cost_library_mode(self):
+        mode = str(self.get_setting("cost_library_mode", "total") or "total").strip().lower()
+        return "detail" if mode == "detail" else "total"
+
+    def set_cost_library_mode(self, mode):
+        self.set_setting("cost_library_mode", "detail" if str(mode).lower() == "detail" else "total")
+
+    def get_cost_misc_fee(self):
+        try:
+            return float(self.get_setting("cost_misc_fee", "0") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def set_cost_misc_fee(self, value):
+        try:
+            fee = float(value or 0)
+        except (TypeError, ValueError):
+            fee = 0.0
+        self.set_setting("cost_misc_fee", max(0.0, fee))
+
+    def get_cost_shipping_rules(self):
+        raw = self.get_setting("cost_shipping_rules_json", "")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and isinstance(data.get("ranges"), list) and isinstance(data.get("over"), dict):
+                    return data
+            except Exception:
+                pass
+        return json.loads(json.dumps(self.DEFAULT_COST_SHIPPING_RULES))
+
+    def set_cost_shipping_rules(self, rules):
+        self.set_setting("cost_shipping_rules_json", json.dumps(rules or self.DEFAULT_COST_SHIPPING_RULES, ensure_ascii=False))
+
+    def parse_cost_number(self, value, default=None):
+        if value is None:
+            return default
+        text = str(value).replace("¥", "").replace("$", "").replace(",", "").strip()
+        if not text or text.lower() == "nan":
+            return default
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return default
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return default
+
+    def parse_cost_quantity_factor(self, quantity):
+        number = self.parse_cost_number(quantity, None)
+        if number is None or number <= 0:
+            return 1.0
+        return number
+
+    def calculate_cost_shipping_fee(self, total_weight):
+        weight = float(total_weight or 0)
+        if weight <= 0:
+            return 0.0
+        rules = self.get_cost_shipping_rules()
+        for rule in sorted(rules.get("ranges", []), key=lambda item: float(item.get("max") or 0)):
+            max_weight = float(rule.get("max") or 0)
+            min_weight = float(rule.get("min") or 0)
+            if weight <= max_weight and weight > min_weight:
+                return round(float(rule.get("fee") or 0), 2)
+        over = rules.get("over", {})
+        threshold = float(over.get("threshold") or 0)
+        base_fee = float(over.get("base_fee") or 0)
+        deduct_weight = float(over.get("deduct_weight") or 0)
+        step_weight = float(over.get("step_weight") or 1) or 1
+        step_fee = float(over.get("step_fee") or 0)
+        if weight > threshold:
+            steps = math.ceil(max(weight - deduct_weight, 0) / step_weight)
+            return round(base_fee + steps * step_fee, 2)
+        return 0.0
+
+    def calculate_detailed_cost(self, product_cost, quantity, unit_weight):
+        qty = self.parse_cost_quantity_factor(quantity)
+        product_cost = float(product_cost or 0)
+        unit_weight = float(unit_weight or 0)
+        total_weight = unit_weight * qty
+        shipping_fee = self.calculate_cost_shipping_fee(total_weight)
+        misc_fee = self.get_cost_misc_fee()
+        total_cost = product_cost * qty + misc_fee + shipping_fee
+        return round(total_cost, 2), round(shipping_fee, 2), round(misc_fee, 2), round(total_weight, 4)
+
+    def recalculate_detailed_cost_library(self, record_history=False, source="manual"):
+        rows = self.safe_fetchall(
+            """SELECT spec_code, quantity, product_cost, unit_weight, cost_price
+               FROM cost_library
+               WHERE cost_calc_mode='detail'"""
+        )
+        changed = 0
+        import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            for spec_code, quantity, product_cost, unit_weight, old_cost in rows:
+                if product_cost is None or unit_weight is None:
+                    continue
+                new_cost, shipping_fee, misc_fee, _total_weight = self.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                old_value = float(old_cost) if old_cost is not None else None
+                if old_value is not None and abs(new_cost - old_value) <= 0.001:
+                    self.cursor.execute(
+                        "UPDATE cost_library SET shipping_fee=?, misc_fee=? WHERE spec_code=?",
+                        (shipping_fee, misc_fee, spec_code),
+                    )
+                    continue
+                self.cursor.execute(
+                    "UPDATE cost_library SET cost_price=?, shipping_fee=?, misc_fee=? WHERE spec_code=?",
+                    (new_cost, shipping_fee, misc_fee, spec_code),
+                )
+                if record_history and old_value is not None:
+                    change_amount = new_cost - old_value
+                    change_percent = (change_amount / old_value * 100) if old_value else None
+                    self.cursor.execute(
+                        """INSERT INTO cost_history
+                           (spec_code, old_cost_price, new_cost_price, change_amount, change_percent, source, import_time)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (spec_code, old_value, new_cost, change_amount, change_percent, source, import_time),
+                    )
+                changed += 1
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return changed
 
     def category_color_for_label(self, label):
         label = str(label or "").strip()
@@ -1572,6 +1833,8 @@ class SafeDatabaseManager:
         'new_customer': {'name': '新客立减', 'icon': 'new_customer.svg', 'color': '#9b59b6'},
         'limited_time': {'name': '限时限量购', 'icon': 'limited-time.svg', 'color': '#e74c3c'},
         'marketing': {'name': '营销活动', 'icon': 'marketing.svg', 'color': '#9b59b6'},
+        'natural_flow': {'name': '无推广', 'icon': None, 'color': '#16a085'},
+        'sitewide': {'name': '全站托管', 'icon': None, 'color': '#8e44ad'},
         'profit': {'name': '盈利状态', 'icon': None, 'color_profit': '#27ae60', 'color_loss': '#e74c3c'},
     }
 
@@ -1580,21 +1843,23 @@ class SafeDatabaseManager:
     def get_product_tags(self, product_id):
         try:
             res = self.safe_fetchall(
-                "SELECT is_limited_time, is_marketing, profit_status FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, is_limited_time, is_marketing, profit_status, is_natural_flow, is_sitewide_managed FROM products WHERE id=?",
                 (product_id,)
             )
             if res and res[0]:
                 return {
                     'coupon': res[0][0] > 0,
-                    'new_customer': res[0][0] > 0,
-                    'limited_time': bool(res[0][0]),
-                    'marketing': bool(res[0][1]),
-                    'profit_status': res[0][2],
+                    'new_customer': res[0][1] > 0,
+                    'limited_time': bool(res[0][2]),
+                    'marketing': bool(res[0][3]),
+                    'profit_status': res[0][4],
+                    'natural_flow': bool(res[0][5]),
+                    'sitewide': bool(res[0][6]) and not bool(res[0][5]),
                 }
-            return {'coupon': False, 'new_customer': False, 'limited_time': False, 'marketing': False, 'profit_status': 0}
+            return {'coupon': False, 'new_customer': False, 'limited_time': False, 'marketing': False, 'profit_status': 0, 'natural_flow': False, 'sitewide': False}
         except Exception as e:
             print(f"获取商品标签失败: {e}")
-            return {'coupon': False, 'new_customer': False, 'limited_time': False, 'marketing': False, 'profit_status': 0}
+            return {'coupon': False, 'new_customer': False, 'limited_time': False, 'marketing': False, 'profit_status': 0, 'natural_flow': False, 'sitewide': False}
 
     def update_product_profit_status(self, product_id, profit=None):
         try:
@@ -1678,6 +1943,10 @@ class SafeDatabaseManager:
                 conditions.append("is_limited_time = 1")
             if tag_filters.get('marketing'):
                 conditions.append("is_marketing = 1")
+            if tag_filters.get('natural_flow'):
+                conditions.append("is_natural_flow = 1")
+            if tag_filters.get('sitewide'):
+                conditions.append("is_sitewide_managed = 1 AND COALESCE(is_natural_flow, 0) = 0")
             if tag_filters.get('profit_status'):
                 conditions.append(f"profit_status = {tag_filters['profit_status']}")
             if not conditions:

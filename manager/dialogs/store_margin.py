@@ -3,6 +3,7 @@
 import os
 import json
 import time
+from io import BytesIO
 from datetime import datetime
 from PyQt5.QtWidgets import QHeaderView, QAbstractItemView
 from PyQt5.QtWidgets import (
@@ -18,6 +19,10 @@ from PyQt5.QtGui import QClipboard
 
 try:
     from openpyxl import load_workbook
+    from openpyxl import Workbook
+    from openpyxl.drawing.image import Image as ExcelImage
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
@@ -1476,6 +1481,59 @@ class StoreMarginDialog(QDialog):
                 return sys_id
         return None
 
+    def _get_spec_display_mode(self, setting_key):
+        mode = self.db.get_setting(setting_key, "code")
+        return mode if mode in ("code", "name") else "code"
+
+    def _get_spec_display_text(self, user_product_id, spec_code, mode):
+        if not spec_code:
+            return "无"
+        if mode != "name":
+            return str(spec_code)
+        sys_id = self.get_sys_id_by_user_id(user_product_id)
+        if not sys_id:
+            return f"未匹配规格\n{spec_code}"
+        res = self.db.safe_fetchall(
+            "SELECT spec_name FROM product_specs WHERE product_id=? AND spec_code=?",
+            (sys_id, spec_code)
+        )
+        spec_name = res[0][0] if res and res[0][0] else ""
+        return str(spec_name).strip() if str(spec_name).strip() else f"未匹配规格\n{spec_code}"
+
+    def _get_valid_spec_codes(self, user_product_id):
+        sys_id = self.get_sys_id_by_user_id(user_product_id)
+        if not sys_id:
+            return set()
+        rows = self.db.safe_fetchall(
+            "SELECT spec_code FROM product_specs WHERE product_id=? AND spec_code IS NOT NULL AND spec_code<>''",
+            (sys_id,)
+        )
+        return {str(row[0]).strip() for row in rows if row and str(row[0]).strip()}
+
+    def _set_spec_label_text(self, label, text, mode, alert=False):
+        label.setWordWrap(True)
+        label.setText(str(text or "无"))
+        alert = alert or str(text or "").startswith("未匹配规格")
+        color = "#e74c3c" if alert else ("black" if text and text != "无" else "#95a5a6")
+        font_size = 13 if mode == "name" else 19
+        weight = "font-weight: bold;" if alert else ""
+        label.setStyleSheet(f"color: {color}; font-size: {font_size}px; {weight}")
+
+    def _parse_amount_value(self, value):
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text or text.lower() in ("none", "nan"):
+            return 0.0
+        for token in ("￥", "¥", "元", ",", " "):
+            text = text.replace(token, "")
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
     def get_main_spec(self, prod_id):
         """获取商品的主卖规格"""
         spec_counts = self.db.safe_fetchall(
@@ -1484,6 +1542,9 @@ class StoreMarginDialog(QDialog):
         )
         if not spec_counts:
             return None, 0
+        valid_spec_codes = self._get_valid_spec_codes(prod_id)
+        if valid_spec_codes:
+            spec_counts = [sc for sc in spec_counts if sc[0] and str(sc[0]).strip() in valid_spec_codes]
         total_orders = sum(sc[1] for sc in spec_counts if sc[1])
         if total_orders == 0:
             return None, 0
@@ -1517,6 +1578,7 @@ class StoreMarginDialog(QDialog):
             spec_code = parts[1]
             order_count = data.get("count", 0)
             refund_count = data.get("refund_count", 0)
+            actual_amount = data.get("actual_amount", 0)
             dates = data.get("dates", [])
             earliest_date = min(dates) if dates else None
             latest_date = max(dates) if dates else None
@@ -1527,7 +1589,7 @@ class StoreMarginDialog(QDialog):
                 (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (self.store_id, user_product_id, spec_code, order_count,
-                  restore_time, date_range, 0, refund_count))
+                  restore_time, date_range, actual_amount, refund_count))
 
         return True
 
@@ -1645,8 +1707,47 @@ class StoreMarginDialog(QDialog):
                 weight_input.setText(weight_str)
                 weight_input.blockSignals(False)
 
+    def _format_roi_value(self, value):
+        try:
+            value = float(value or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        return f"{value:.2f}" if value > 0 else "未设置"
+
+    def _record_sitewide_roi_change(self, old_roi, new_roi):
+        if abs(float(old_roi or 0) - float(new_roi or 0)) <= 0.0001:
+            return
+        try:
+            now = datetime.now()
+            time_str = now.strftime("%H:%M")
+            log_text = f"【全站托管投产】{self._format_roi_value(old_roi)} → {self._format_roi_value(new_roi)}"
+            records = self.db.get_store_record(self.store_id, now.year, now.month, now.day)
+            records.append({"time": time_str, "text": log_text})
+            self.db.save_store_record(self.store_id, now.year, now.month, now.day, records)
+            if hasattr(self.main_app, "load_data_safe"):
+                self.main_app.load_data_safe()
+        except Exception as e:
+            print(f"保存全站托管投产记录失败: {e}")
+
+    def save_sitewide_roi(self):
+        try:
+            sitewide_roi = float(self.sitewide_roi_input.text().strip()) if self.sitewide_roi_input.text().strip() else 0.0
+            if sitewide_roi < 0:
+                sitewide_roi = 0.0
+            old_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (self.store_id,))
+            old_roi = float(old_rows[0][0] or 0) if old_rows else 0.0
+            self.db.safe_execute("UPDATE stores SET sitewide_roi=? WHERE id=?", (sitewide_roi, self.store_id))
+            self._record_sitewide_roi_change(old_roi, sitewide_roi)
+            self.main_app.show_toast("全站托管投产比已保存")
+            return True
+        except ValueError:
+            self.main_app.show_toast("全站托管投产比格式不正确")
+            return False
+
     def save_weights(self):
         old_margin = self.calculate_total_margin()
+        if not self.save_sitewide_roi():
+            return
         saved_count = 0
         for row in range(self.table.rowCount()):
             prod_id = self.table.item(row, 1).data(Qt.UserRole)
@@ -1831,6 +1932,36 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_import_data.clicked.connect(self.import_data)
 
+        self.btn_export_excel = QPushButton("导出Excel")
+        self.btn_export_excel.setFixedWidth(90)
+        self.btn_export_excel.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:pressed {
+                background-color: #229954;
+            }
+        """)
+        self.btn_export_excel.clicked.connect(self.export_margin_excel)
+
+        self.combo_margin_data_mode = QComboBox()
+        self.combo_margin_data_mode.addItem("ERP模式", "erp")
+        self.combo_margin_data_mode.addItem("表格模式", "table")
+        self.combo_margin_data_mode.setFixedWidth(92)
+        self.combo_margin_data_mode.setStyleSheet("font-size: 12px; padding: 2px;")
+        current_mode = self.db.get_setting("store_margin_data_mode", "erp")
+        self.combo_margin_data_mode.setCurrentIndex(1 if current_mode == "table" else 0)
+        self.combo_margin_data_mode.currentIndexChanged.connect(self.on_margin_data_mode_changed)
+
         self.btn_reading_mode = QPushButton("🔍 阅览模式")
         self.btn_reading_mode.setFixedWidth(90)
         self.btn_reading_mode.setStyleSheet("""
@@ -1871,6 +2002,8 @@ class StoreMarginDialog(QDialog):
         date_layout.addWidget(self.btn_last_week)
         date_layout.addWidget(self.btn_input_data)
         date_layout.addWidget(self.btn_import_data)
+        date_layout.addWidget(self.btn_export_excel)
+        date_layout.addWidget(self.combo_margin_data_mode)
         date_layout.addWidget(self.btn_reading_mode)
         date_layout.addWidget(self.lbl_current_history)
         date_layout.addStretch()
@@ -2012,6 +2145,8 @@ class StoreMarginDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         header.setMinimumSectionSize(50)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 72)
         # 商品标题列固定200像素
         header.setSectionResizeMode(2, QHeaderView.Fixed)
         self.table.setColumnWidth(2, 200)
@@ -2053,25 +2188,6 @@ class StoreMarginDialog(QDialog):
         historical_layout.addWidget(self.table)
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)
-        self.btn_auto_balance = QPushButton("⚖️ 自动均分权重")
-        self.btn_auto_balance.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #2c3e50;
-            }
-            QPushButton:pressed {
-                background-color: #1a252f;
-            }
-        """)
-        self.btn_auto_balance.clicked.connect(self.auto_balance_weights)
         self.btn_profit_calc = QPushButton("🧮 计算利润")
         self.btn_profit_calc.setStyleSheet("""
             QPushButton {
@@ -2152,6 +2268,57 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_ai_report.clicked.connect(self.open_ai_report_dialog)
 
+        self.btn_promotion_data = QPushButton("推广数据分析")
+        self.btn_promotion_data.setStyleSheet("""
+            QPushButton {
+                background-color: #d35400;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #ba4a00;
+            }
+        """)
+        self.btn_promotion_data.clicked.connect(self.open_promotion_data_dialog)
+
+        self.btn_link_changes = QPushButton("链接变化")
+        self.btn_link_changes.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #2c3e50;
+            }
+        """)
+        self.btn_link_changes.clicked.connect(self.open_link_changes_dialog)
+
+        self.btn_display_settings = QPushButton("设置")
+        self.btn_display_settings.setStyleSheet("""
+            QPushButton {
+                background-color: #7f8c8d;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #707b7c;
+            }
+        """)
+        self.btn_display_settings.clicked.connect(self.open_store_margin_display_settings)
+
         self.lbl_total_margin = QLabel("综合毛利: 0.00%")
         self.lbl_total_margin.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 6px 12px; border-radius: 6px;"
@@ -2166,6 +2333,20 @@ class StoreMarginDialog(QDialog):
         self.lbl_order_range.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #8e44ad; background-color: #f5eef8; padding: 6px 12px; border-radius: 6px;"
         )
+
+        btn_layout.addWidget(QLabel("全站托管投产:"))
+        self.sitewide_roi_input = QLineEdit()
+        self.sitewide_roi_input.setFixedWidth(80)
+        self.sitewide_roi_input.setPlaceholderText("投产比")
+        self.sitewide_roi_input.setStyleSheet("padding: 5px; border: 1px solid #8e44ad; border-radius: 4px; font-weight: bold;")
+        try:
+            sitewide_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (self.store_id,))
+            sitewide_roi = float(sitewide_rows[0][0] or 0) if sitewide_rows else 0.0
+            self.sitewide_roi_input.setText(f"{sitewide_roi:.2f}" if sitewide_roi > 0 else "")
+        except Exception:
+            pass
+        self.sitewide_roi_input.returnPressed.connect(self.save_sitewide_roi)
+        btn_layout.addWidget(self.sitewide_roi_input)
 
         self.btn_save = QPushButton("💾 保存")
         self.btn_save.setStyleSheet("""
@@ -2205,11 +2386,13 @@ class StoreMarginDialog(QDialog):
             }
         """)
         self.btn_close.clicked.connect(self.accept)
-        btn_layout.addWidget(self.btn_auto_balance)
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_import_orders)
         btn_layout.addWidget(self.btn_history)
         btn_layout.addWidget(self.btn_ai_report)
+        btn_layout.addWidget(self.btn_promotion_data)
+        btn_layout.addWidget(self.btn_link_changes)
+        btn_layout.addWidget(self.btn_display_settings)
         btn_layout.addSpacing(10)
         btn_layout.addWidget(self.lbl_total_margin)
         btn_layout.addWidget(self.lbl_total_orders)
@@ -2226,12 +2409,230 @@ class StoreMarginDialog(QDialog):
         super().resizeEvent(event)
         self.sync_table_widths()
 
+    def _is_link_change_record(self, record):
+        if not isinstance(record, dict):
+            return False
+        if record.get("type") == "link_change":
+            return True
+        text = str(record.get("text", "") or "").strip()
+        prefixes = ("【链接上架】", "【链接删除】", "【新增链接】", "【删除链接】")
+        return any(text.startswith(prefix) for prefix in prefixes)
+
+    def _link_change_action_text(self, record):
+        action = str(record.get("action", "") if isinstance(record, dict) else "")
+        text = str(record.get("text", "") if isinstance(record, dict) else "")
+        if action == "add" or "上架" in text or "新增" in text:
+            return "上架"
+        if action == "delete" or "删除" in text:
+            return "删除"
+        return "变化"
+
+    def _parse_link_change_text_field(self, text, marker):
+        if marker not in text:
+            return ""
+        value = text.split(marker, 1)[1]
+        for sep in ("｜", "|", "，", ","):
+            if sep in value:
+                value = value.split(sep, 1)[0]
+                break
+        return value.strip()
+
+    def _collect_store_link_change_records(self, start_date=None, end_date=None):
+        rows = self.db.safe_fetchall(
+            "SELECT year, month, day, records_json FROM store_records WHERE store_id=?",
+            (self.store_id,)
+        )
+        items = []
+        for year, month, day, records_json in rows:
+            try:
+                record_date = datetime(int(year), int(month), int(day)).date()
+            except Exception:
+                continue
+            if start_date and record_date < start_date:
+                continue
+            if end_date and record_date > end_date:
+                continue
+            try:
+                day_records = json.loads(records_json) if records_json else []
+            except Exception:
+                day_records = []
+            for record in day_records:
+                if not self._is_link_change_record(record):
+                    continue
+                text = str(record.get("text", "") or "").strip()
+                product_id = str(record.get("product_id", "") or "").strip()
+                product_title = str(record.get("product_title", "") or "").strip()
+                if not product_id:
+                    product_id = self._parse_link_change_text_field(text, "商品ID：")
+                if not product_title:
+                    product_title = self._parse_link_change_text_field(text, "标题：")
+                items.append({
+                    "date": record_date.strftime("%Y-%m-%d"),
+                    "time": str(record.get("time", "") or ""),
+                    "action": self._link_change_action_text(record),
+                    "product_id": product_id,
+                    "product_title": product_title,
+                    "content": text,
+                })
+        items.sort(key=lambda x: (x["date"], x["time"], x["product_id"]), reverse=True)
+        return items
+
+    def open_link_changes_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"链接变化 - {self.store_name}")
+        dialog.resize(900, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        hint = QLabel("当前店铺的链接上架/删除记录。记录来源为店铺行操作记录，新增或删除链接后会自动写入。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555; font-size: 12px;")
+        layout.addWidget(hint)
+
+        items = self._collect_store_link_change_records()
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(["日期", "时间", "类型", "商品ID", "商品标题", "记录内容"])
+        table.setRowCount(len(items))
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setWordWrap(True)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        widths = [100, 70, 60, 150, 240, 260]
+        for col, width in enumerate(widths):
+            table.setColumnWidth(col, width)
+
+        for row, item in enumerate(items):
+            values = [
+                item.get("date", ""),
+                item.get("time", ""),
+                item.get("action", ""),
+                item.get("product_id", ""),
+                item.get("product_title", ""),
+                item.get("content", ""),
+            ]
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(str(value or ""))
+                cell.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
+                table.setItem(row, col, cell)
+            table.setRowHeight(row, 52)
+        layout.addWidget(table)
+
+        if not items:
+            empty_label = QLabel("暂无链接变化记录")
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("color: #999; padding: 8px;")
+            layout.addWidget(empty_label)
+
+        btn_row = QHBoxLayout()
+        btn_copy = QPushButton("复制全部")
+        btn_close = QPushButton("关闭")
+        btn_copy.setEnabled(bool(items))
+        btn_copy.setStyleSheet("QPushButton { background-color: #3498db; color: white; padding: 6px 14px; border-radius: 4px; } QPushButton:disabled { background-color: #bdc3c7; }")
+        btn_close.setStyleSheet("QPushButton { padding: 6px 14px; border-radius: 4px; }")
+
+        def copy_all():
+            lines = ["日期\t时间\t类型\t商品ID\t商品标题\t记录内容"]
+            for item in items:
+                lines.append("\t".join([
+                    item.get("date", ""),
+                    item.get("time", ""),
+                    item.get("action", ""),
+                    item.get("product_id", ""),
+                    item.get("product_title", ""),
+                    item.get("content", ""),
+                ]))
+            QApplication.clipboard().setText("\n".join(lines))
+            self.show_toast("链接变化记录已复制")
+
+        btn_copy.clicked.connect(copy_all)
+        btn_close.clicked.connect(dialog.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+        dialog.exec_()
+
+    def open_promotion_data_dialog(self):
+        try:
+            from manager.dialogs.promotion_data import PromotionDataDialog
+        except ImportError:
+            from dialogs.promotion_data import PromotionDataDialog
+        dialog = PromotionDataDialog(self.store_id, self.store_name, self.db, self.main_app, self)
+        dialog.exec_()
+
+    def open_store_margin_display_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("订单规格显示设置")
+        dialog.resize(360, 190)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+
+        main_row = QHBoxLayout()
+        main_row.addWidget(QLabel("主卖规格显示："))
+        combo_main = QComboBox()
+        combo_main.addItem("规格编码", "code")
+        combo_main.addItem("规格名称", "name")
+        main_mode = self._get_spec_display_mode("store_margin_main_spec_display")
+        combo_main.setCurrentIndex(1 if main_mode == "name" else 0)
+        main_row.addWidget(combo_main)
+        layout.addLayout(main_row)
+
+        refund_row = QHBoxLayout()
+        refund_row.addWidget(QLabel("退款最多规格显示："))
+        combo_refund = QComboBox()
+        combo_refund.addItem("规格编码", "code")
+        combo_refund.addItem("规格名称", "name")
+        refund_mode = self._get_spec_display_mode("store_margin_refund_spec_display")
+        combo_refund.setCurrentIndex(1 if refund_mode == "name" else 0)
+        refund_row.addWidget(combo_refund)
+        layout.addLayout(refund_row)
+
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("保存")
+        btn_cancel = QPushButton("取消")
+        btn_save.setStyleSheet("QPushButton { background-color: #27ae60; color: white; padding: 6px 16px; border-radius: 4px; }")
+        btn_row.addStretch()
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_cancel)
+        layout.addStretch()
+        layout.addLayout(btn_row)
+
+        def save_settings():
+            self.db.set_setting("store_margin_main_spec_display", combo_main.currentData())
+            self.db.set_setting("store_margin_refund_spec_display", combo_refund.currentData())
+            dialog.accept()
+            self.load_products()
+            self.show_toast("规格显示设置已保存")
+
+        btn_save.clicked.connect(save_settings)
+        btn_cancel.clicked.connect(dialog.reject)
+        dialog.exec_()
+
     def load_products(self):
         self.table.cellChanged.disconnect()
-        products = self.db.safe_fetchall(
-            "SELECT id, name, title, image_data, store_weight, store_weight_locked FROM products WHERE store_id=? ORDER BY sort_order",
+        products_raw = self.db.safe_fetchall(
+            """SELECT id, name, title, image_data, sort_order, product_category_label,
+                      store_weight, store_weight_locked
+               FROM products WHERE store_id=?""",
             (self.store_id,),
         )
+        if hasattr(self.main_app, "_sort_products_for_display"):
+            sorted_products = self.main_app._sort_products_for_display([
+                (prod[0], prod[1], prod[2], prod[3], prod[4], prod[5])
+                for prod in products_raw
+            ])
+            extra_by_id = {prod[0]: (prod[6], prod[7]) for prod in products_raw}
+            products = [
+                (prod[0], prod[1], prod[2], prod[3], *extra_by_id.get(prod[0], (0, 0)))
+                for prod in sorted_products
+            ]
+        else:
+            products = [
+                (prod[0], prod[1], prod[2], prod[3], prod[6], prod[7])
+                for prod in sorted(products_raw, key=lambda p: (p[4] if p[4] is not None else p[0], p[0]))
+            ]
         self.sys_id_to_user_id = {}
         self.product_weights = {}
         self.refund_widgets = {}
@@ -2246,16 +2647,21 @@ class StoreMarginDialog(QDialog):
                 self.product_weights[prod_id]["locked"] = store_locked or 0
             img_widget = QWidget()
             img_layout = QVBoxLayout(img_widget)
-            img_layout.setContentsMargins(5, 5, 5, 5)
+            img_layout.setContentsMargins(1, 1, 1, 1)
+            img_layout.setSpacing(0)
+            img_layout.setAlignment(Qt.AlignCenter)
             img_label = QLabel()
-            img_label.setFixedSize(60, 60)
+            img_label.setFixedSize(70, 70)
             img_label.setScaledContents(False)
             img_label.setAlignment(Qt.AlignCenter)
             if image_data:
                 pixmap = QPixmap()
                 pixmap.loadFromData(image_data)
                 if not pixmap.isNull():
-                    img_label.setPixmap(pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    scaled = pixmap.scaled(70, 70, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                    x = max(0, (scaled.width() - 70) // 2)
+                    y = max(0, (scaled.height() - 70) // 2)
+                    img_label.setPixmap(scaled.copy(x, y, 70, 70))
                 else:
                     img_label.setText("❌")
                     img_label.setStyleSheet("color: #999; border: 1px solid #ddd;")
@@ -2264,7 +2670,7 @@ class StoreMarginDialog(QDialog):
                 img_label.setStyleSheet("color: #999; border: 1px solid #ddd;")
             img_layout.addWidget(img_label)
             self.table.setCellWidget(row, 0, img_widget)
-            self.table.setRowHeight(row, 70)
+            self.table.setRowHeight(row, 72)
             item_id = QTableWidgetItem(str(prod_id))
             item_id.setFlags(item_id.flags() & ~Qt.ItemIsEditable)
             item_id.setFont(QFont("Microsoft YaHei", 9))
@@ -2352,16 +2758,19 @@ class StoreMarginDialog(QDialog):
             main_spec_layout.setContentsMargins(0, 0, 0, 0)
             main_spec_label = QLabel("-")
             main_spec_label.setAlignment(Qt.AlignCenter)
+            main_spec_label.setWordWrap(True)
             main_spec_label.setStyleSheet("color: black; font-size: 19px;")
             main_spec_layout.addWidget(main_spec_label)
             self.table.setCellWidget(row, 11, main_spec_widget)
             if prod_id in self.product_weights:
                 self.product_weights[prod_id]["main_spec"] = main_spec_label
                 main_spec_code, spec_orders = self.get_main_spec(prod_id)
+                main_spec_mode = self._get_spec_display_mode("store_margin_main_spec_display")
                 if spec_orders > 0 and main_spec_code:
-                    main_spec_label.setText(str(main_spec_code))
+                    main_spec_text = self._get_spec_display_text(prod_id, main_spec_code, main_spec_mode)
+                    self._set_spec_label_text(main_spec_label, main_spec_text, main_spec_mode)
                 elif spec_orders == 0:
-                    main_spec_label.setText("无")
+                    self._set_spec_label_text(main_spec_label, "无", main_spec_mode)
             refund_orders_label = QLabel("无")
             refund_orders_label.setAlignment(Qt.AlignCenter)
             refund_orders_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
@@ -2369,6 +2778,7 @@ class StoreMarginDialog(QDialog):
             self.refund_widgets[row] = {'orders': refund_orders_label}
             refund_ratio_label = QLabel("无")
             refund_ratio_label.setAlignment(Qt.AlignCenter)
+            refund_ratio_label.setWordWrap(True)
             refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             self.table.setCellWidget(row, 13, refund_ratio_label)
             self.refund_widgets[row]['ratio'] = refund_ratio_label
@@ -2408,6 +2818,19 @@ class StoreMarginDialog(QDialog):
             if not sys_id:
                 self.table.item(row, 4).setText("-")
                 self.table.item(row, 10).setText("-")
+                continue
+            imported_totals = self.db.safe_fetchall(
+                """SELECT COALESCE(SUM(order_count), 0), COALESCE(SUM(actual_amount), 0)
+                   FROM imported_orders
+                   WHERE store_id=? AND product_id=?""",
+                (self.store_id, user_product_id)
+            )
+            imported_orders = imported_totals[0][0] if imported_totals else 0
+            imported_amount = imported_totals[0][1] if imported_totals else 0
+            if imported_orders and imported_amount and imported_amount > 0:
+                avg_price = imported_amount / imported_orders
+                self.table.item(row, 4).setText(f"¥{avg_price:.2f}")
+                self.table.item(row, 10).setText(f"¥{imported_amount:.2f}")
                 continue
             spec_sales = self.db.safe_fetchall(
                 "SELECT ps.sale_price, io.order_count FROM product_specs ps "
@@ -2534,6 +2957,146 @@ class StoreMarginDialog(QDialog):
                 self.week_table.setColumnWidth(col, width)
         except Exception as e:
             print(f"同步列宽失败: {e}")
+
+    def _excel_headers(self, table):
+        headers = []
+        for col in range(table.columnCount()):
+            item = table.horizontalHeaderItem(col)
+            headers.append(item.text().replace("\n", " ") if item else "")
+        return headers
+
+    def _table_cell_text(self, table, row, col):
+        widget = table.cellWidget(row, col)
+        if widget:
+            line_edit = widget.findChild(QLineEdit)
+            if line_edit:
+                return line_edit.text()
+            labels = widget.findChildren(QLabel)
+            label_texts = [label.text() for label in labels if label.text() and label.text() not in ("❌", "-")]
+            if label_texts:
+                return "\n".join(label_texts)
+        item = table.item(row, col)
+        return item.text() if item else ""
+
+    def _format_manual_record_for_export(self, record):
+        start_date = record[0] if record[0] else ""
+        end_date = record[1] if record[1] else ""
+        date_text = f"{start_date}~{end_date}" if start_date or end_date else ""
+        days = 1
+        if start_date and end_date:
+            try:
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+            except Exception:
+                days = 1
+        net_profit = float(record[17] or 0)
+        daily_profit = net_profit / days if days else 0
+        return [
+            date_text,
+            str(int(record[2] or 0)),
+            f"¥{float(record[3] or 0):.2f}",
+            f"¥{float(record[4] or 0):.2f}",
+            f"{float(record[11] or 0):.2f}%",
+            f"¥{float(record[5] or 0):.2f}",
+            f"{float(record[12] or 0):.2f}%",
+            str(int(record[6] or 0)),
+            f"{float(record[13] or 0):.2f}%",
+            f"¥{float(record[14] or 0):.2f}",
+            f"¥{float(record[7] or 0):.2f}",
+            f"{float(record[15] or 0):.2f}%",
+            f"¥{float(record[16] or 0):.2f}",
+            f"¥{float(record[8] or 0):.2f}",
+            f"¥{float(record[9] or 0):.2f}",
+            f"¥{float(record[10] or 0):.2f}",
+            f"¥{float(record[17] or 0):.2f}",
+            f"{float(record[18] or 0):.2f}%",
+            f"¥{float(record[19] or 0):.2f}",
+            f"¥{daily_profit:.2f}",
+        ]
+
+    def _style_excel_sheet(self, ws, widths=None):
+        header_fill = PatternFill("solid", fgColor="D9EAF7")
+        header_font = Font(bold=True, color="1F2933")
+        thin = Side(style="thin", color="B7C4D1")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = border
+                if cell.row == 1:
+                    cell.fill = header_fill
+                    cell.font = header_font
+        if widths:
+            for col_idx, width in widths.items():
+                ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    def _write_historical_export_sheet(self, wb):
+        ws = wb.active
+        ws.title = "过往数据分析"
+        ws.append(self._excel_headers(self.margin_data_table))
+        for record in self.load_manual_data():
+            ws.append(self._format_manual_record_for_export(record))
+        self._style_excel_sheet(ws, {1: 18, 2: 12, 3: 14, 4: 14, 5: 12, 6: 14, 7: 12, 8: 12, 9: 12, 10: 12})
+        ws.freeze_panes = "A2"
+
+    def _product_image_map_for_export(self):
+        rows = self.db.safe_fetchall(
+            "SELECT name, image_data FROM products WHERE store_id=?",
+            (self.store_id,)
+        )
+        return {str(name): image_data for name, image_data in rows if name is not None and image_data}
+
+    def _write_orders_export_sheet(self, wb):
+        ws = wb.create_sheet("订单规格毛利权重")
+        headers = self._excel_headers(self.table)
+        if headers and headers[-1] == "操作":
+            headers = headers[:-1]
+        ws.append(headers)
+        image_map = self._product_image_map_for_export()
+        image_refs = []
+        for row in range(self.table.rowCount()):
+            product_id = self._table_cell_text(self.table, row, 1)
+            values = []
+            for col in range(len(headers)):
+                values.append("" if col == 0 else self._table_cell_text(self.table, row, col))
+            ws.append(values)
+            excel_row = row + 2
+            ws.row_dimensions[excel_row].height = 58
+            image_data = image_map.get(product_id)
+            if image_data:
+                try:
+                    image_stream = BytesIO(image_data)
+                    image = ExcelImage(image_stream)
+                    image.width = 56
+                    image.height = 56
+                    ws.add_image(image, f"A{excel_row}")
+                    image_refs.append(image_stream)
+                except Exception as e:
+                    print(f"导出商品图片失败: {e}")
+        ws._image_stream_refs = image_refs
+        self._style_excel_sheet(ws, {1: 10, 2: 16, 3: 28, 4: 13, 5: 13, 6: 12, 7: 12, 8: 14, 9: 12, 10: 14, 11: 14, 12: 20, 13: 12, 14: 22})
+        ws.freeze_panes = "A2"
+
+    def export_margin_excel(self):
+        if not OPENPYXL_AVAILABLE:
+            QMessageBox.warning(self, "缺少依赖", "请先安装 openpyxl 库：\npip install openpyxl")
+            return
+        safe_store_name = "".join(ch for ch in self.store_name if ch not in r'\/:*?"<>|').strip() or "店铺"
+        default_name = f"店铺毛利_{safe_store_name}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出Excel", default_name, "Excel文件 (*.xlsx)")
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+        try:
+            wb = Workbook()
+            self._write_historical_export_sheet(wb)
+            self._write_orders_export_sheet(wb)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"数据已导出到：\n{file_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出时发生错误：\n{str(e)}")
 
     def calculate_week_comparison(self, records):
         """计算并显示周环比变化"""
@@ -2954,13 +3517,36 @@ class StoreMarginDialog(QDialog):
             "note": "本周+上周范围内的当前店铺商品操作记录" if items else "本周+上周范围内没有商品操作记录",
         }
 
+    def _build_store_link_change_records(self, current, previous):
+        start_date, end_date, range_text = self._build_operation_record_range(current, previous)
+        if not start_date or not end_date:
+            return {"available": False, "range": range_text, "items": [], "note": "无有效日期范围，未读取链接变化记录"}
+        items = self._collect_store_link_change_records(start_date, end_date)
+        items.sort(key=lambda x: (x["date"], x["time"], x["product_id"]))
+        return {
+            "available": bool(items),
+            "range": range_text,
+            "items": items,
+            "note": "本周+上周范围内的当前店铺链接上架/删除记录" if items else "本周和上周没有可参考的链接变化记录",
+        }
+
+    def _format_ai_report_spec(self, spec_code, spec_name, display_mode):
+        spec_code = str(spec_code or "").strip()
+        spec_name = str(spec_name or "").strip()
+        if not spec_code and not spec_name:
+            return ""
+        if display_mode == "name":
+            return f"【{spec_name or spec_code}】"
+        return spec_code
+
     def _build_sales_structure_summary(self):
+        spec_display_mode = self._get_spec_display_mode("store_margin_main_spec_display")
         rows = self.db.safe_fetchall("""
             SELECT io.product_id, io.spec_code,
                    SUM(COALESCE(io.order_count, 0)) AS order_count,
                    SUM(COALESCE(io.refund_count, 0)) AS refund_count,
                    p.id, p.title, p.coupon_amount, p.new_customer_discount,
-                   ps.sale_price, cl.cost_price
+                   ps.spec_name, ps.sale_price, cl.cost_price
             FROM imported_orders io
             LEFT JOIN products p ON p.store_id = io.store_id AND p.name = io.product_id
             LEFT JOIN product_specs ps ON ps.product_id = p.id AND ps.spec_code = io.spec_code
@@ -2978,11 +3564,14 @@ class StoreMarginDialog(QDialog):
         specs = []
 
         for row in rows:
-            product_id, spec_code, order_count, refund_count, sys_id, title, coupon, new_customer, sale_price, cost_price = row
+            product_id, spec_code, order_count, refund_count, sys_id, title, coupon, new_customer, spec_name, sale_price, cost_price = row
+            if sys_id and not spec_name:
+                continue
             order_count = int(order_count or 0)
             refund_count = int(refund_count or 0)
             sale_price = float(sale_price or 0)
             cost_price = float(cost_price or 0)
+            spec_display = self._format_ai_report_spec(spec_code, spec_name, spec_display_mode)
             discount = max(float(coupon or 0), float(new_customer or 0))
             final_price = max(0, sale_price - discount)
             amount = sale_price * order_count
@@ -2996,7 +3585,7 @@ class StoreMarginDialog(QDialog):
             item = {
                 "product_id": product_id or "",
                 "product_title": title or "",
-                "spec_code": spec_code or "",
+                "spec": spec_display,
                 "orders": order_count,
                 "order_share": round((order_count / total_orders * 100) if total_orders else 0, 2),
                 "sales_amount": round(amount, 2),
@@ -3034,13 +3623,15 @@ class StoreMarginDialog(QDialog):
                 "sales_amount": round(prod["sales_amount"], 2),
                 "refund_orders": prod["refund_orders"],
                 "refund_rate": round((prod["refund_orders"] / prod["orders"] * 100) if prod["orders"] else 0, 2),
-                "main_spec": prod_specs[0]["spec_code"] if prod_specs else "",
-                "max_refund_spec": max_refund_spec["spec_code"] if max_refund_spec and max_refund_spec["refund_orders"] > 0 else "",
+                "main_spec": prod_specs[0]["spec"] if prod_specs else "",
+                "max_refund_spec": max_refund_spec["spec"] if max_refund_spec and max_refund_spec["refund_orders"] > 0 else "",
                 "top_specs": prod_specs[:5],
             })
 
         return {
             "available": True,
+            "spec_display_mode": "规格名称" if spec_display_mode == "name" else "规格编码",
+            "spec_display_rule": "所有规格相关信息使用【规格名称】展示，不输出规格编码" if spec_display_mode == "name" else "所有规格相关信息使用规格编码展示",
             "total_orders": total_orders,
             "total_sales_amount": round(total_amount, 2),
             "total_refund_orders": total_refunds,
@@ -3068,6 +3659,7 @@ class StoreMarginDialog(QDialog):
             "historical_summary": self._build_historical_margin_summary(records),
             "sales_structure": self._build_sales_structure_summary(),
             "product_operation_records": self._build_product_operation_records(current, previous),
+            "store_link_change_records": self._build_store_link_change_records(current, previous),
             "current_order_range_label": order_range,
         }
 
@@ -3279,11 +3871,12 @@ class StoreMarginDialog(QDialog):
 输出要求：
 1. 不要使用 Markdown 格式，不要使用 Markdown 标题、表格、代码块、引用块，也不要把输入表格完整复述出来。
 2. 报告要像一段可以直接转发给别人看的文字，最多使用换行、空格、简单序号和符号来区分层次，比如“一、本周结论”“①”“-”。
-3. 先写本周整体结论，再写核心指标变化，再写售卖结构和主卖规格判断，再结合商品操作记录判断可能影响，最后写下周动作。
-4. 操作记录只能作为解释线索：能对应上数据变化就说明，不能对应就不要硬凑原因。
+3. 先写本周整体结论，再写核心指标变化，再写售卖结构和主卖规格判断，再结合商品操作记录、店铺链接变化记录判断可能影响，最后写下周动作。
+4. 操作记录和链接变化只能作为解释线索：能对应上数据变化就说明，不能对应就不要硬凑原因。
 5. 只保留必要数字和关键判断，优先总结大方向；不要长篇解释、不要客套话、不要营销腔。
 6. 订单规格数据和财务数据口径不同，出现订单数差异时只提醒一次，不要反复解释。
-7. 如果没有商品操作记录，要明确说“本周和上周没有可参考的商品操作记录”，不要臆测操作原因。
+7. 如果没有商品操作记录，要明确说“本周和上周没有可参考的商品操作记录”；如果没有链接变化记录，要明确说“本周和上周没有可参考的链接变化记录”，不要臆测操作原因。
+8. 规格相关信息必须按输入数据里的 spec_display_rule 执行：如果是规格名称，只能使用【】中的规格名称；如果是规格编码，才使用规格编码。
 """.strip()
         user_prompt = {
             "任务": "生成店铺本周经营文字报告",
@@ -3462,8 +4055,12 @@ class StoreMarginDialog(QDialog):
 
     def open_input_data_dialog(self):
         """打开录入数据对话框"""
+        self.open_input_data_dialog_with_initial()
+
+    def open_input_data_dialog_with_initial(self, initial_data=None):
+        """打开录入数据对话框，可选预填部分字段。"""
         from .input_data_dialog import InputDataDialog
-        dialog = InputDataDialog(self)
+        dialog = InputDataDialog(self, initial_data=initial_data)
         if dialog.exec_() == QDialog.Accepted:
             data = dialog.get_data()
             # 添加日期信息
@@ -3475,8 +4072,337 @@ class StoreMarginDialog(QDialog):
             self.refresh_manual_data_display()
             self.update_current_history_label()
 
+    def on_margin_data_mode_changed(self, *_args):
+        mode = self.combo_margin_data_mode.currentData() or "erp"
+        self.db.set_setting("store_margin_data_mode", mode)
+        text = "表格模式" if mode == "table" else "ERP模式"
+        self.show_toast(f"已切换为{text}")
+
+    def is_table_margin_data_mode(self):
+        return self.db.get_setting("store_margin_data_mode", "erp") == "table"
+
+    def _read_import_rows(self, file_path):
+        import os
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.xlsx', '.xls']:
+            import openpyxl
+            from datetime import datetime as dt
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            ws = wb.active
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                row_data = []
+                for cell in row:
+                    if isinstance(cell, dt) and cell is not None:
+                        row_data.append(cell.strftime("%Y-%m-%d"))
+                    else:
+                        row_data.append(cell)
+                rows.append(row_data)
+            return rows
+        import csv
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            return list(csv.reader(f))
+
+    def _cell_text(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
+    def _get_row_value(self, row, col_index):
+        if col_index is None or col_index < 0 or col_index >= len(row):
+            return None
+        return row[col_index]
+
+    def _parse_quantity_value(self, value):
+        try:
+            return max(1, int(float(str(value).replace(",", "").strip())))
+        except (TypeError, ValueError):
+            return 1
+
+    def _parse_order_date_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            import re
+            match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', text)
+            if match:
+                return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+            match = re.search(r'(\d{1,2})[/-](\d{1,2})', text)
+            if match:
+                return f"{datetime.now().year:04d}-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+        except Exception:
+            return None
+        return None
+
+    def _is_effective_shipped_status(self, status_text):
+        text = str(status_text or "").strip()
+        return "已发货" in text or "已收货" in text
+
+    def _is_refund_status(self, status_text):
+        text = str(status_text or "").strip()
+        refund_keywords = ["退款成功", "已发货退款", "已收货退款", "售后成功", "退货退款成功"]
+        return any(keyword in text for keyword in refund_keywords)
+
+    def _show_margin_import_missing_dialog(self, issues):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("缺少必要成本或匹配信息")
+        dialog.resize(1050, 620)
+        layout = QVBoxLayout(dialog)
+
+        tip = QLabel("以下有效订单行缺少必要成本或匹配信息，已阻止预填毛利润。商品ID、标题、规格编码和问题可复制。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 6px;")
+        layout.addWidget(tip)
+
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(["行号", "图片", "商品ID", "商品标题", "规格编码", "问题"])
+        table.setRowCount(len(issues))
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setColumnWidth(0, 70)
+        table.setColumnWidth(1, 78)
+        table.setColumnWidth(2, 170)
+        table.setColumnWidth(3, 300)
+        table.setColumnWidth(4, 190)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+
+        def readonly_text(text):
+            line = QLineEdit(str(text or ""))
+            line.setReadOnly(True)
+            line.setStyleSheet("border: none; background: transparent; padding: 4px;")
+            return line
+
+        for row, issue in enumerate(issues):
+            row_item = QTableWidgetItem(str(issue.get("row", "")))
+            row_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 0, row_item)
+
+            img_label = QLabel()
+            img_label.setAlignment(Qt.AlignCenter)
+            image_data = issue.get("image_data")
+            if image_data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(image_data)
+                if not pixmap.isNull():
+                    img_label.setPixmap(pixmap.scaled(56, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                else:
+                    img_label.setText("-")
+            else:
+                img_label.setText("-")
+            table.setCellWidget(row, 1, img_label)
+            table.setCellWidget(row, 2, readonly_text(issue.get("product_code", "")))
+            table.setCellWidget(row, 3, readonly_text(issue.get("product_title", "")))
+            table.setCellWidget(row, 4, readonly_text(issue.get("spec_code", "")))
+            table.setCellWidget(row, 5, readonly_text(issue.get("message", "")))
+            table.setRowHeight(row, 64)
+
+        layout.addWidget(table)
+
+        copy_text = "\n".join(
+            "\t".join([
+                str(issue.get("row", "")),
+                str(issue.get("product_code", "")),
+                str(issue.get("product_title", "")),
+                str(issue.get("spec_code", "")),
+                str(issue.get("message", "")),
+            ])
+            for issue in issues
+        )
+
+        btn_layout = QHBoxLayout()
+        btn_copy = QPushButton("复制全部")
+        btn_close = QPushButton("关闭")
+
+        def copy_all():
+            QApplication.clipboard().setText("行号\t商品ID\t商品标题\t规格编码\t问题\n" + copy_text)
+            self.show_toast("已复制缺失信息")
+
+        btn_copy.clicked.connect(copy_all)
+        btn_close.clicked.connect(dialog.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_copy)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+        dialog.exec_()
+
+    def import_margin_data_from_order_table(self):
+        """表格模式：从订单明细计算毛利录入预填数据。"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择订单明细文件", "",
+            "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*.*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            rows = self._read_import_rows(file_path)
+            if len(rows) < 2:
+                QMessageBox.warning(self, "错误", "文件数据少于2行，无法导入")
+                return
+
+            headers = [str(h).strip() if h else "" for h in rows[0]]
+            col_mapping = self._show_column_mapping_dialog(headers, self._auto_detect_columns(headers))
+            if not col_mapping:
+                return
+
+            required_fields = {
+                "product_id": "商品ID列",
+                "spec_code": "规格编码列",
+                "quantity": "数量列",
+                "order_status": "订单状态列",
+                "actual_amount": "实收金额列",
+            }
+            missing_required = [name for key, name in required_fields.items() if col_mapping.get(key) is None]
+            if missing_required:
+                QMessageBox.warning(self, "缺少列映射", "表格模式请先选择：" + "、".join(missing_required))
+                return
+
+            products = self.db.safe_fetchall(
+                "SELECT id, name, title, image_data FROM products WHERE store_id=?",
+                (self.store_id,)
+            )
+            product_code_to_id = {str(name).strip(): prod_id for prod_id, name, _title, _image_data in products if name is not None}
+            product_info_by_code = {
+                str(name).strip(): {"title": title or "", "image_data": image_data}
+                for _prod_id, name, title, image_data in products
+                if name is not None
+            }
+            if not product_code_to_id:
+                QMessageBox.warning(self, "提示", "当前店铺没有商品，无法计算表格模式毛利")
+                return
+
+            all_specs = {}
+            for prod_id in product_code_to_id.values():
+                spec_rows = self.db.safe_fetchall(
+                    "SELECT spec_code FROM product_specs WHERE product_id=?",
+                    (prod_id,)
+                )
+                all_specs[prod_id] = {str(row[0]).strip() for row in spec_rows if row and row[0] is not None}
+
+            cost_cache = {}
+            missing_issues = []
+            valid_rows = 0
+            total_amount = 0.0
+            total_gross_profit = 0.0
+            refund_orders = 0
+            parsed_dates = []
+
+            for row_idx, row in enumerate(rows[1:], start=2):
+                if not row or all(str(cell).strip() == "" for cell in row if cell is not None):
+                    continue
+
+                status_text = self._cell_text(self._get_row_value(row, col_mapping["order_status"]))
+                if not self._is_effective_shipped_status(status_text):
+                    continue
+
+                product_code = self._cell_text(self._get_row_value(row, col_mapping["product_id"]))
+                spec_code = self._cell_text(self._get_row_value(row, col_mapping["spec_code"]))
+                quantity = self._parse_quantity_value(self._get_row_value(row, col_mapping["quantity"]))
+                actual_amount = self._parse_amount_value(self._get_row_value(row, col_mapping["actual_amount"]))
+                order_date = self._parse_order_date_value(self._get_row_value(row, col_mapping.get("order_date")))
+                if order_date:
+                    parsed_dates.append(order_date)
+
+                prod_id = product_code_to_id.get(product_code)
+                product_info = product_info_by_code.get(product_code, {})
+                if prod_id is None:
+                    missing_issues.append({
+                        "row": row_idx,
+                        "product_code": product_code or "空",
+                        "product_title": "",
+                        "spec_code": spec_code or "空",
+                        "image_data": None,
+                        "message": "商品ID不在当前店铺",
+                    })
+                    continue
+                if spec_code not in all_specs.get(prod_id, set()):
+                    missing_issues.append({
+                        "row": row_idx,
+                        "product_code": product_code,
+                        "product_title": product_info.get("title", ""),
+                        "spec_code": spec_code or "空",
+                        "image_data": product_info.get("image_data"),
+                        "message": "规格编码不匹配当前商品",
+                    })
+                    continue
+
+                if spec_code not in cost_cache:
+                    cost_rows = self.db.safe_fetchall(
+                        "SELECT product_cost, unit_weight FROM cost_library WHERE spec_code=?",
+                        (spec_code,)
+                    )
+                    if not cost_rows:
+                        cost_cache[spec_code] = None
+                    else:
+                        cost_cache[spec_code] = cost_rows[0]
+                cost_info = cost_cache.get(spec_code)
+                if not cost_info or cost_info[0] is None or cost_info[1] is None or float(cost_info[0] or 0) <= 0 or float(cost_info[1] or 0) <= 0:
+                    missing_issues.append({
+                        "row": row_idx,
+                        "product_code": product_code,
+                        "product_title": product_info.get("title", ""),
+                        "spec_code": spec_code,
+                        "image_data": product_info.get("image_data"),
+                        "message": "成本库缺少产品成本或重量",
+                    })
+                    continue
+
+                product_cost = float(cost_info[0] or 0)
+                unit_weight = float(cost_info[1] or 0)
+                total_weight = unit_weight * quantity
+                shipping_fee = self.db.calculate_cost_shipping_fee(total_weight)
+                misc_fee = self.db.get_cost_misc_fee()
+                total_cost = product_cost * quantity + shipping_fee + misc_fee
+
+                valid_rows += 1
+                total_amount += actual_amount
+                total_gross_profit += actual_amount - total_cost
+                if self._is_refund_status(status_text):
+                    refund_orders += 1
+
+            if missing_issues:
+                self._show_margin_import_missing_dialog(missing_issues)
+                return
+
+            if valid_rows <= 0:
+                QMessageBox.information(self, "提示", "没有识别到状态为已发货或已收货的有效订单行")
+                return
+
+            if parsed_dates:
+                from PyQt5.QtCore import QDate
+                start = min(parsed_dates)
+                end = max(parsed_dates)
+                self.date_start_input.setDate(QDate.fromString(start, "yyyy-MM-dd"))
+                self.date_end_input.setDate(QDate.fromString(end, "yyyy-MM-dd"))
+
+            initial_data = {
+                "actual_orders": valid_rows,
+                "actual_amount": round(total_amount, 2),
+                "gross_profit": round(total_gross_profit, 2),
+                "refund_orders": refund_orders,
+            }
+            self.open_input_data_dialog_with_initial(initial_data)
+
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"表格模式导入失败: {e}")
+
     def import_data(self):
         """导入Excel/CSV数据"""
+        if self.is_table_margin_data_mode():
+            self.import_margin_data_from_order_table()
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择导入文件", "",
             "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*.*)"
@@ -4462,6 +5388,7 @@ class StoreMarginDialog(QDialog):
             quantity_col = col_mapping["quantity"]
             date_col = col_mapping.get("order_date")
             status_col = col_mapping.get("order_status")
+            actual_amount_col = col_mapping.get("actual_amount")
             products_in_store = self.db.safe_fetchall(
                 "SELECT id, name FROM products WHERE store_id=? ORDER BY sort_order", (self.store_id,)
             )
@@ -4495,6 +5422,9 @@ class StoreMarginDialog(QDialog):
                     status_value = None
                     if status_col is not None and status_col < len(row):
                         status_value = str(row[status_col]).strip() if row[status_col] else ""
+                    actual_amount_value = 0.0
+                    if actual_amount_col is not None and actual_amount_col < len(row):
+                        actual_amount_value = self._parse_amount_value(row[actual_amount_col])
                 except:
                     continue
                 if not product_id_value or product_id_value == "None":
@@ -4536,8 +5466,9 @@ class StoreMarginDialog(QDialog):
                     matched_count += 1
                     key = (product_id_value, spec_code_str)
                     if key not in order_data:
-                        order_data[key] = {"count": 0, "refund_count": 0, "dates": []}
+                        order_data[key] = {"count": 0, "refund_count": 0, "dates": [], "actual_amount": 0.0}
                     order_data[key]["count"] += quantity
+                    order_data[key]["actual_amount"] += actual_amount_value
                     if order_date_str:
                         order_data[key]["dates"].append(order_date_str)
                     if status_value:
@@ -4575,7 +5506,7 @@ class StoreMarginDialog(QDialog):
             total_products = len(set(prod_id for prod_id, spec_code in order_data.keys()))
             total_specs = len(order_data)
             total_orders = sum(data["count"] for data in order_data.values())
-            total_amount = 0  # 不再导入实收金额
+            total_amount = sum(data.get("actual_amount", 0) for data in order_data.values())
             
             # 保存快照数据到 import_history 表（包含权重信息）
             snapshot_data = json.dumps({
@@ -4595,7 +5526,7 @@ class StoreMarginDialog(QDialog):
                 date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
                 self.db.safe_execute(
                     "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.store_id, product_id_val, spec_code, data["count"], import_time, date_range, 0, data.get("refund_count", 0))
+                    (self.store_id, product_id_val, spec_code, data["count"], import_time, date_range, data.get("actual_amount", 0), data.get("refund_count", 0))
                 )
             self.load_products()
             self.calculate_weights_from_orders()
@@ -4613,7 +5544,7 @@ class StoreMarginDialog(QDialog):
 
     def _auto_detect_columns(self, headers):
         """自动检测列映射"""
-        mapping = {"product_id": None, "spec_code": None, "quantity": None, "order_date": None, "order_status": None}
+        mapping = {"product_id": None, "spec_code": None, "quantity": None, "order_date": None, "order_status": None, "actual_amount": None}
         product_id_keywords = ["商品id", "商品ID", "id", "产品id", "产品ID", "product_id"]
         spec_code_keywords = ["规格编码", "规格code", "spec_code", "规格code", "sku", "SKU"]
         quantity_keywords = ["数量", "订单数量", "quantity", "count", "num", "销售数量"]
@@ -4621,6 +5552,13 @@ class StoreMarginDialog(QDialog):
         order_status_keywords = ["订单状态", "状态", "order_status", "order state"]
         for idx, header in enumerate(headers):
             header_lower = header.lower().strip()
+            if mapping["spec_code"] is None and "规格维度" in header:
+                mapping["spec_code"] = idx
+            if mapping["actual_amount"] is None:
+                for kw in ["实收金额", "实付金额", "支付金额", "成交金额", "订单实收", "actual_amount", "pay_amount", "payment"]:
+                    if kw.lower() in header_lower:
+                        mapping["actual_amount"] = idx
+                        break
             if mapping["product_id"] is None:
                 for kw in product_id_keywords:
                     if kw in header_lower:
@@ -4691,6 +5629,13 @@ class StoreMarginDialog(QDialog):
             combo_order_status.setCurrentIndex(auto_mapping["order_status"] + 1)
         layout.addWidget(QLabel("订单状态列（用于识别退款）："))
         layout.addWidget(combo_order_status)
+
+        combo_actual_amount = QComboBox()
+        combo_actual_amount.addItems(["-- 不选择 --"] + headers)
+        if auto_mapping.get("actual_amount") is not None:
+            combo_actual_amount.setCurrentIndex(auto_mapping["actual_amount"] + 1)
+        layout.addWidget(QLabel("实收金额列："))
+        layout.addWidget(combo_actual_amount)
         
         layout.addSpacing(20)
         btn_layout = QHBoxLayout()
@@ -4701,7 +5646,7 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
         
-        result = {"product_id": None, "spec_code": None, "quantity": None, "order_date": None, "order_status": None}
+        result = {"product_id": None, "spec_code": None, "quantity": None, "order_date": None, "order_status": None, "actual_amount": None}
         
         def on_ok():
             result["product_id"] = combo_product_id.currentIndex() - 1 if combo_product_id.currentIndex() > 0 else None
@@ -4709,6 +5654,7 @@ class StoreMarginDialog(QDialog):
             result["quantity"] = combo_quantity.currentIndex() - 1 if combo_quantity.currentIndex() > 0 else None
             result["order_date"] = combo_order_date.currentIndex() - 1 if combo_order_date.currentIndex() > 0 else None
             result["order_status"] = combo_order_status.currentIndex() - 1 if combo_order_status.currentIndex() > 0 else None
+            result["actual_amount"] = combo_actual_amount.currentIndex() - 1 if combo_actual_amount.currentIndex() > 0 else None
             dialog.accept()
         
         btn_ok.clicked.connect(on_ok)
@@ -4772,19 +5718,26 @@ class StoreMarginDialog(QDialog):
                         refund_orders_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
                     max_refund_spec = None
                     max_refund_rate_val = -1
-                    for spec_code, oc, rc in spec_data:
+                    valid_spec_codes = self._get_valid_spec_codes(user_product_id)
+                    display_spec_data = [
+                        item for item in spec_data
+                        if not valid_spec_codes or (item[0] and str(item[0]).strip() in valid_spec_codes)
+                    ]
+                    for spec_code, oc, rc in display_spec_data:
                         if oc > 0 and rc > 0:
                             sr = rc / oc
                             if sr > max_refund_rate_val:
                                 max_refund_rate_val = sr
                                 max_refund_spec = spec_code
                     if refund_ratio_label:
+                        refund_spec_mode = self._get_spec_display_mode("store_margin_refund_spec_display")
                         if max_refund_spec:
-                            refund_ratio_label.setText(str(max_refund_spec))
-                            refund_ratio_label.setStyleSheet("color: #e74c3c; font-size: 19px; font-weight: bold;")
+                            refund_spec_text = self._get_spec_display_text(user_product_id, max_refund_spec, refund_spec_mode)
+                            self._set_spec_label_text(refund_ratio_label, refund_spec_text, refund_spec_mode, alert=True)
                         else:
                             refund_ratio_label.setText("无")
                             refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
+                            self._set_spec_label_text(refund_ratio_label, "无", refund_spec_mode)
                 else:
                     if refund_orders_label:
                         refund_orders_label.setText("无")
@@ -5153,7 +6106,7 @@ class ImportHistoryDialog(QDialog):
         """检查是否有旧数据（imported_orders有数据但历史快照无效）"""
         # 检查 imported_orders 是否有数据
         current_orders = self.db.safe_fetchall(
-            "SELECT product_id, spec_code, order_count, import_time FROM imported_orders WHERE store_id=?", (self.store_id,)
+            "SELECT product_id, spec_code, order_count, import_time, actual_amount FROM imported_orders WHERE store_id=?", (self.store_id,)
         )
         has_current_orders = current_orders and len(current_orders) > 0
 
@@ -5179,13 +6132,15 @@ class ImportHistoryDialog(QDialog):
             total_products = set()
             total_specs = 0
             total_orders = 0
+            total_amount = 0
             
-            for prod_id, spec_code, order_count, import_time in current_orders:
+            for prod_id, spec_code, order_count, import_time, actual_amount in current_orders:
                 key = f"{prod_id}_{spec_code}"
-                orders_data[key] = {"count": order_count, "dates": []}
+                orders_data[key] = {"count": order_count, "dates": [], "actual_amount": actual_amount or 0}
                 total_products.add(prod_id)
                 total_specs += 1
                 total_orders += order_count
+                total_amount += actual_amount or 0
             
             # 创建历史快照
             snapshot_data = json.dumps({"orders": orders_data})
@@ -5193,7 +6148,7 @@ class ImportHistoryDialog(QDialog):
                 INSERT INTO import_history (store_id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (self.store_id, import_time if import_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                  "旧数据导入", len(total_products), total_specs, total_orders, 0, snapshot_data))
+                  "旧数据导入", len(total_products), total_specs, total_orders, total_amount, snapshot_data))
             
             if self.parent_window:
                 self.parent_window.main_app.show_toast("✅ 已为旧数据创建历史快照")
@@ -5505,6 +6460,7 @@ class ImportHistoryDialog(QDialog):
                 spec_code = parts[1]
                 order_count = data.get("count", 0)
                 refund_count = data.get("refund_count", 0)
+                actual_amount = data.get("actual_amount", 0)
                 dates = data.get("dates", [])
                 earliest_date = min(dates) if dates else None
                 latest_date = max(dates) if dates else None
@@ -5515,7 +6471,7 @@ class ImportHistoryDialog(QDialog):
                     (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (self.store_id, user_product_id, spec_code, order_count,
-                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), date_range, 0, refund_count))
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), date_range, actual_amount, refund_count))
 
         # 关闭对话框
         self.accept()

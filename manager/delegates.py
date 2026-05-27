@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """表格列代理：规格名、居中、权重（含锁定图标）"""
-from PyQt5.QtWidgets import QStyledItemDelegate, QPlainTextEdit, QLineEdit
+from PyQt5.QtWidgets import QStyledItemDelegate, QPlainTextEdit, QLineEdit, QStyle
 from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QDoubleValidator, QFont
+from PyQt5.QtGui import QDoubleValidator, QFont, QColor
+
+
+SPEC_TABLE_SELECTION_BG = QColor("#dceeff")
 
 
 class SpecNameDelegate(QStyledItemDelegate):
@@ -85,7 +88,14 @@ class CenterAlignDelegate(QStyledItemDelegate):
         font.setFamily("YouYuan")
         font.setBold(True)
         painter.setFont(font)
-        painter.fillRect(option.rect, option.backgroundBrush)
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, SPEC_TABLE_SELECTION_BG)
+        else:
+            background = index.data(Qt.BackgroundRole)
+            if background:
+                painter.fillRect(option.rect, background)
+            else:
+                painter.fillRect(option.rect, option.backgroundBrush)
         text = index.data(Qt.DisplayRole)
         if text:
             painter.drawText(option.rect, Qt.AlignCenter, str(text))
@@ -115,6 +125,8 @@ class WeightDelegate(QStyledItemDelegate):
         font.setFamily("YouYuan")
         font.setBold(True)
         painter.setFont(font)
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, SPEC_TABLE_SELECTION_BG)
         painter.drawText(text_rect, Qt.AlignCenter, num_text)
         if is_locked:
             painter.drawText(icon_rect, Qt.AlignCenter, self.lock_icon)

@@ -1,5 +1,5 @@
 # ================= 版本信息 =================
-VERSION = "3.6"
+VERSION = "3.13"
 
 # ================= 系统标准库 =================
 import sys
@@ -10,7 +10,9 @@ import traceback
 import re
 import requests
 import subprocess
-from datetime import datetime
+import ctypes
+import shutil
+from datetime import datetime, timedelta
 
 # Windows下隐藏控制台窗口的常量（防止黑框闪烁）
 if sys.platform == 'win32':
@@ -46,7 +48,8 @@ from PyQt5.QtWidgets import (
     QCalendarWidget, QDateEdit, QStatusBar, QProgressBar, QProgressDialog, QSplitter,
     QGroupBox, QRadioButton, QCheckBox, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QMenu, QAction, QToolBar, QSystemTrayIcon,
-    QGraphicsDropShadowEffect, QSizePolicy, QShortcut
+    QGraphicsDropShadowEffect, QSizePolicy, QShortcut, QStyleOptionViewItem,
+    QToolTip
 )
 
 from PyQt5.QtCore import (
@@ -61,6 +64,7 @@ from PyQt5.QtGui import (
     QPainter, QPen, QBrush, QCursor, QKeySequence, QPalette, QImage
 )
 from PyQt5.QtSvg import QSvgRenderer
+from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 
 import sqlite3
 import os
@@ -80,7 +84,7 @@ try:
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
         CostLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
-        DailyTaskDialog, ProductSpecDialog,
+        DailyTaskDialog, TaskReminderPopupDialog, ProductSpecDialog,
     )
     from manager.dialogs.cost_import import read_cost_file, read_cost_row_colors
 except ImportError:
@@ -88,7 +92,7 @@ except ImportError:
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
         CostLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
-        DailyTaskDialog, ProductSpecDialog,
+        DailyTaskDialog, TaskReminderPopupDialog, ProductSpecDialog,
     )
     from dialogs.cost_import import read_cost_file, read_cost_row_colors
 
@@ -108,6 +112,85 @@ except ImportError:
     from ui_utils import convert_markdown_to_html
 
 
+SINGLE_INSTANCE_KEY = "shop_manager_v3_7_single_instance"
+SINGLE_INSTANCE_MUTEX_NAME = "shop_manager_v3_7_single_instance_mutex"
+MAIN_WINDOW_TITLE = f"电商店铺操作记录管理工具 v{VERSION}"
+ERROR_ALREADY_EXISTS = 183
+SW_SHOW = 5
+SW_RESTORE = 9
+
+
+def notify_existing_instance():
+    socket = QLocalSocket()
+    socket.connectToServer(SINGLE_INSTANCE_KEY)
+    if not socket.waitForConnected(300):
+        socket.abort()
+        return False
+
+    socket.write(b"activate")
+    socket.flush()
+    socket.waitForBytesWritten(300)
+    socket.disconnectFromServer()
+    return True
+
+
+def acquire_single_instance_mutex():
+    if sys.platform != 'win32':
+        return None, False
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+    if not handle:
+        return None, False
+    return handle, kernel32.GetLastError() == ERROR_ALREADY_EXISTS
+
+
+def activate_existing_window_by_title():
+    if sys.platform != 'win32':
+        return False
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, MAIN_WINDOW_TITLE)
+    if not hwnd:
+        return False
+
+    user32.ShowWindow(hwnd, SW_SHOW)
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def setup_single_instance(window_holder):
+    if notify_existing_instance():
+        return None, True
+
+    server = QLocalServer()
+
+    def activate_window():
+        window = window_holder.get("window")
+        if window is not None:
+            window.show_window()
+
+    def handle_new_connection():
+        while server.hasPendingConnections():
+            client = server.nextPendingConnection()
+            client.readAll()
+            client.disconnectFromServer()
+        QTimer.singleShot(0, activate_window)
+
+    if not server.listen(SINGLE_INSTANCE_KEY):
+        if notify_existing_instance():
+            return None, True
+        QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+        if not server.listen(SINGLE_INSTANCE_KEY):
+            if notify_existing_instance():
+                return None, True
+            return None, False
+
+    server.newConnection.connect(handle_new_connection)
+    return server, False
+
+
 
 class TodayColumnDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, today_col=-1):
@@ -125,6 +208,209 @@ class TodayColumnDelegate(QStyledItemDelegate):
             option.palette.setColor(QPalette.Text, self._today_text)
             option.palette.setColor(QPalette.HighlightedText, self._today_text)
         super().paint(painter, option, index)
+
+
+class OperationRecordDelegate(TodayColumnDelegate):
+    METRIC_STYLES = {
+        "规格售价": ("#e8f4ff", "#1f6fb2"),
+        "规格新增": ("#e8f8ef", "#1e8449"),
+        "规格删除": ("#fdecea", "#c0392b"),
+        "规格名称": ("#f3e8ff", "#7d3c98"),
+        "优惠券": ("#fff3cd", "#b7791f"),
+        "新客立减": ("#fce4ec", "#ad1457"),
+        "投产": ("#e8f0fe", "#2f5fb3"),
+        "成交出价": ("#e0f7fa", "#00838f"),
+        "退货率": ("#fff0e6", "#d35400"),
+        "推广模式": ("#eceff1", "#455a64"),
+        "投产/出价模式": ("#e8f0fe", "#2f5fb3"),
+        "主轮播图": ("#e8f5e9", "#2e7d32"),
+        "限时限量购": ("#fdecea", "#c0392b"),
+        "营销活动": ("#f3e8ff", "#7d3c98"),
+        "综合毛利": ("#e8f8ef", "#1e8449"),
+        "商品标题": ("#fff7e6", "#a35f00"),
+        "新建链接": ("#e8f8ef", "#1e8449"),
+    }
+
+    def __init__(self, parent=None, today_col=-1):
+        super().__init__(parent, today_col)
+        self._time_bg = QColor("#eef2f7")
+        self._time_fg = QColor("#34495e")
+        self._spec_bg = QColor("#e9f2ff")
+        self._spec_fg = QColor("#245269")
+        self._text_fg = QColor("#1f2d3d")
+        self._selected_bg = QColor("#ffe0b2")
+        self._fallback_font = QFont("Microsoft YaHei", 11)
+        self._fallback_font.setBold(True)
+
+    def paint(self, painter, option, index):
+        records = index.data(Qt.UserRole)
+        if not self._has_structured_records(records):
+            super().paint(painter, option, index)
+            return
+
+        painter.save()
+        self._paint_background(painter, option, index)
+        painter.setClipRect(option.rect.adjusted(1, 1, -1, -1))
+
+        x = option.rect.left() + 5
+        y = option.rect.top() + 5
+        right = option.rect.right() - 5
+        line_height = 22
+        normal_font = QFont("Microsoft YaHei", 10)
+        bold_font = QFont("Microsoft YaHei", 10)
+        bold_font.setBold(True)
+
+        for part in self._record_parts(records):
+            if y + line_height > option.rect.bottom() - 2:
+                break
+            cx = x
+            time_text = part.get("time", "")
+            if time_text:
+                cx = self._draw_pill(painter, cx, y, time_text, self._time_bg, self._time_fg, bold_font, right)
+
+            metric = part.get("metric", "记录")
+            bg, fg = self._metric_colors(metric)
+            cx = self._draw_pill(painter, cx, y, metric, bg, fg, bold_font, right)
+
+            spec_text = part.get("spec", "")
+            if spec_text:
+                spec_width = QFontMetrics(bold_font).horizontalAdvance(spec_text) + 12
+                if cx + spec_width > right:
+                    y += line_height
+                    if y + line_height > option.rect.bottom() - 2:
+                        break
+                    cx = x
+                y = self._draw_wrapped_block(painter, cx, y + 2, spec_text, self._spec_bg, self._spec_fg, bold_font, right)
+                cx = x
+
+            text = part.get("text", "")
+            if text:
+                start_x = cx if cx > x else x
+                if start_x >= right:
+                    start_x = x
+                    y += line_height
+                if y + line_height > option.rect.bottom() - 2:
+                    break
+                y = self._draw_wrapped_text(painter, start_x, y, text, normal_font, right, option.rect.bottom() - 2)
+            else:
+                y += line_height
+
+        painter.restore()
+
+    def _paint_background(self, painter, option, index):
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, self._selected_bg)
+            return
+        bg = index.data(Qt.BackgroundRole)
+        if isinstance(bg, QBrush) and bg.style() != Qt.NoBrush:
+            painter.fillRect(option.rect, bg)
+            return
+        if index.column() == self._today_col and self._today_col > 0:
+            painter.fillRect(option.rect, self._today_bg)
+            return
+        painter.fillRect(option.rect, option.palette.base())
+
+    def _has_structured_records(self, records):
+        if not isinstance(records, list):
+            return False
+        return any(
+            isinstance(r, dict) and (r.get("changes") or str(r.get("text", "") or "").strip())
+            for r in records
+        )
+
+    def _record_parts(self, records):
+        parts = []
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            time_text = str(record.get("time", "") or "")
+            changes = record.get("changes") or []
+            if changes:
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    text = str(change.get("text", "") or "")
+                    metric = str(change.get("metric", "记录") or "记录")
+                    spec, cleaned = self._extract_spec_text(metric, text, change)
+                    parts.append({
+                        "time": str(change.get("time", "") or time_text),
+                        "metric": metric,
+                        "spec": spec,
+                        "text": cleaned or text,
+                    })
+            elif record.get("text"):
+                parts.append({"time": time_text, "metric": "记录", "spec": "", "text": str(record.get("text", ""))})
+        return parts
+
+    def _metric_colors(self, metric):
+        for key, colors in self.METRIC_STYLES.items():
+            if key in metric:
+                return QColor(colors[0]), QColor(colors[1])
+        return QColor("#edf2f7"), QColor("#34495e")
+
+    def _extract_spec_text(self, metric, text, change):
+        if "规格" not in metric and "规格" not in text:
+            return "", text
+
+        bracket_matches = re.findall(r"\[([^\]]{1,80})\]", text)
+        if bracket_matches:
+            spec = bracket_matches[0].strip()
+            cleaned = re.sub(r"\s*\[[^\]]{1,80}\]\s*", " ", text, count=1).strip()
+            return spec, cleaned
+
+        old_value = str(change.get("old", "") or "").strip()
+        new_value = str(change.get("new", "") or "").strip()
+        if metric == "规格名称" and (old_value or new_value):
+            return (new_value or old_value), "规格名称已修改"
+
+        for pattern in (
+            r"^(.{1,80}?)(?:售价设置为|设置售价到|从.+?(?:涨价到|降价到))",
+            r"^(?:新增规格|删除规格)\s*[:：]?\s*(.{1,80})$",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                spec = match.group(1).strip()
+                cleaned = text.replace(spec, "", 1).strip()
+                return spec, cleaned
+        return "", text
+
+    def _draw_pill(self, painter, x, y, text, bg_color, fg_color, font, right, max_width=None):
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        width = fm.horizontalAdvance(text) + 12
+        if max_width:
+            width = min(width, max_width)
+        if x + width > right:
+            return x
+        rect = QRect(x, y + 2, width, 18)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(fg_color)
+        elided = fm.elidedText(text, Qt.ElideRight, width - 10)
+        painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.AlignCenter, elided)
+        return x + width + 4
+
+    def _draw_wrapped_block(self, painter, x, y, text, bg_color, fg_color, font, right):
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        text_rect = fm.boundingRect(QRect(0, 0, max(20, right - x - 10), 1000), Qt.TextWordWrap, text)
+        rect = QRect(x, y, max(20, right - x), text_rect.height() + 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(fg_color)
+        painter.drawText(rect.adjusted(5, 4, -5, -4), Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, text)
+        return rect.bottom() + 4
+
+    def _draw_wrapped_text(self, painter, x, y, text, font, right, bottom):
+        painter.setFont(font)
+        painter.setPen(self._text_fg)
+        fm = QFontMetrics(font)
+        rect = QRect(x, y + 2, max(20, right - x), max(18, bottom - y))
+        bounds = fm.boundingRect(rect, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, text)
+        painter.drawText(rect, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, text)
+        return min(bottom + 1, y + max(22, bounds.height() + 6))
 
 
 class CloudSyncProgressDialog(QDialog):
@@ -397,8 +683,21 @@ class ShopManagerApp(QMainWindow):
         self.product_sort_mode = self.db.get_setting("product_sort_mode", "order") or "order"
 
         self.is_loading = False  # 防止重复加载
+        self._is_quitting = False  # 防止退出时重复触发自动上传
+        self._is_switching_local_account = False  # 防止本地账号切换重复触发
         self._today_col = -1  # 今日列索引，-1表示不是当月
+        self._startup_locate_today_pending = True
+        self.current_category_filter = ""
+        self.current_search_match_ids = None
+        self._search_highlighted_rows = set()
+        self._tag_filter_global_filter_installed = False
         self.current_store_filter = set()  # 店铺筛选状态
+        self.daily_task_dialog = None
+        self._active_reminder_ids = set()
+        self._task_reminder_popup_active = False
+        self._record_tooltip_cell = None
+        self._record_tooltip_text = ""
+        self._record_tooltip_pos = QPoint()
 
         # 初始化云同步管理器
         self.cloud_manager = None
@@ -419,8 +718,97 @@ class ShopManagerApp(QMainWindow):
         
         # 初始化快捷键
         self.init_shortcuts()
+        self.start_global_reminder_check()
         
         
+
+    def start_global_reminder_check(self):
+        """启动主界面的全局待办提醒检查。"""
+        self.task_reminder_timer = QTimer(self)
+        self.task_reminder_timer.timeout.connect(self.check_due_task_reminders)
+        self.task_reminder_timer.start(10000)
+        QTimer.singleShot(500, self.check_due_task_reminders)
+
+    def check_due_task_reminders(self):
+        """检查已到时间的待办提醒，并按顺序强制弹窗。"""
+        if getattr(self, "_task_reminder_popup_active", False):
+            return
+        try:
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            rows = self.db.safe_fetchall(
+                """SELECT id, store_id, product_id, task_content, remind_time
+                   FROM task_reminders
+                   WHERE is_reminded = 0 AND remind_time <= ?
+                   ORDER BY remind_time ASC
+                   LIMIT 1""",
+                (now_text,)
+            )
+            if not rows:
+                return
+            rem_id, store_id, product_id, task_content, remind_time = rows[0]
+            if rem_id in self._active_reminder_ids:
+                return
+
+            reminder = self._build_task_reminder_payload(rem_id, store_id, product_id, task_content, remind_time)
+            self._active_reminder_ids.add(rem_id)
+            self._task_reminder_popup_active = True
+            try:
+                self.show_window()
+                dialog = TaskReminderPopupDialog(reminder, self)
+                dialog.raise_()
+                dialog.activateWindow()
+                result = dialog.exec_()
+                if result == QDialog.Accepted and getattr(dialog, "completed", False):
+                    self.db.safe_execute("DELETE FROM task_reminders WHERE id = ?", (rem_id,))
+                    self._refresh_after_task_reminder_completed(product_id)
+            finally:
+                self._active_reminder_ids.discard(rem_id)
+                self._task_reminder_popup_active = False
+                QTimer.singleShot(100, self.check_due_task_reminders)
+        except Exception as e:
+            self._task_reminder_popup_active = False
+            print(f"全局待办提醒检查失败: {e}")
+
+    def _build_task_reminder_payload(self, rem_id, store_id, product_id, task_content, remind_time):
+        store_name = ""
+        product_code = str(product_id)
+        product_title = ""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT name FROM stores WHERE id=?", (store_id,))
+            if store_rows and store_rows[0][0]:
+                store_name = store_rows[0][0]
+        except Exception:
+            pass
+        try:
+            product_rows = self.db.safe_fetchall("SELECT name, title FROM products WHERE id=?", (product_id,))
+            if product_rows and product_rows[0][0]:
+                product_code = str(product_rows[0][0])
+                product_title = product_rows[0][1] or ""
+        except Exception:
+            pass
+        return {
+            "id": rem_id,
+            "store_id": store_id,
+            "store_name": store_name,
+            "product_id": product_id,
+            "product_code": product_code,
+            "product_title": product_title,
+            "task_content": task_content,
+            "remind_time": remind_time,
+        }
+
+    def _refresh_after_task_reminder_completed(self, product_id):
+        try:
+            self.force_refresh_product_widget(product_id)
+        except Exception as e:
+            print(f"刷新提醒商品标签失败: {e}")
+        dialog = getattr(self, "daily_task_dialog", None)
+        if dialog:
+            try:
+                dialog.load_reminders()
+                dialog.load_tasks()
+            except Exception as e:
+                print(f"刷新每日任务窗口失败: {e}")
 
     def init_system_tray(self):
         """初始化系统托盘"""
@@ -529,6 +917,40 @@ class ShopManagerApp(QMainWindow):
         self.search_input.setFocus()
         self.search_input.selectAll()
 
+    def ensure_upload_account_allowed(self, target_account):
+        """确保本地表格数据只能上传到其归属账号。"""
+        if not self.cloud_manager or not target_account:
+            return False
+
+        active_account = self.cloud_manager.get_active_data_account()
+        if active_account:
+            if active_account.get('id') == target_account.get('id'):
+                return True
+            QMessageBox.warning(
+                self,
+                "账号不一致，已取消上传",
+                f"当前表格数据属于账号：{active_account.get('name', '未知')}\n"
+                f"你当前选择的云同步账号：{target_account.get('name', '未知')}\n\n"
+                f"为避免覆盖错误存档，本次上传已取消。\n"
+                f"请先切换到正确账号，或下载对应账号的数据后再上传。"
+            )
+            return False
+
+        reply = QMessageBox.question(
+            self,
+            "确认数据归属账号",
+            f"当前本地表格数据还没有绑定云同步账号。\n\n"
+            f"是否确认这份本地数据属于账号：{target_account.get('name', '未知')}？\n\n"
+            f"确认后以后只能上传到这个账号，避免误覆盖其他账号存档。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        self.cloud_manager.set_active_data_account(target_account['id'])
+        self.update_cloud_account_label()
+        return True
+
     def quick_cloud_sync(self):
         """快速云同步 - 弹窗进度条 + 完成后自动关闭并气泡提示"""
         if not self.cloud_manager:
@@ -539,13 +961,25 @@ class ShopManagerApp(QMainWindow):
         if not current:
             self.show_toast("⚠️ 请先登录云同步账号", 1000)
             return
+        if not self.ensure_upload_account_allowed(current):
+            return
 
         progress_dialog = CloudSyncProgressDialog(self)
-        progress_dialog.set_status("⏳ 正在导出本地数据...", 10)
+        progress_dialog.set_status("💾 正在备份本地数据...", 10)
         progress_dialog.show()
         QApplication.processEvents()
 
         try:
+            local_backup_ok, local_backup_result = self.cloud_manager.save_local_backup_before_upload(current['id'])
+            if not local_backup_ok:
+                progress_dialog.set_error(f"❌ 本地备份失败: {local_backup_result}")
+                progress_dialog.progress_bar.setValue(100)
+                QTimer.singleShot(1500, progress_dialog.close)
+                QMessageBox.warning(self, "上传已取消", f"本地上传前备份失败，已取消上传：\n{local_backup_result}")
+                return
+
+            progress_dialog.set_status("⏳ 正在导出本地数据...", 25)
+            QApplication.processEvents()
             data = self.cloud_manager.export_data_to_json()
             if not data:
                 progress_dialog.set_error("❌ 数据导出失败")
@@ -554,24 +988,27 @@ class ShopManagerApp(QMainWindow):
                 QTimer.singleShot(1600, lambda: self.show_toast("❌ 数据导出失败", 1000))
                 return
 
-            progress_dialog.set_status("💾 正在保存本地备份...", 30)
-            QApplication.processEvents()
-            local_ok, local_result = self.cloud_manager.save_local_backup(current['id'])
-
-            progress_dialog.set_status("☁️ 正在上传到云端...", 50)
+            progress_dialog.set_status("💾 正在备份云端旧数据...", 40)
             QApplication.processEvents()
 
-            try:
-                from manager.cloud_sync import TencentCOSUploader
-            except ImportError:
-                from cloud_sync import TencentCOSUploader
-
-            uploader = TencentCOSUploader(
-                current['secret_id'],
-                current['secret_key'],
-                current['bucket'],
-                current['region']
-            )
+            uploader = self._create_cos_uploader(current)
+            cloud_ok, cloud_result = uploader.download_json(current['folder'])
+            cloud_backup_path = "云端无旧数据"
+            if cloud_ok and cloud_result:
+                backup_ok, backup_result = self.cloud_manager.save_cloud_backup_before_upload(current['id'], cloud_result)
+                if not backup_ok:
+                    progress_dialog.set_error(f"❌ 云端旧数据备份失败: {backup_result}")
+                    progress_dialog.progress_bar.setValue(100)
+                    QTimer.singleShot(1500, progress_dialog.close)
+                    QMessageBox.warning(self, "上传已取消", f"云端旧数据备份失败，已取消上传：\n{backup_result}")
+                    return
+                cloud_backup_path = backup_result
+            elif not cloud_ok and "云端没有数据" not in str(cloud_result):
+                progress_dialog.set_error(f"❌ 云端旧数据读取失败: {cloud_result}")
+                progress_dialog.progress_bar.setValue(100)
+                QTimer.singleShot(1500, progress_dialog.close)
+                QMessageBox.warning(self, "上传已取消", f"云端旧数据读取失败，已取消上传：\n{cloud_result}")
+                return
 
             progress_dialog.set_status("☁️ 正在上传到云端...", 70)
             QApplication.processEvents()
@@ -582,7 +1019,7 @@ class ShopManagerApp(QMainWindow):
                 progress_dialog.set_status("✅ 上传完成", 100)
                 QApplication.processEvents()
                 QTimer.singleShot(500, progress_dialog.close)
-                QTimer.singleShot(1000, lambda: self.show_toast("✅ 已上传云同步", 1000))
+                QTimer.singleShot(1000, lambda l=local_backup_result: self.show_toast(f"✅ 已上传云同步，本地备份已保留(最多5份): {l}", 1800))
             else:
                 progress_dialog.set_error(f"❌ 上传失败: {result}")
                 progress_dialog.progress_bar.setValue(100)
@@ -596,8 +1033,322 @@ class ShopManagerApp(QMainWindow):
             QTimer.singleShot(1500, progress_dialog.close)
             QTimer.singleShot(2000, lambda: self.show_toast(f"❌ 上传异常", 1000))
 
+    def _create_cos_uploader(self, account):
+        try:
+            from manager.cloud_sync import TencentCOSUploader
+        except ImportError:
+            from cloud_sync import TencentCOSUploader
+
+        return TencentCOSUploader(
+            account['secret_id'],
+            account['secret_key'],
+            account['bucket'],
+            account['region']
+        )
+
+    def _normalized_sync_data(self, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        normalized.pop('export_time', None)
+        return normalized
+
+    def _is_cloud_data_changed(self, cloud_data):
+        local_data = self.cloud_manager.export_data_to_json()
+        if not local_data:
+            return True
+
+        local_normalized = self._normalized_sync_data(local_data)
+        cloud_normalized = self._normalized_sync_data(cloud_data)
+        return json.dumps(local_normalized, ensure_ascii=False, sort_keys=True) != json.dumps(cloud_normalized, ensure_ascii=False, sort_keys=True)
+
+    def replace_database_from_local_profile(self, profile_path, account_id):
+        """用本地账号档案替换当前主库，并刷新界面。"""
+        if not os.path.exists(profile_path):
+            return False, "本地账号数据文件不存在"
+
+        profile_path = os.path.abspath(profile_path)
+        db_path = os.path.abspath(self.db.db_path)
+        temp_path = f"{db_path}.switching"
+
+        if profile_path == db_path:
+            return True, db_path
+
+        try:
+            if hasattr(self, '_scroll_save_timer') and self._scroll_save_timer.isActive():
+                self._scroll_save_timer.stop()
+
+            try:
+                self.db.conn.commit()
+            except Exception:
+                pass
+            try:
+                self.db.conn.close()
+            except Exception:
+                pass
+
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            shutil.copy2(profile_path, temp_path)
+            os.replace(temp_path, db_path)
+
+            self.db = SafeDatabaseManager()
+            if self.cloud_manager:
+                self.cloud_manager.db = self.db
+            self.load_data_safe()
+            if self.cloud_manager:
+                self.cloud_manager.set_active_data_account(account_id)
+            self.update_cloud_account_label()
+            return True, db_path
+        except Exception as e:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            try:
+                self.db = SafeDatabaseManager()
+                if self.cloud_manager:
+                    self.cloud_manager.db = self.db
+            except Exception:
+                pass
+            return False, str(e)
+
+    def _resolve_next_local_profile_account(self):
+        """按当前应用账号自动推断下一个要切换的本地账号。"""
+        if not self.cloud_manager:
+            return None, None, "云同步管理器未初始化"
+
+        available_profiles = self.cloud_manager.get_accounts_with_local_profiles()
+        if not available_profiles:
+            return None, None, "没有找到任何本地账号数据。"
+
+        active_account = self.cloud_manager.get_active_data_account()
+        active_id = active_account.get('id') if active_account else None
+        candidates = [
+            (acc, path)
+            for acc, path in available_profiles
+            if acc.get('id') != active_id
+        ]
+        if not candidates:
+            return None, None, "没有其他可切换的本地账号数据。"
+
+        if len(candidates) == 1:
+            target_account, _ = candidates[0]
+            return target_account, target_account.get('id'), None
+
+        current = self.cloud_manager.get_current_account()
+        if current:
+            for acc, _ in candidates:
+                if acc.get('id') == current.get('id'):
+                    return acc, acc.get('id'), None
+
+        target_account, _ = candidates[0]
+        return target_account, target_account.get('id'), None
+
+    def show_local_account_switch_menu(self):
+        """显示可切换的本地账号列表，点击账号后自动切换。"""
+        if self._is_switching_local_account:
+            return
+        if not self.cloud_manager:
+            QMessageBox.warning(self, "提示", "云同步管理器未初始化")
+            return
+
+        available_profiles = self.cloud_manager.get_accounts_with_local_profiles()
+        if not available_profiles:
+            QMessageBox.warning(self, "提示", "没有找到任何本地账号数据。")
+            return
+
+        active_account = self.cloud_manager.get_active_data_account()
+        active_id = active_account.get('id') if active_account else None
+        menu = QMenu(self)
+        for account, _profile_path in available_profiles:
+            account_id = account.get('id')
+            account_name = account.get('name', '未知')
+            action_text = f"✓ {account_name}" if account_id == active_id else account_name
+            action = QAction(action_text, menu)
+            action.setEnabled(account_id != active_id)
+            action.triggered.connect(lambda _checked=False, acc=account, aid=account_id: self.switch_local_account(acc, aid))
+            menu.addAction(action)
+
+        if menu.isEmpty():
+            QMessageBox.warning(self, "提示", "没有可切换的本地账号数据。")
+            return
+
+        menu.exec_(self.btn_switch_local_account.mapToGlobal(self.btn_switch_local_account.rect().bottomLeft()))
+
+    def switch_local_account(self, target_account=None, target_id=None):
+        """切换到指定本地账号；未指定时兼容旧逻辑切到下一个账号。"""
+        if self._is_switching_local_account:
+            return
+
+        self._is_switching_local_account = True
+        if hasattr(self, 'btn_switch_local_account'):
+            self.btn_switch_local_account.setEnabled(False)
+
+        try:
+            if not self.cloud_manager:
+                QMessageBox.warning(self, "提示", "云同步管理器未初始化")
+                return
+
+            if target_account is None or target_id is None:
+                target_account, target_id, error = self._resolve_next_local_profile_account()
+                if error:
+                    QMessageBox.warning(self, "提示", error)
+                    return
+
+            profile_ok, profile_path = self.cloud_manager.load_local_profile(target_id)
+            if not profile_ok:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    f"账号「{target_account.get('name', '未知')}」暂无本地数据。\n请先保存该账号本地数据，或从云端下载一次。"
+                )
+                return
+
+            normalize_ok, normalized_path = self.cloud_manager.ensure_local_profile_normalized(target_id, profile_path)
+            if not normalize_ok:
+                QMessageBox.critical(self, "错误", f"本地账号数据迁移失败：{normalized_path}")
+                return
+            profile_path = normalized_path
+
+            active_account = self.cloud_manager.get_active_data_account()
+            if not active_account:
+                current = self.cloud_manager.get_current_account()
+                if not current:
+                    QMessageBox.warning(self, "请先绑定当前数据", "当前主表格数据还没有绑定本地账号，请先在云同步中选择当前数据所属账号。")
+                    return
+
+                if not self.cloud_manager.set_active_data_account(current['id']):
+                    QMessageBox.critical(self, "错误", "绑定当前应用账号失败")
+                    return
+                active_account = current
+                self.update_cloud_account_label()
+
+            if active_account.get('id') == target_id:
+                QMessageBox.information(self, "提示", f"当前主表格已经是账号「{target_account.get('name', '未知')}」的数据。")
+                return
+
+            save_ok, save_result = self.cloud_manager.save_local_profile(active_account['id'])
+            if not save_ok:
+                QMessageBox.critical(self, "切换已取消", f"当前应用账号数据保存失败，已取消切换：\n{save_result}")
+                return
+
+            ok, result = self.replace_database_from_local_profile(profile_path, target_id)
+            if ok:
+                self.cloud_manager.switch_account(target_id)
+                self.update_cloud_account_label()
+                self.show_toast(f"✅ 已切换到：{target_account.get('name', '未知')}", 1500)
+            else:
+                QMessageBox.critical(self, "错误", f"应用本地账号失败：{result}")
+        finally:
+            self._is_switching_local_account = False
+            if hasattr(self, 'btn_switch_local_account'):
+                self.btn_switch_local_account.setEnabled(True)
+
+    def auto_upload_on_exit(self):
+        """退出软件时自动保存本地备份并上传一次数据。"""
+        if not self.cloud_manager:
+            return True
+
+        current = self.cloud_manager.get_current_account()
+        if not current:
+            return True
+        if not self.ensure_upload_account_allowed(current):
+            return False
+
+        reply = QMessageBox.question(
+            self,
+            "退出前云同步",
+            f"是否在退出前上传并备份当前本地数据？\n\n"
+            f"当前应用账号：{self.cloud_manager.get_active_data_account().get('name', current.get('name', '未知'))}\n"
+            f"云端文件夹：{current.get('folder', '') or '默认'}\n\n"
+            f"选择“是”：先保存本地备份，再用本地数据覆盖云端。\n"
+            f"选择“否”：不上传，直接退出。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return True
+
+        progress_dialog = CloudSyncProgressDialog(self)
+        progress_dialog.setWindowTitle("退出前云同步")
+        progress_dialog.set_status("💾 正在备份本地数据...", 20)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+        try:
+            try:
+                self.db.conn.commit()
+            except Exception:
+                pass
+
+            progress_dialog.set_status("💾 正在备份本地数据...", 25)
+            QApplication.processEvents()
+            local_backup_ok, local_backup_result = self.cloud_manager.save_local_backup_before_upload(current['id'])
+            if not local_backup_ok:
+                progress_dialog.set_error(f"❌ 本地备份失败: {local_backup_result}")
+                QApplication.processEvents()
+                QMessageBox.warning(self, "退出前上传失败", f"本地上传前备份失败，已取消自动上传：\n{local_backup_result}")
+                return False
+
+            progress_dialog.set_status("📦 正在导出本地数据...", 45)
+            QApplication.processEvents()
+            data = self.cloud_manager.export_data_to_json()
+            if not data:
+                progress_dialog.set_error("❌ 数据导出失败")
+                QApplication.processEvents()
+                QMessageBox.warning(self, "退出前上传失败", "数据导出失败，已取消自动上传。")
+                return False
+
+            progress_dialog.set_status("💾 正在备份云端旧数据...", 60)
+            QApplication.processEvents()
+            uploader = self._create_cos_uploader(current)
+            cloud_ok, cloud_result = uploader.download_json(current['folder'])
+            if cloud_ok and cloud_result:
+                backup_ok, backup_result = self.cloud_manager.save_cloud_backup_before_upload(current['id'], cloud_result)
+                if not backup_ok:
+                    progress_dialog.set_error(f"❌ 云端旧数据备份失败: {backup_result}")
+                    QApplication.processEvents()
+                    QMessageBox.warning(self, "退出前上传失败", f"云端旧数据备份失败，已取消上传：\n{backup_result}")
+                    return False
+            elif not cloud_ok and "云端没有数据" not in str(cloud_result):
+                progress_dialog.set_error(f"❌ 云端旧数据读取失败: {cloud_result}")
+                QApplication.processEvents()
+                QMessageBox.warning(self, "退出前上传失败", f"云端旧数据读取失败，已取消上传：\n{cloud_result}")
+                return False
+
+            progress_dialog.set_status("☁️ 正在上传到云端...", 70)
+            QApplication.processEvents()
+            success, result = uploader.upload_json(data, current['folder'])
+            if success:
+                self.cloud_manager.update_last_upload_time(current['id'])
+                progress_dialog.set_status("✅ 上传完成，正在退出...", 100)
+                QApplication.processEvents()
+                QTimer.singleShot(300, progress_dialog.close)
+                return True
+
+            progress_dialog.set_error(f"❌ 上传失败: {result}")
+            QApplication.processEvents()
+            QMessageBox.warning(self, "退出前上传失败", f"云端上传失败：\n{result}")
+            return False
+        except Exception as e:
+            print(f"退出自动上传失败: {e}")
+            progress_dialog.set_error("❌ 上传异常")
+            QApplication.processEvents()
+            QMessageBox.warning(self, "退出前上传失败", f"上传异常：\n{str(e)}")
+            return False
+        finally:
+            progress_dialog.close()
+
     def quit_application(self):
         """退出应用"""
+        if self._is_quitting:
+            return
+        self._is_quitting = True
+        if not self.auto_upload_on_exit():
+            self._is_quitting = False
+            return
         self.tray_icon.hide()
         QApplication.quit()
     
@@ -630,10 +1381,11 @@ class ShopManagerApp(QMainWindow):
         screen_rect = screen.availableGeometry()
         frame = self.frameGeometry()
         frame.moveCenter(screen_rect.center())
+        frame.moveTop(max(screen_rect.top(), frame.top() - 40))
         self.move(frame.topLeft())
 
     def init_ui(self):
-        self.setWindowTitle(f"电商店铺操作记录管理工具 v{VERSION}")
+        self.setWindowTitle(MAIN_WINDOW_TITLE)
         self.resize(1350, 1000)
         self.center_on_screen()
 
@@ -698,24 +1450,11 @@ class ShopManagerApp(QMainWindow):
         search_layout = QHBoxLayout()
         search_label = QLabel("搜索:")
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("输入商品ID或标题...")
-        self.search_input.returnPressed.connect(self.perform_search)
-        btn_search = QPushButton("🔍搜索")
-        btn_search.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
-        btn_search.clicked.connect(self.perform_search)
+        self.search_input.setPlaceholderText("输入商品ID、标题或备注...")
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self.apply_realtime_search)
+        self.search_input.textChanged.connect(lambda: self.search_timer.start(200))
         
         self.btn_tag_filter = QPushButton("🏷️ 筛选")
         self.btn_tag_filter.setFixedWidth(80)
@@ -754,7 +1493,8 @@ class ShopManagerApp(QMainWindow):
         self.btn_store_filter.clicked.connect(self.show_store_filter_menu)
 
         self.tag_filter_menu = QDialog(self)
-        self.tag_filter_menu.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        self.tag_filter_menu.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.tag_filter_menu.setModal(False)
         self.tag_filter_menu.setStyleSheet("""
             QDialog {
                 background-color: white;
@@ -778,6 +1518,41 @@ class ShopManagerApp(QMainWindow):
         filter_title = QLabel("🏷️ 选择筛选标签")
         filter_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50; padding-bottom: 5px;")
         filter_layout.addWidget(filter_title)
+
+        category_title = QLabel("商品类型筛选")
+        category_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #2c3e50;")
+        filter_layout.addWidget(category_title)
+
+        self.category_filter_input = QLineEdit()
+        self.category_filter_input.setPlaceholderText("输入商品类型关键字...")
+        self.category_filter_input.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.category_filter_input.setInputMethodHints(Qt.ImhNone)
+        self.category_filter_input.textChanged.connect(self.refresh_category_filter_candidates)
+        filter_layout.addWidget(self.category_filter_input)
+
+        self.category_candidate_widget = QWidget()
+        self.category_candidate_layout = QVBoxLayout(self.category_candidate_widget)
+        self.category_candidate_layout.setContentsMargins(0, 0, 0, 0)
+        self.category_candidate_layout.setSpacing(4)
+        filter_layout.addWidget(self.category_candidate_widget)
+
+        self.btn_clear_category_filter = QPushButton("清除类型筛选")
+        self.btn_clear_category_filter.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #7f8c8d;
+                background-color: transparent;
+                color: #7f8c8d;
+                border-radius: 4px;
+                padding: 5px 10px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+                color: white;
+            }
+        """)
+        self.btn_clear_category_filter.clicked.connect(self.clear_category_filter)
+        filter_layout.addWidget(self.btn_clear_category_filter)
         
         icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         
@@ -791,6 +1566,10 @@ class ShopManagerApp(QMainWindow):
         self.btn_filter_limited_time.setCheckable(True)
         self.btn_filter_marketing = self._create_filter_button("营销活动", "marketing.svg", "#9b59b6")
         self.btn_filter_marketing.setCheckable(True)
+        self.btn_filter_natural_flow = self._create_filter_button("无推广", None, "#16a085")
+        self.btn_filter_natural_flow.setCheckable(True)
+        self.btn_filter_sitewide = self._create_filter_button("全站托管", None, "#8e44ad")
+        self.btn_filter_sitewide.setCheckable(True)
         
         filter_layout.addWidget(QLabel("<hr>"))
         
@@ -806,14 +1585,20 @@ class ShopManagerApp(QMainWindow):
 
         self.btn_filter_break_even = self._create_filter_button("保本 (-2%~1%)", None, "#f39c12")
         self.btn_filter_break_even.setCheckable(True)
+
+        self.btn_filter_missing_roi_bid = self._create_filter_button("未填投产/出价", None, "#8e44ad")
+        self.btn_filter_missing_roi_bid.setCheckable(True)
         
         filter_layout.addWidget(self.btn_filter_coupon)
         filter_layout.addWidget(self.btn_filter_new_customer)
         filter_layout.addWidget(self.btn_filter_limited_time)
         filter_layout.addWidget(self.btn_filter_marketing)
+        filter_layout.addWidget(self.btn_filter_natural_flow)
+        filter_layout.addWidget(self.btn_filter_sitewide)
         filter_layout.addWidget(self.btn_filter_profit)
         filter_layout.addWidget(self.btn_filter_loss)
         filter_layout.addWidget(self.btn_filter_break_even)
+        filter_layout.addWidget(self.btn_filter_missing_roi_bid)
         
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
@@ -848,7 +1633,7 @@ class ShopManagerApp(QMainWindow):
                 background-color: #7f8c8d;
             }
         """)
-        btn_clear_filter.clicked.connect(self.clear_tag_filter_selection)
+        btn_clear_filter.clicked.connect(self.clear_tag_filter)
         
         btn_layout.addWidget(btn_save_filter)
         btn_layout.addWidget(btn_clear_filter)
@@ -861,13 +1646,15 @@ class ShopManagerApp(QMainWindow):
         self.btn_filter_new_customer.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         self.btn_filter_limited_time.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         self.btn_filter_marketing.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_natural_flow.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_sitewide.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         self.btn_filter_profit.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         self.btn_filter_loss.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         self.btn_filter_break_even.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
+        self.btn_filter_missing_roi_bid.toggled.connect(lambda: self.apply_tag_filter(close_menu=False))
         
         search_layout.addWidget(search_label)
         search_layout.addWidget(self.search_input)
-        search_layout.addWidget(btn_search)
         search_layout.addWidget(self.btn_tag_filter)
         search_layout.addWidget(self.btn_store_filter)
         toolbar.addLayout(search_layout)
@@ -1035,6 +1822,14 @@ class ShopManagerApp(QMainWindow):
         self.btn_view_cost.clicked.connect(self.show_cost_library)
         bottom_left_layout.addWidget(self.btn_view_cost)
 
+        self.btn_real_promotion_mode = QPushButton("真实推广数据模式")
+        self.btn_real_promotion_mode.setCheckable(True)
+        self.btn_real_promotion_mode.setFixedSize(125, 26)
+        self.btn_real_promotion_mode.setChecked(self.db.get_setting("real_promotion_data_mode", "0") == "1")
+        self.btn_real_promotion_mode.clicked.connect(self.toggle_real_promotion_data_mode)
+        bottom_left_layout.addWidget(self.btn_real_promotion_mode)
+        self._update_real_promotion_mode_button_style()
+
         self.statusBar().addWidget(bottom_left_widget)
 
         # 状态栏右下角按钮区域
@@ -1046,6 +1841,25 @@ class ShopManagerApp(QMainWindow):
         self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 12px; padding: 0 5px;")
         self.lbl_cloud_account.setAlignment(Qt.AlignVCenter)
         status_layout.addWidget(self.lbl_cloud_account)
+
+        self.btn_switch_local_account = QPushButton("🔁 切换账号")
+        self.btn_switch_local_account.setFixedSize(90, 26)
+        self.btn_switch_local_account.setStyleSheet("""
+            QPushButton {
+                background-color: #f39c12;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #d68910;
+            }
+        """)
+        self.btn_switch_local_account.clicked.connect(self.show_local_account_switch_menu)
+        self.btn_switch_local_account.setToolTip("选择要切换的本地账号数据")
+        status_layout.addWidget(self.btn_switch_local_account)
 
         self.btn_pinduoduo = QPushButton("🛒 拼多多")
         self.btn_pinduoduo.setFixedSize(80, 26)
@@ -1099,7 +1913,7 @@ class ShopManagerApp(QMainWindow):
         self.setup_tables()
         
         # 2.5 设置今日列高亮代理
-        self.today_delegate = TodayColumnDelegate(self.table, -1)
+        self.today_delegate = OperationRecordDelegate(self.table, -1)
         self.table.setItemDelegate(self.today_delegate)
         
         # 3. 【关键】连接选中同步信号
@@ -1188,6 +2002,18 @@ class ShopManagerApp(QMainWindow):
           240: 每次滚动约0.5像素
           480: 每次滚动约0.25像素
         """
+        if event.type() == QEvent.MouseButtonPress:
+            if self._should_close_tag_filter_on_click(event):
+                self.tag_filter_menu.close()
+
+        if obj == self.table.viewport():
+            if event.type() == QEvent.ToolTip:
+                return True
+            if event.type() == QEvent.Leave:
+                self._cancel_record_tooltip()
+            elif event.type() == QEvent.MouseMove:
+                self._handle_record_tooltip_mouse_move(event)
+
         if event.type() == QEvent.Wheel:
             v_scroll = self.table.verticalScrollBar()
             h_scroll = self.table.horizontalScrollBar()
@@ -1249,6 +2075,64 @@ class ShopManagerApp(QMainWindow):
 
         return super().eventFilter(obj, event)
 
+    def _handle_record_tooltip_mouse_move(self, event):
+        index = self.table.indexAt(event.pos())
+        if not index.isValid() or index.column() <= 0:
+            self._cancel_record_tooltip()
+            return
+
+        item = self.table.item(index.row(), index.column())
+        text = item.toolTip() if item else ""
+        if not text:
+            self._cancel_record_tooltip()
+            return
+
+        cell = (index.row(), index.column())
+        global_pos = event.globalPos() if hasattr(event, "globalPos") else self.table.viewport().mapToGlobal(event.pos())
+        if cell != self._record_tooltip_cell:
+            QToolTip.hideText()
+            if hasattr(self, "_record_tooltip_timer"):
+                self._record_tooltip_timer.stop()
+            self._record_tooltip_cell = cell
+            self._record_tooltip_text = text
+            self._record_tooltip_pos = global_pos
+            self._record_tooltip_timer.start(900)
+            return
+
+        self._record_tooltip_pos = global_pos
+
+    def _show_pending_record_tooltip(self):
+        cell = getattr(self, "_record_tooltip_cell", None)
+        text = getattr(self, "_record_tooltip_text", "")
+        if not cell or not text:
+            return
+        row, col = cell
+        index = self.table.model().index(row, col)
+        if not index.isValid():
+            return
+        current_index = self.table.indexAt(self.table.viewport().mapFromGlobal(QCursor.pos()))
+        if not current_index.isValid() or current_index.row() != row or current_index.column() != col:
+            return
+        rect = self.table.visualRect(index)
+        QToolTip.showText(self._record_tooltip_pos, text, self.table.viewport(), rect)
+
+    def _cancel_record_tooltip(self):
+        if hasattr(self, "_record_tooltip_timer"):
+            self._record_tooltip_timer.stop()
+        self._record_tooltip_cell = None
+        self._record_tooltip_text = ""
+        QToolTip.hideText()
+
+    def _should_close_tag_filter_on_click(self, event):
+        if not hasattr(self, "tag_filter_menu") or not self.tag_filter_menu.isVisible():
+            return False
+        if not hasattr(event, "globalPos"):
+            return False
+        global_pos = event.globalPos()
+        menu_rect = QRect(self.tag_filter_menu.mapToGlobal(QPoint(0, 0)), self.tag_filter_menu.size())
+        button_rect = QRect(self.btn_tag_filter.mapToGlobal(QPoint(0, 0)), self.btn_tag_filter.size())
+        return not menu_rect.contains(global_pos) and not button_rect.contains(global_pos)
+
     def show_toast(self, message, duration=3000):
         """显示悬浮提示
         
@@ -1299,6 +2183,8 @@ class ShopManagerApp(QMainWindow):
         self.table.setWordWrap(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows) # 整行选中
         self.table.verticalHeader().setDefaultSectionSize(self.PRODUCT_ROW_HEIGHT)
+        self.table.setMouseTracking(True)
+        self.table.viewport().setMouseTracking(True)
         
         # --- 冻结表设置 ---
         self.frozen_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1307,6 +2193,8 @@ class ShopManagerApp(QMainWindow):
         self.frozen_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.frozen_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.frozen_table.setWordWrap(True)
+        self.frozen_table.setMouseTracking(True)
+        self.frozen_table.viewport().setMouseTracking(True)
         
         # 【关键】确保冻结表也能整行选中和获取焦点
         self.frozen_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1326,6 +2214,9 @@ class ShopManagerApp(QMainWindow):
         self._scroll_save_timer.timeout.connect(self._save_scroll_position_to_db)
         self.table.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
         self.table.horizontalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        self._record_tooltip_timer = QTimer(self)
+        self._record_tooltip_timer.setSingleShot(True)
+        self._record_tooltip_timer.timeout.connect(self._show_pending_record_tooltip)
         
         # 3. 行高同步
         self.table.verticalHeader().sectionResized.connect(self.sync_row_height)
@@ -1334,14 +2225,13 @@ class ShopManagerApp(QMainWindow):
         self.table.horizontalHeader().sectionResized.connect(self.sync_col_width)
         
         # 4. 保存列宽设置到数据库
-        self.frozen_table.horizontalHeader().sectionResized.connect(
-            lambda logicalIndex, oldSize, newSize: self.db.set_setting("col_0_width", newSize)
-        )
+        self._suppress_col0_width_save = False
+        self.frozen_table.horizontalHeader().sectionResized.connect(self._save_frozen_col_width)
             # 主表样式
         self.table.setStyleSheet("""
             /* 选中行的样式 */
             QTableWidget::item:selected {
-                background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
+                background-color: #ffe0b2;
                 color: black;                   /* 选中行文字颜色 - 黑色 */
                 border: none;
                 padding: 0px;
@@ -1350,16 +2240,10 @@ class ShopManagerApp(QMainWindow):
 
             /* 当窗口失去焦点时的选中行样式 */
             QTableWidget::item:selected:!active {
-                background-color: #d4edda;    /* 失焦时的背景色 - 灰色 */
+                background-color: #ffe0b2;
                 color: black;
                 padding: 0px;
                 outline: none;
-            }
-
-            /* 鼠标悬停时的行样式 */
-            QTableWidget::item:hover {
-                background-color: #d4edda;    /* 悬停时的背景色 - 浅蓝色 */
-                padding: 0px;
             }
 
             /* 单元格基础样式 */
@@ -1389,21 +2273,14 @@ class ShopManagerApp(QMainWindow):
 
             /* 选中行的样式 */
             QTableWidget::item:selected {
-                background-color: #e6f3ff;    /* 选中行背景色 - 蓝色 */
+                background-color: #ffe0b2;
                 color: #333333;
                 padding: 5px;
             }
 
             /* 失焦时的选中行样式 */
             QTableWidget::item:selected:!active {
-                background-color: #d4edda;
-                color: #333333;
-                padding: 5px;
-            }
-
-            /* 悬停行样式 */
-            QTableWidget::item:hover {
-                background-color: #e6f3ff;
+                background-color: #ffe0b2;
                 color: #333333;
                 padding: 5px;
             }
@@ -1413,12 +2290,14 @@ class ShopManagerApp(QMainWindow):
         indexes = self.table.selectionModel().selectedRows()
         if not indexes:
             self.frozen_table.clearSelection()
+            self._update_frozen_selection_highlight(None)
             self.frozen_table.viewport().update()
             return
         row = indexes[0].row()
         if 0 <= row < self.frozen_table.rowCount():
             self.frozen_table.blockSignals(True)
             self.frozen_table.selectRow(row)
+            self._update_frozen_selection_highlight(row)
             self.frozen_table.viewport().update()
             self.frozen_table.update()
             self.frozen_table.blockSignals(False)
@@ -1428,12 +2307,14 @@ class ShopManagerApp(QMainWindow):
         indexes = self.frozen_table.selectionModel().selectedRows()
         if not indexes:
             self.table.clearSelection()
+            self._update_frozen_selection_highlight(None)
             self.table.viewport().update()
             return
         row = indexes[0].row()
         if 0 <= row < self.table.rowCount():
             self.table.blockSignals(True)
             self.table.selectRow(row)
+            self._update_frozen_selection_highlight(row)
             self.table.viewport().update()
             self.table.update()
             self.table.blockSignals(False)    
@@ -1457,11 +2338,13 @@ class ShopManagerApp(QMainWindow):
         indexes = selected.indexes()
         if not indexes:
             self.frozen_table.clearSelection()
+            self._update_frozen_selection_highlight(None)
             return
         row = indexes[0].row()
         if 0 <= row < self.frozen_table.rowCount():
             self.frozen_table.blockSignals(True)
             self.frozen_table.selectRow(row)
+            self._update_frozen_selection_highlight(row)
             self.frozen_table.viewport().update()
             self.frozen_table.update()
             self.frozen_table.blockSignals(False)
@@ -1471,14 +2354,28 @@ class ShopManagerApp(QMainWindow):
         indexes = selected.indexes()
         if not indexes:
             self.table.clearSelection()
+            self._update_frozen_selection_highlight(None)
             return
         row = indexes[0].row()
         if 0 <= row < self.table.rowCount():
             self.table.blockSignals(True)
             self.table.selectRow(row)
+            self._update_frozen_selection_highlight(row)
             self.table.viewport().update()
             self.table.update()
             self.table.blockSignals(False)
+
+    def _update_frozen_selection_highlight(self, selected_row):
+        selected_color = QColor("#ffe0b2")
+        normal_color = QColor("#ffffff")
+        for row in range(self.frozen_table.rowCount()):
+            widget = self.frozen_table.cellWidget(row, 0)
+            if not widget:
+                continue
+            palette = widget.palette()
+            palette.setColor(QPalette.Window, selected_color if row == selected_row else normal_color)
+            widget.setAutoFillBackground(True)
+            widget.setPalette(palette)
 
     def update_frozen_geometry(self):
         try:
@@ -1500,8 +2397,68 @@ class ShopManagerApp(QMainWindow):
                 if widget and isinstance(widget, ProductWidget):
                     widget.update_margin_display()
                     widget.update_promo_badges()
+                    widget.update_task_badge()
         except Exception as e:
             print(f"强制刷新frozen_table失败: {e}")
+
+    def is_real_promotion_data_mode(self):
+        return self.db.get_setting("real_promotion_data_mode", "0") == "1"
+
+    def _update_real_promotion_mode_button_style(self):
+        if not hasattr(self, "btn_real_promotion_mode"):
+            return
+        enabled = self.btn_real_promotion_mode.isChecked()
+        self.btn_real_promotion_mode.setText("真实推广: 开" if enabled else "真实推广数据模式")
+        bg = "#e74c3c" if enabled else "#6c757d"
+        hover = "#c0392b" if enabled else "#5a6268"
+        self.btn_real_promotion_mode.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg};
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 12px;
+                padding: 1px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+        """)
+
+    def toggle_real_promotion_data_mode(self, *_args):
+        enabled = self.btn_real_promotion_mode.isChecked()
+        self.db.set_setting("real_promotion_data_mode", "1" if enabled else "0")
+        self._update_real_promotion_mode_button_style()
+        self.load_data_safe()
+
+    def _save_frozen_col_width(self, logicalIndex, oldSize, newSize):
+        if logicalIndex != 0 or getattr(self, "_suppress_col0_width_save", False):
+            return
+        saved_width = int(newSize) - (30 if self.is_real_promotion_data_mode() else 0)
+        self.db.set_setting("col_0_width", max(120, saved_width))
+
+    def get_latest_promotion_data(self, store_id, product_code):
+        cutoff = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        rows = self.db.safe_fetchall("""
+            SELECT record_date, cost, transaction_amount, net_transaction_amount, net_roi,
+                   net_orders, promotion_impression_share
+            FROM promotion_daily_data
+            WHERE store_id=? AND product_id=? AND record_date<=?
+            ORDER BY record_date DESC
+            LIMIT 1
+        """, (store_id, product_code, cutoff))
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "record_date": row[0],
+            "cost": float(row[1] or 0),
+            "transaction_amount": float(row[2] or 0),
+            "net_transaction_amount": float(row[3] or 0),
+            "net_roi": float(row[4] or 0),
+            "net_orders": float(row[5] or 0),
+            "promotion_impression_share": float(row[6] or 0),
+        }
 
     def force_refresh_product_widget(self, product_id):
         """根据 product_id 强制刷新对应的 ProductWidget"""
@@ -1512,6 +2469,7 @@ class ShopManagerApp(QMainWindow):
                     if widget and isinstance(widget, ProductWidget):
                         widget.update_margin_display()
                         widget.update_promo_badges()
+                        widget.update_task_badge()
                         widget.update()
                     self.frozen_table.viewport().update()
                     self.frozen_table.update()
@@ -1623,7 +2581,7 @@ class ShopManagerApp(QMainWindow):
             if not rows:
                 return None
             product_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_natural_flow, is_sitewide_managed, store_id, name FROM products WHERE id=?",
                 (product_id,),
             )
             if not product_rows:
@@ -1632,7 +2590,16 @@ class ShopManagerApp(QMainWindow):
             new_customer = product_rows[0][1] if product_rows[0][1] else 0
             current_roi = product_rows[0][2] if product_rows[0][2] else 0
             return_rate = product_rows[0][3] if product_rows[0][3] else 0
-            if current_roi <= 0:
+            is_natural_flow = product_rows[0][4] if product_rows[0][4] else 0
+            is_sitewide_managed = product_rows[0][5] if product_rows[0][5] else 0
+            store_id = product_rows[0][6] if product_rows[0][6] else None
+            product_code = product_rows[0][7] if product_rows[0][7] else ""
+            sitewide_roi = 0
+            if store_id:
+                store_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (store_id,))
+                sitewide_roi = store_rows[0][0] if store_rows and store_rows[0][0] else 0
+            effective_roi = sitewide_roi if is_sitewide_managed and not is_natural_flow else current_roi
+            if not is_natural_flow and effective_roi <= 0:
                 return None
 
             max_discount = max(coupon, new_customer)
@@ -1654,7 +2621,19 @@ class ShopManagerApp(QMainWindow):
                 return None
             gross_margin_pct = (total_weighted_margin / total_weight) * 100
             margin_rate_decimal = gross_margin_pct / 100
-            return (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+            if self.is_real_promotion_data_mode() and not is_natural_flow and store_id and product_code:
+                promo = self.get_latest_promotion_data(store_id, product_code)
+                if not promo:
+                    return None
+                cost = float(promo.get("cost") or 0)
+                net_amount = float(promo.get("net_transaction_amount") or 0)
+                if net_amount > 0:
+                    net_profit = net_amount * margin_rate_decimal - cost - net_amount * 0.006
+                    return net_profit / net_amount * 100
+                return -100.0 if cost > 0 else 0.0
+            if is_natural_flow:
+                return (margin_rate_decimal * (1 - return_rate / 100) - 0.006) * 100
+            return (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / effective_roi)) * 100
         except Exception as e:
             print(f"计算链接净利率失败: {e}")
             return None
@@ -1797,8 +2776,15 @@ class ShopManagerApp(QMainWindow):
             self.table.horizontalHeader().setStyleSheet(header_style)
             
             col0_width = int(self.db.get_setting("col_0_width", 278))  # 调整宽度以容纳按钮
-            self.table.setColumnWidth(0, col0_width)
-            self.frozen_table.setColumnWidth(0, col0_width)
+            if self.db.get_setting("col_0_width_plus_20_applied", "0") != "1":
+                col0_width += 20
+                self.db.set_setting("col_0_width", col0_width)
+                self.db.set_setting("col_0_width_plus_20_applied", "1")
+            display_col0_width = col0_width + (30 if self.is_real_promotion_data_mode() else 0)
+            self._suppress_col0_width_save = True
+            self.table.setColumnWidth(0, display_col0_width)
+            self.frozen_table.setColumnWidth(0, display_col0_width)
+            self._suppress_col0_width_save = False
             for i in range(1, total_cols):
                 self.table.setColumnWidth(i, int(self.db.get_setting(f"col_{i}_width", 250)))
                 
@@ -1869,6 +2855,10 @@ class ShopManagerApp(QMainWindow):
         QTimer.singleShot(10, lambda: self.restore_scroll_position(v_scroll_value, selected_product_id, h_scroll_value))
         
         QTimer.singleShot(10, self.update_frozen_geometry)
+        QTimer.singleShot(30, self._reapply_search_and_filters_after_load)
+        if getattr(self, "_startup_locate_today_pending", False):
+            self._startup_locate_today_pending = False
+            QTimer.singleShot(80, self._locate_today_on_startup)
         
     def _format_operation_record_for_cell(self, record):
         time_text = record.get("time", "")
@@ -1877,6 +2867,30 @@ class ShopManagerApp(QMainWindow):
         if not body and record.get("changes"):
             body = "；".join([c.get("text", "") for c in record.get("changes", []) if c.get("text")])
         return f"[{time_text}] {body}" if time_text else body
+
+    def _format_operation_record_tooltip(self, records):
+        lines = []
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            time_text = str(record.get("time", "") or "")
+            changes = record.get("changes") or []
+            if changes:
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    change_time = str(change.get("time", "") or time_text)
+                    metric = str(change.get("metric", "") or "")
+                    text = str(change.get("text", "") or "").strip()
+                    prefix = f"[{change_time}]" if change_time else ""
+                    if metric:
+                        prefix = f"{prefix} {metric}".strip()
+                    lines.append(f"{prefix}\n{text}" if prefix and text else (prefix or text))
+            else:
+                line = self._format_operation_record_for_cell(record)
+                if line:
+                    lines.append(line)
+        return "\n\n".join([line for line in lines if line])
 
     def _apply_record_cell_style(self, item):
         font = QFont("Microsoft YaHei", 11)
@@ -1941,7 +2955,8 @@ class ShopManagerApp(QMainWindow):
                 
                 # 强制更新文本
                 item.setText(display_text)
-                item.setToolTip(display_text)
+                item.setToolTip(self._format_operation_record_tooltip(cell_data) if cell_data else display_text)
+                item.setData(Qt.UserRole, cell_data)
                 
                 # 确保文字靠上对齐，方便多行显示
                 self._apply_record_cell_style(item)
@@ -1972,6 +2987,8 @@ class ShopManagerApp(QMainWindow):
                     self.table.setItem(row, day, item)
                 
                 item.setText(display_text)
+                item.setToolTip(self._format_operation_record_tooltip(cell_data) if cell_data else display_text)
+                item.setData(Qt.UserRole, cell_data)
                 self._apply_record_cell_style(item)
 
         except Exception as e:
@@ -2020,7 +3037,9 @@ class ShopManagerApp(QMainWindow):
 
         def save_callback(new_data):
             try:
+                self._sync_main_image_history_from_record_save(prod_id, records, new_data, self.year, self.month, day)
                 if new_data:
+                    new_data = self._sort_records_by_time(new_data)
                     self.db.safe_execute("INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
                                     (prod_id, self.year, self.month, day, json.dumps(new_data)))
                 else:
@@ -2033,7 +3052,59 @@ class ShopManagerApp(QMainWindow):
 
         dialog = OperationRecordDialog(records, prod_id, prod_code, self.year, self.month, day, save_callback, self, store_id=prod_store_id, store_name=store_name)
         dialog.exec_()
-    
+
+    def _sort_records_by_time(self, records):
+        def key(record):
+            text = str(record.get("time", "") if isinstance(record, dict) else "")
+            try:
+                hour, minute = text.split(":", 1)
+                return (int(hour), int(minute))
+            except Exception:
+                return (99, 99)
+        return sorted(records or [], key=key)
+
+    def _main_image_history_id_from_record(self, record):
+        if not isinstance(record, dict):
+            return None
+        history_id = record.get("history_id")
+        if history_id:
+            return history_id
+        for change in record.get("changes", []) or []:
+            if isinstance(change, dict) and change.get("type") == "main_carousel_image" and change.get("history_id"):
+                return change.get("history_id")
+        return None
+
+    def _main_image_history_ids_from_records(self, records):
+        ids = set()
+        for record in records or []:
+            history_id = self._main_image_history_id_from_record(record)
+            if history_id:
+                ids.add(history_id)
+        return ids
+
+    def _sync_main_image_history_from_record_save(self, product_id, old_records, new_records, year, month, day):
+        old_ids = self._main_image_history_ids_from_records(old_records)
+        new_ids = self._main_image_history_ids_from_records(new_records)
+        deleted_ids = old_ids - new_ids
+        for history_id in deleted_ids:
+            self.db.safe_execute(
+                "DELETE FROM product_image_history WHERE id=? AND product_id=?",
+                (history_id, product_id)
+            )
+
+        for record in new_records or []:
+            history_id = self._main_image_history_id_from_record(record)
+            if not history_id:
+                continue
+            time_text = record.get("time", "")
+            if not time_text:
+                continue
+            changed_at = f"{year:04d}-{month:02d}-{day:02d} {time_text}:00"
+            self.db.safe_execute(
+                "UPDATE product_image_history SET changed_at=? WHERE id=? AND product_id=?",
+                (changed_at, history_id, product_id)
+            )
+
     def open_store_record_editor(self, row, col):
         store_id = self.row_store_map[row]
         day = col
@@ -2160,6 +3231,21 @@ class ShopManagerApp(QMainWindow):
         except Exception as e:
             print(f"定位今天失败: {e}")
 
+    def _locate_today_on_startup(self):
+        try:
+            today = datetime.now()
+            if self.year != today.year or self.month != today.month:
+                return
+            day = today.day
+            if not (0 < day < self.table.columnCount()):
+                return
+            target_index = self.table.model().index(0, day)
+            self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
+            self.table.setCurrentCell(0, day)
+            self.update_frozen_geometry()
+        except Exception as e:
+            print(f"启动定位今天失败: {e}")
+
     def add_store(self):
         try:
             name, ok = QInputDialog.getText(self, "添加店铺", "请输入店铺名称:")
@@ -2171,6 +3257,73 @@ class ShopManagerApp(QMainWindow):
         except Exception as e:
             print(f"添加店铺失败: {e}")
             QMessageBox.warning(self, "错误", f"添加店铺失败: {e}")
+
+    def record_store_link_change(self, store_id, action, product_id, product_title):
+        """记录店铺链接上架/删除到店铺行操作记录。"""
+        try:
+            now = datetime.now()
+            time_str = now.strftime("%H:%M")
+            action_text = "链接上架" if action == "add" else "链接删除"
+            product_id = str(product_id or "").strip()
+            product_title = str(product_title or "").strip()
+            log_text = f"【{action_text}】商品ID：{product_id}｜标题：{product_title}"
+            records = self.db.get_store_record(store_id, now.year, now.month, now.day)
+            if not isinstance(records, list):
+                records = []
+            records.append({
+                "time": time_str,
+                "text": log_text,
+                "type": "link_change",
+                "action": action,
+                "product_id": product_id,
+                "product_title": product_title,
+            })
+            self.db.save_store_record(store_id, now.year, now.month, now.day, records)
+        except Exception as e:
+            print(f"记录店铺链接变化失败: {e}")
+
+    def record_product_operation(self, product_db_id, text, metric="操作记录", old="", new="", change_type="product_operation"):
+        """给商品当天日期格追加一条结构化操作记录。"""
+        try:
+            if not product_db_id:
+                return
+            now = datetime.now()
+            time_str = now.strftime("%H:%M")
+            year, month, day = now.year, now.month, now.day
+            text = str(text or "").strip()
+            metric = str(metric or "操作记录").strip()
+            record = {
+                "time": time_str,
+                "text": text,
+                "changes": [{
+                    "time": time_str,
+                    "metric": metric,
+                    "old": "" if old is None else str(old),
+                    "new": "" if new is None else str(new),
+                    "text": text,
+                    "type": change_type,
+                }]
+            }
+            rows = self.db.safe_fetchall(
+                "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+                (product_db_id, year, month, day)
+            )
+            records = []
+            if rows and rows[0][0]:
+                try:
+                    records = json.loads(rows[0][0])
+                except Exception:
+                    records = []
+            if not isinstance(records, list):
+                records = []
+            records.append(record)
+            records = self._sort_records_by_time(records)
+            self.db.safe_execute(
+                "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
+                (product_db_id, year, month, day, json.dumps(records, ensure_ascii=False))
+            )
+        except Exception as e:
+            print(f"记录商品操作失败: {e}")
 
     def add_product(self, store_id, copy_from_id=None):
         """添加商品 - 支持手动输入商品ID和标题，copy_from_id用于复制同款"""
@@ -2311,6 +3464,15 @@ class ShopManagerApp(QMainWindow):
             
             # 显示成功提示
             self.show_toast(f"✅ 商品添加成功\nID: {product_id}\n标题: {product_title}")
+            self.record_product_operation(
+                new_product_db_id,
+                f"新建链接：商品ID {product_id}，标题：{product_title}",
+                metric="新建链接",
+                old="",
+                new=product_id,
+                change_type="product_created",
+            )
+            self.record_store_link_change(store_id, "add", product_id, product_title)
             self.load_data_safe()
             
         except Exception as e:
@@ -2318,34 +3480,104 @@ class ShopManagerApp(QMainWindow):
             QMessageBox.warning(self, "错误", f"添加商品失败: {e}")
             
     def perform_search(self):
-        search_term = self.search_input.text().strip()
-        if not search_term:
-            QMessageBox.warning(self, "提示", "请输入要搜索的关键字")
-            return
-        
-        # 保存当前列位置
-        current_col = self.table.currentColumn() if self.table.currentColumn() >= 0 else 0
-        
-        # 同时搜索ID和标题
-        results = self.db.safe_fetchall(
-            "SELECT id FROM products WHERE name LIKE ? OR title LIKE ?", 
-            (f"%{search_term}%", f"%{search_term}%")
-        )
-        
-        if not results:
-            QMessageBox.information(self, "提示", f"未找到包含 '{search_term}' 的商品")
-            return
-        
-        # 定位到第一个匹配的商品
-        for row in range(self.table.rowCount()):
-            if row in self.row_data_map and self.row_data_map[row] == results[0][0]:
-                self.table.setCurrentCell(row, current_col)
-                self.table.scrollTo(self.table.model().index(row, current_col), QAbstractItemView.PositionAtCenter)
-                self.table.selectRow(row)
-                self.show_toast(f"已定位到: {search_term}")
+        self.apply_realtime_search()
+
+    def _split_search_terms(self, text):
+        return [term.strip().lower() for term in str(text or "").split() if term.strip()]
+
+    def apply_realtime_search(self):
+        try:
+            terms = self._split_search_terms(self.search_input.text())
+            if not terms:
+                self.clear_search_filter()
                 return
-        
-        QMessageBox.information(self, "提示", f"未找到包含 '{search_term}' 的商品")
+
+            product_ids = [pid for pid in self.row_data_map.values() if pid]
+            if not product_ids:
+                self.clear_search_filter()
+                return
+
+            placeholders = ",".join(["?"] * len(product_ids))
+            rows = self.db.safe_fetchall(
+                f"SELECT id, name, title, product_memo FROM products WHERE id IN ({placeholders})",
+                tuple(product_ids)
+            )
+            match_ids = set()
+            for pid, name, title, memo in rows:
+                haystack = " ".join([
+                    str(name or ""),
+                    str(title or ""),
+                    str(memo or "")
+                ]).lower()
+                if all(term in haystack for term in terms):
+                    match_ids.add(pid)
+
+            highlighted_rows = set()
+            for row, pid in self.row_data_map.items():
+                active = pid in match_ids
+                self._set_row_search_highlight(row, active)
+                if active:
+                    highlighted_rows.add(row)
+            self._search_highlighted_rows = highlighted_rows
+            self.current_search_match_ids = match_ids
+            self.apply_tag_filter(close_menu=False, show_message=False)
+            self._scroll_to_first_search_match(highlighted_rows)
+        except Exception as e:
+            print(f"实时搜索失败: {e}")
+
+    def clear_search_filter(self):
+        self.current_search_match_ids = None
+        self.clear_search_highlight()
+        self.apply_tag_filter(close_menu=False, show_message=False)
+
+    def clear_search_highlight(self):
+        try:
+            for row in list(getattr(self, "_search_highlighted_rows", set())):
+                self._set_row_search_highlight(row, False)
+            self._search_highlighted_rows = set()
+        except Exception as e:
+            print(f"清除搜索高亮失败: {e}")
+
+    def _set_row_search_highlight(self, row, active):
+        widget = self.frozen_table.cellWidget(row, 0)
+        if widget and hasattr(widget, "set_search_highlight"):
+            widget.set_search_highlight(active)
+
+        color = QBrush(QColor("#fff8d8")) if active else QBrush()
+        for col in range(1, self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item:
+                item.setBackground(color)
+
+    def _scroll_to_first_search_match(self, rows):
+        try:
+            if not rows:
+                return
+            visible_rows = [
+                row for row in sorted(rows)
+                if not self.table.isRowHidden(row) and not self.frozen_table.isRowHidden(row)
+            ]
+            target_row = visible_rows[0] if visible_rows else sorted(rows)[0]
+            h_scroll = self.table.horizontalScrollBar()
+            saved_x = h_scroll.value() if h_scroll else None
+            target_index = self.frozen_table.model().index(target_row, 0)
+            self.frozen_table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
+            if h_scroll and saved_x is not None:
+                h_scroll.setValue(saved_x)
+            self.update_frozen_geometry()
+        except Exception as e:
+            print(f"搜索跳转失败: {e}")
+
+    def _reapply_search_and_filters_after_load(self):
+        try:
+            if self.search_input.text().strip():
+                self.apply_realtime_search()
+            else:
+                self.clear_search_filter()
+            if getattr(self, "current_category_filter", "") or getattr(self, "current_filter_tags", None):
+                self.apply_tag_filter(close_menu=False)
+        except Exception as e:
+            print(f"刷新搜索和筛选状态失败: {e}")
     
     def on_filter_toggle(self, state):
         if state == Qt.Unchecked:
@@ -2395,13 +3627,126 @@ class ShopManagerApp(QMainWindow):
         except Exception as e:
             print(f"获取商品ID失败: {e}")
             return []
+
+    def _clear_layout_widgets(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _get_current_category_counts(self, keyword=""):
+        product_ids = self.get_all_product_ids_with_current_store()
+        if not product_ids:
+            return []
+        placeholders = ",".join(["?"] * len(product_ids))
+        rows = self.db.safe_fetchall(
+            f"""
+            SELECT product_category_label, COUNT(*)
+            FROM products
+            WHERE id IN ({placeholders})
+              AND COALESCE(product_category_label, '') <> ''
+            GROUP BY product_category_label
+            ORDER BY COUNT(*) DESC, product_category_label ASC
+            """,
+            tuple(product_ids)
+        )
+        keyword = str(keyword or "").strip().lower()
+        result = []
+        for label, count in rows:
+            label_text = str(label or "").strip()
+            if not label_text:
+                continue
+            if keyword and keyword not in label_text.lower():
+                continue
+            result.append((label_text, count))
+        return result
+
+    def refresh_category_filter_candidates(self):
+        try:
+            if not hasattr(self, "category_candidate_layout"):
+                return
+            self._clear_layout_widgets(self.category_candidate_layout)
+            keyword = self.category_filter_input.text().strip() if hasattr(self, "category_filter_input") else ""
+            categories = self._get_current_category_counts(keyword)[:12]
+            if not keyword and not self.current_category_filter:
+                hint = QLabel("输入关键字后显示类型候选")
+                hint.setStyleSheet("color: #999; font-size: 12px; padding: 4px;")
+                self.category_candidate_layout.addWidget(hint)
+                return
+            if not categories:
+                hint = QLabel("没有匹配的商品类型")
+                hint.setStyleSheet("color: #999; font-size: 12px; padding: 4px;")
+                self.category_candidate_layout.addWidget(hint)
+                return
+            for label, count in categories:
+                btn = QPushButton(f"{label} ({count})")
+                btn.setCheckable(True)
+                btn.setChecked(label == self.current_category_filter)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        border: 1px solid #3498db;
+                        background-color: transparent;
+                        color: #2c3e50;
+                        border-radius: 4px;
+                        padding: 5px 8px;
+                        text-align: left;
+                    }
+                    QPushButton:checked {
+                        background-color: #3498db;
+                        color: white;
+                    }
+                    QPushButton:hover {
+                        background-color: #3498db;
+                        color: white;
+                    }
+                """)
+                btn.clicked.connect(lambda checked=False, value=label: self.set_category_filter(value))
+                self.category_candidate_layout.addWidget(btn)
+        except Exception as e:
+            print(f"刷新商品类型候选失败: {e}")
+
+    def set_category_filter(self, category_label):
+        self.current_category_filter = str(category_label or "").strip()
+        if hasattr(self, "category_filter_input"):
+            self.category_filter_input.blockSignals(True)
+            self.category_filter_input.setText(self.current_category_filter)
+            self.category_filter_input.blockSignals(False)
+        self.refresh_category_filter_candidates()
+        self.apply_tag_filter(close_menu=False)
+
+    def clear_category_filter(self):
+        self.current_category_filter = ""
+        if hasattr(self, "category_filter_input"):
+            self.category_filter_input.blockSignals(True)
+            self.category_filter_input.clear()
+            self.category_filter_input.blockSignals(False)
+        self.refresh_category_filter_candidates()
+        self.apply_tag_filter(close_menu=False)
+
+    def _product_matches_category_filter(self, product_id):
+        if not self.current_category_filter:
+            return True
+        rows = self.db.safe_fetchall(
+            "SELECT product_category_label FROM products WHERE id=?",
+            (product_id,)
+        )
+        label = str(rows[0][0] or "").strip() if rows else ""
+        return label == self.current_category_filter
     
     def show_tag_filter_menu(self):
         """显示标签筛选下拉菜单"""
+        self.refresh_category_filter_candidates()
         btn_rect = self.btn_tag_filter.rect()
         global_pos = self.btn_tag_filter.mapToGlobal(QPoint(0, btn_rect.bottom()))
         self.tag_filter_menu.move(global_pos)
-        self.tag_filter_menu.exec_()
+        if not self._tag_filter_global_filter_installed:
+            QApplication.instance().installEventFilter(self)
+            self._tag_filter_global_filter_installed = True
+        self.tag_filter_menu.show()
+        self.tag_filter_menu.raise_()
+        self.tag_filter_menu.activateWindow()
+        QTimer.singleShot(0, self.category_filter_input.setFocus)
 
     def show_store_filter_menu(self):
         """显示店铺筛选下拉菜单"""
@@ -2631,12 +3976,15 @@ class ShopManagerApp(QMainWindow):
                 return 'loss'
             
             product_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_natural_flow, is_sitewide_managed, store_id FROM products WHERE id=?",
                 (product_id,)
             )
             max_discount = 0
             current_roi = 0
             return_rate = 0
+            is_natural_flow = 0
+            is_sitewide_managed = 0
+            sitewide_roi = 0
             
             if product_rows:
                 coupon = product_rows[0][0] if product_rows[0][0] else 0
@@ -2644,6 +3992,12 @@ class ShopManagerApp(QMainWindow):
                 max_discount = max(coupon, new_customer)
                 current_roi = product_rows[0][2] if product_rows[0][2] else 0
                 return_rate = product_rows[0][3] if product_rows[0][3] else 0
+                is_natural_flow = product_rows[0][4] if product_rows[0][4] else 0
+                is_sitewide_managed = product_rows[0][5] if product_rows[0][5] else 0
+                store_id = product_rows[0][6] if product_rows[0][6] else None
+                if store_id:
+                    store_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (store_id,))
+                    sitewide_roi = store_rows[0][0] if store_rows and store_rows[0][0] else 0
             
             total_weighted_margin = 0.0
             total_weight = 0.0
@@ -2670,10 +4024,13 @@ class ShopManagerApp(QMainWindow):
             if total_weight > 0:
                 final_margin_pct = (total_weighted_margin / total_weight) * 100
                 
+                margin_rate_decimal = final_margin_pct / 100
+                effective_roi = sitewide_roi if is_sitewide_managed and not is_natural_flow else current_roi
                 final_net_margin_pct = -100
-                if current_roi > 0 and return_rate >= 0:
-                    margin_rate_decimal = final_margin_pct / 100
-                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+                if is_natural_flow:
+                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006) * 100
+                elif effective_roi > 0 and return_rate >= 0:
+                    final_net_margin_pct = (margin_rate_decimal * (1 - return_rate / 100) - 0.006 - (1 / effective_roi)) * 100
                 
                 if final_net_margin_pct >= 1:
                     return 'profit'
@@ -2687,7 +4044,7 @@ class ShopManagerApp(QMainWindow):
             print(f"计算利润分类失败: {e}")
             return 'loss'
     
-    def apply_tag_filter(self, close_menu=False):
+    def apply_tag_filter(self, close_menu=False, show_message=True):
         """应用标签筛选
         
         Args:
@@ -2704,6 +4061,12 @@ class ShopManagerApp(QMainWindow):
                 filters['limited_time'] = True
             if self.btn_filter_marketing.isChecked():
                 filters['marketing'] = True
+            if self.btn_filter_natural_flow.isChecked():
+                filters['natural_flow'] = True
+            if self.btn_filter_sitewide.isChecked():
+                filters['sitewide'] = True
+            if self.btn_filter_missing_roi_bid.isChecked():
+                filters['missing_roi_bid'] = True
             
             profit_filters = []
             if self.btn_filter_profit.isChecked():
@@ -2717,13 +4080,18 @@ class ShopManagerApp(QMainWindow):
             if close_menu:
                 self.tag_filter_menu.close()
             
-            if not filters and not profit_filters:
+            has_category_filter = bool(getattr(self, "current_category_filter", ""))
+            search_match_ids = getattr(self, "current_search_match_ids", None)
+            has_search_filter = search_match_ids is not None
+
+            if not filters and not profit_filters and not has_category_filter and not has_search_filter:
                 self.clear_tag_filter()
                 self.btn_tag_filter.setText("🏷️ 筛选")
                 for row in range(self.table.rowCount()):
                     self.table.setRowHidden(row, False)
                     self.frozen_table.setRowHidden(row, False)
-                self.show_toast("已显示所有商品")
+                if show_message:
+                    self.show_toast("已显示所有商品")
                 return
             
             all_product_ids = self.get_all_product_ids_with_current_store()
@@ -2755,10 +4123,40 @@ class ShopManagerApp(QMainWindow):
                     mk_res = self.db.safe_fetchall("SELECT is_marketing FROM products WHERE id=?", (pid,))
                     if not mk_res or not mk_res[0][0]:
                         should_include = False
+
+                if filters.get('natural_flow') and should_include:
+                    nf_res = self.db.safe_fetchall("SELECT is_natural_flow FROM products WHERE id=?", (pid,))
+                    if not nf_res or not nf_res[0][0]:
+                        should_include = False
+
+                if filters.get('sitewide') and should_include:
+                    sw_res = self.db.safe_fetchall("SELECT is_sitewide_managed, is_natural_flow FROM products WHERE id=?", (pid,))
+                    if not sw_res or not sw_res[0][0] or sw_res[0][1]:
+                        should_include = False
+
+                if filters.get('missing_roi_bid') and should_include:
+                    roi_res = self.db.safe_fetchall("SELECT current_roi, is_natural_flow, is_sitewide_managed FROM products WHERE id=?", (pid,))
+                    current_roi = roi_res[0][0] if roi_res and roi_res[0][0] is not None else 0
+                    is_natural_flow = roi_res[0][1] if roi_res else 0
+                    is_sitewide_managed = roi_res[0][2] if roi_res else 0
+                    try:
+                        current_roi = float(current_roi)
+                    except (TypeError, ValueError):
+                        current_roi = 0
+                    if current_roi > 0 or is_natural_flow or is_sitewide_managed:
+                        should_include = False
                 
                 if profit_filters and should_include:
                     profit_category = self._calculate_profit_category(pid)
                     if profit_category not in profit_filters:
+                        should_include = False
+
+                if has_category_filter and should_include:
+                    if not self._product_matches_category_filter(pid):
+                        should_include = False
+
+                if has_search_filter and should_include:
+                    if pid not in search_match_ids:
                         should_include = False
                 
                 if should_include:
@@ -2777,9 +4175,12 @@ class ShopManagerApp(QMainWindow):
             self.current_filter_tags = filters.copy()
             if profit_filters:
                 self.current_filter_tags['profit'] = profit_filters
+            if has_category_filter:
+                self.current_filter_tags['category'] = self.current_category_filter
             
             self.btn_tag_filter.setText(f"🏷️ 筛选 ({filtered_count})")
-            self.show_toast(f"标签筛选: 显示 {filtered_count} 个商品")
+            if show_message:
+                self.show_toast(f"筛选: 显示 {filtered_count} 个商品")
             
         except Exception as e:
             print(f"应用标签筛选失败: {e}")
@@ -2789,13 +4190,29 @@ class ShopManagerApp(QMainWindow):
     
     def clear_tag_filter_selection(self):
         """清空标签筛选选择"""
-        self.btn_filter_coupon.setChecked(False)
-        self.btn_filter_new_customer.setChecked(False)
-        self.btn_filter_limited_time.setChecked(False)
-        self.btn_filter_marketing.setChecked(False)
-        self.btn_filter_profit.setChecked(False)
-        self.btn_filter_loss.setChecked(False)
-        self.btn_filter_break_even.setChecked(False)
+        buttons = [
+            self.btn_filter_coupon,
+            self.btn_filter_new_customer,
+            self.btn_filter_limited_time,
+            self.btn_filter_marketing,
+            self.btn_filter_natural_flow,
+            self.btn_filter_sitewide,
+            self.btn_filter_profit,
+            self.btn_filter_loss,
+            self.btn_filter_break_even,
+            self.btn_filter_missing_roi_bid,
+        ]
+        for btn in buttons:
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self.current_category_filter = ""
+        if hasattr(self, "category_filter_input"):
+            self.category_filter_input.blockSignals(True)
+            self.category_filter_input.clear()
+            self.category_filter_input.blockSignals(False)
+        if hasattr(self, "category_candidate_layout"):
+            self.refresh_category_filter_candidates()
     
     def clear_tag_filter(self):
         """清除标签筛选，显示所有商品"""
@@ -2808,6 +4225,10 @@ class ShopManagerApp(QMainWindow):
         
         self.show_toast("已清除标签筛选")
         self.current_filter_tags = set()
+
+        if getattr(self, "current_search_match_ids", None) is not None:
+            self.apply_tag_filter(close_menu=False, show_message=False)
+            return
         
         for row in range(self.table.rowCount()):
             self.table.setRowHidden(row, False)
@@ -2950,14 +4371,24 @@ class ShopManagerApp(QMainWindow):
 
         # 4. 弹出配置对话框 (选择列)
         try:
-            dialog = CostImportDialog(file_path, self)
+            cost_mode = self.db.get_cost_library_mode() if hasattr(self.db, "get_cost_library_mode") else "total"
+            dialog = CostImportDialog(file_path, self, cost_mode=cost_mode)
             if dialog.exec_() != QDialog.Accepted:
                 return
             
-            spec_col_idx, price_col_idx, name_col_idx, quantity_col_idx, category_col_idx = dialog.get_mapping()
+            mapping = dialog.get_mapping()
+            if len(mapping) == 6:
+                spec_col_idx, price_col_idx, name_col_idx, quantity_col_idx, category_col_idx, weight_col_idx = mapping
+                attribute_col_indices = None
+            else:
+                spec_col_idx, price_col_idx, name_col_idx, quantity_col_idx, category_col_idx, weight_col_idx, attribute_col_indices = mapping
+            unit_by_quantity = dialog.should_unit_by_quantity() if hasattr(dialog, "should_unit_by_quantity") else False
             
             if spec_col_idx is None or price_col_idx is None:
-                QMessageBox.warning(self, "提示", "请先选择【规格编码】和【成本价】所在的列！")
+                QMessageBox.warning(self, "提示", "请先选择【规格编码】和【总成本/产品成本】所在的列！")
+                return
+            if cost_mode == "detail" and weight_col_idx is None:
+                QMessageBox.warning(self, "提示", "详细成本模式下请先选择【单个重量kg】所在的列！")
                 return
                 
         except Exception as e:
@@ -2986,6 +4417,12 @@ class ShopManagerApp(QMainWindow):
             col_name = df.iloc[:, name_col_idx] if name_col_idx is not None else None
             col_quantity = df.iloc[:, quantity_col_idx] if quantity_col_idx is not None else None
             col_category = df.iloc[:, category_col_idx] if category_col_idx is not None else None
+            col_weight = df.iloc[:, weight_col_idx] if weight_col_idx is not None else None
+            attribute_cols = {}
+            if attribute_col_indices:
+                for key, col_idx in attribute_col_indices.items():
+                    if col_idx is not None:
+                        attribute_cols[key] = df.iloc[:, int(col_idx)]
             row_colors = read_cost_row_colors(file_path, name_col_idx=name_col_idx, spec_col_idx=spec_col_idx)
             
             count_success = 0
@@ -2993,6 +4430,7 @@ class ShopManagerApp(QMainWindow):
             count_error = 0
             count_history = 0
             count_changed = 0
+            count_unit_converted = 0
             import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # 批量插入准备 (为了提高速度，可以每100条提交一次，这里为了简单逐条处理但加了事务优化)
@@ -3035,18 +4473,52 @@ class ShopManagerApp(QMainWindow):
                                 category_label = ""
                     category_color = self.db.category_color_for_label(category_label)
                     source_bg_color = row_colors.get(idx, "")
+
+                    product_attribute = ""
+                    if attribute_cols and not re.search(r"\+|＋|﹢", spec_name or ""):
+                        attr_parts = []
+                        for key in ("size", "pages", "cover", "print"):
+                            col_attr = attribute_cols.get(key)
+                            if col_attr is None:
+                                continue
+                            attr_val = col_attr.iloc[idx]
+                            if pd.isna(attr_val):
+                                continue
+                            attr_text = str(attr_val).strip()
+                            if attr_text and attr_text.lower() != "nan":
+                                attr_parts.append(attr_text)
+                        product_attribute = " ".join(attr_parts)
                     
                     # 获取价格
                     price_val = col_price.iloc[idx]
-                    try:
-                        # 清洗价格：去除货币符号，转为浮点数
-                        if pd.isna(price_val):
-                            cost_price = 0.0
-                        else:
-                            price_str = str(price_val).replace('¥', '').replace('$', '').replace(',', '').strip()
-                            cost_price = float(price_str)
-                    except ValueError:
-                        cost_price = 0.0 # 如果价格不是数字，记为0
+                    parsed_price = self.db.parse_cost_number(price_val, None) if hasattr(self.db, "parse_cost_number") else None
+                    if parsed_price is None:
+                        parsed_price = 0.0
+
+                    product_cost = None
+                    unit_weight = None
+                    shipping_fee = None
+                    misc_fee = None
+                    cost_calc_mode = cost_mode
+                    if cost_mode == "detail":
+                        product_cost = float(parsed_price)
+                        if col_weight is None:
+                            count_error += 1
+                            continue
+                        unit_weight = self.db.parse_cost_number(col_weight.iloc[idx], None) if hasattr(self.db, "parse_cost_number") else None
+                        if unit_weight is None or unit_weight <= 0:
+                            count_error += 1
+                            continue
+                        if unit_by_quantity and hasattr(self.db, "parse_cost_quantity_factor"):
+                            quantity_factor = self.db.parse_cost_quantity_factor(quantity)
+                            if quantity_factor and quantity_factor > 1:
+                                product_cost = product_cost / quantity_factor
+                                unit_weight = unit_weight / quantity_factor
+                                count_unit_converted += 1
+                        cost_price, shipping_fee, misc_fee, _total_weight = self.db.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                    else:
+                        cost_price = float(parsed_price)
+                        cost_calc_mode = "total"
 
                     old_rows = self.db.cursor.execute(
                         "SELECT cost_price FROM cost_library WHERE spec_code=?",
@@ -3057,8 +4529,9 @@ class ShopManagerApp(QMainWindow):
 
                     self.db.cursor.execute(
                         """INSERT INTO cost_library
-                           (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order, source_bg_color)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                           (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order, source_bg_color,
+                            product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(spec_code) DO UPDATE SET
                                spec_name=excluded.spec_name,
                                quantity=excluded.quantity,
@@ -3066,8 +4539,18 @@ class ShopManagerApp(QMainWindow):
                                category_color=excluded.category_color,
                                cost_price=excluded.cost_price,
                                sort_order=excluded.sort_order,
-                               source_bg_color=excluded.source_bg_color""",
-                        (spec_code, spec_name, quantity, category_label, category_color, cost_price, idx + 1, source_bg_color)
+                               source_bg_color=excluded.source_bg_color,
+                               product_cost=excluded.product_cost,
+                               unit_weight=excluded.unit_weight,
+                               shipping_fee=excluded.shipping_fee,
+                               misc_fee=excluded.misc_fee,
+                               cost_calc_mode=excluded.cost_calc_mode,
+                               product_attribute=CASE
+                                   WHEN excluded.product_attribute <> '' THEN excluded.product_attribute
+                                   ELSE cost_library.product_attribute
+                               END""",
+                        (spec_code, spec_name, quantity, category_label, category_color, cost_price, idx + 1, source_bg_color,
+                         product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute)
                     )
 
                     if should_record_history:
@@ -3104,6 +4587,7 @@ class ShopManagerApp(QMainWindow):
 
             # 6. 显示结果
             msg = (f"✅ **导入完成！**\n\n"
+                   f"📌 成本模式：{'详细成本模式' if cost_mode == 'detail' else '总成本模式'}\n"
                    f"📊 文件总行数：{total_rows}\n"
                    f"✅ 成功入库：{count_success} 条\n"
                    f"🕘 历史记录：{count_history} 条\n"
@@ -3145,6 +4629,9 @@ class ShopManagerApp(QMainWindow):
         """打开云同步登录窗口"""
         try:
             from manager.cloud_sync import CloudSyncDialog
+            active_account = self.cloud_manager.get_active_data_account() if self.cloud_manager else None
+            if active_account:
+                self.cloud_manager.switch_account(active_account['id'])
             dialog = CloudSyncDialog(self.db, self.cloud_manager, self)
             dialog.exec_()
             self.update_cloud_account_label()
@@ -3154,18 +4641,18 @@ class ShopManagerApp(QMainWindow):
             traceback.print_exc()
 
     def update_cloud_account_label(self):
-        """更新云账号显示标签"""
+        """更新当前本地数据归属账号显示标签"""
         try:
             if hasattr(self, 'cloud_manager') and self.cloud_manager:
-                current = self.cloud_manager.get_current_account()
-                if current:
-                    self.lbl_cloud_account.setText(f"☁️ {current.get('name', '未知')}")
+                active_account = self.cloud_manager.get_active_data_account()
+                if active_account:
+                    self.lbl_cloud_account.setText(f"☁️ 当前应用: {active_account.get('name', '未知')}")
                     self.lbl_cloud_account.setStyleSheet("color: #27ae60; font-size: 11px; padding: 0 5px;")
                 else:
-                    self.lbl_cloud_account.setText("未登录")
+                    self.lbl_cloud_account.setText("当前应用: 未绑定")
                     self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 11px; padding: 0 5px;")
             else:
-                self.lbl_cloud_account.setText("未登录")
+                self.lbl_cloud_account.setText("当前应用: 未绑定")
                 self.lbl_cloud_account.setStyleSheet("color: #888; font-size: 11px; padding: 0 5px;")
         except Exception as e:
             print(f"更新云账号标签失败: {e}")
@@ -3183,8 +4670,15 @@ class ShopManagerApp(QMainWindow):
     
     def show_daily_task_dialog(self):
         """打开每日任务大盘窗口"""
-        dialog = DailyTaskDialog(self.db, self)
-        dialog.show()
+        if self.daily_task_dialog:
+            self.daily_task_dialog.show()
+            self.daily_task_dialog.raise_()
+            self.daily_task_dialog.activateWindow()
+            return
+        self.daily_task_dialog = DailyTaskDialog(self.db, self)
+        self.daily_task_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.daily_task_dialog.destroyed.connect(lambda _obj=None: setattr(self, "daily_task_dialog", None))
+        self.daily_task_dialog.show()
     
     def update_resource_usage(self):
         """更新当前程序的资源使用情况"""
@@ -3235,6 +4729,17 @@ if __name__ == "__main__":
         pass
     
     app = QApplication(sys.argv)
+    single_instance_mutex, already_running = acquire_single_instance_mutex()
+    if already_running:
+        if not notify_existing_instance():
+            activate_existing_window_by_title()
+        sys.exit(0)
+
+    window_holder = {}
+    single_instance_server, should_exit = setup_single_instance(window_holder)
+    if should_exit:
+        sys.exit(0)
+
     font = QFont("微软雅黑", 10)
     app.setFont(font)
     
@@ -3286,8 +4791,8 @@ if __name__ == "__main__":
         padding: 5px;
     }
     QTableWidget::item:selected {
-        background-color: #3498db;
-        color: white;
+        background-color: #ffe0b2;
+        color: black;
     }
     QHeaderView::section {
         background-color: #f8f9fa;
@@ -3384,5 +4889,6 @@ if __name__ == "__main__":
     app.setStyleSheet(style)
     
     window = ShopManagerApp()
+    window_holder["window"] = window
     window.show()
     sys.exit(app.exec_())

@@ -6,7 +6,7 @@ from .cost_import import CostImportDialog
 from .cost_library import CostLibraryDialog
 from .api_config import ApiConfigDialog
 from .profit import ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog
-from .daily_task import DailyTaskDialog
+from .daily_task import DailyTaskDialog, TaskReminderPopupDialog
 from .product_spec import ProductSpecDialog
 
 __all__ = [
@@ -20,5 +20,6 @@ __all__ = [
     "ProfitCalculatorDialog",
     "ProfitHistoryDialog",
     "DailyTaskDialog",
+    "TaskReminderPopupDialog",
     "ProductSpecDialog",
 ]

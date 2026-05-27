@@ -6,28 +6,33 @@ import re
 import time
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QCursor, QStandardItem, QStandardItemModel
+from PyQt5.QtCore import QEvent, Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor, QCursor, QPainter, QPen, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QCompleter,
     QDialog,
     QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QProgressDialog,
+    QScrollArea,
     QSplitter,
     QStyledItemDelegate,
     QTableView,
+    QTextEdit,
     QToolTip,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -45,6 +50,138 @@ class SelectAllLineEditDelegate(QStyledItemDelegate):
         QTimer.singleShot(0, editor.selectAll)
 
 
+class MultiLineTextEditDelegate(QStyledItemDelegate):
+    """Use wrapped text editing for table cells that may display wrapped text."""
+
+    def createEditor(self, parent, option, index):
+        editor = QTextEdit(parent)
+        editor.setAcceptRichText(False)
+        editor.setLineWrapMode(QTextEdit.WidgetWidth)
+        editor.installEventFilter(self)
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.setPlainText(str(index.data(Qt.EditRole) or index.data(Qt.DisplayRole) or ""))
+        QTimer.singleShot(0, editor.selectAll)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.toPlainText().strip(), Qt.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = option.rect
+        rect.setHeight(max(rect.height(), 92))
+        editor.setGeometry(rect)
+
+    def eventFilter(self, editor, event):
+        if isinstance(editor, QTextEdit):
+            if event.type() == QEvent.FocusOut:
+                self.commitData.emit(editor)
+                self.closeEditor.emit(editor)
+            elif event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if event.modifiers() & Qt.ControlModifier:
+                    self.commitData.emit(editor)
+                    self.closeEditor.emit(editor)
+                    return True
+        return super().eventFilter(editor, event)
+
+
+class SpecNameBadgeDelegate(MultiLineTextEditDelegate):
+    """Draw a small single/combined badge in the bottom-right of spec names."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        text = str(index.data(Qt.DisplayRole) or "")
+        is_combo = bool(re.search(r"\+|＋|﹢", text))
+        label = "组合" if is_combo else "单品"
+        bg_color = QColor("#fff2cc" if is_combo else "#eaf8ee")
+        border_color = QColor("#d6a400" if is_combo else "#5aa469")
+        text_color = QColor("#7a4f00" if is_combo else "#1f6f3d")
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        metrics = option.fontMetrics
+        badge_width = metrics.horizontalAdvance(label) + 12
+        badge_height = 18
+        x = option.rect.right() - badge_width - 4
+        y = option.rect.bottom() - badge_height - 4
+        badge_rect = option.rect.__class__(x, y, badge_width, badge_height)
+        painter.setPen(QPen(border_color, 1))
+        painter.setBrush(QBrush(bg_color))
+        painter.drawRoundedRect(badge_rect, 6, 6)
+        painter.setPen(text_color)
+        painter.drawText(badge_rect, Qt.AlignCenter, label)
+        painter.restore()
+
+
+class FixedHeightWrapDelegate(QStyledItemDelegate):
+    """Allow wrapped painting while keeping the column from changing row height."""
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(32)
+        return size
+
+
+def _extract_ai_json_or_text(raw_text):
+    text = str(raw_text or "").strip()
+    text = re.sub(r"^```(?:json|text)?\s*|\s*```$", "", text, flags=re.I).strip()
+    if not text:
+        return {}, ""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidate = text[start:end + 1]
+        for fixed in (candidate, candidate.replace("'", '"')):
+            try:
+                data = json.loads(fixed)
+                if isinstance(data, dict):
+                    return data, text
+            except Exception:
+                pass
+    return {}, text
+
+
+def _clean_ai_short_value(raw_text, field_name, existing_options=None, max_chars=18):
+    existing_options = [str(item or "").strip() for item in (existing_options or []) if str(item or "").strip()]
+    data, text = _extract_ai_json_or_text(raw_text)
+    value = str(data.get(field_name) or data.get("name") or data.get("link_type") or "").strip()
+
+    if not value and existing_options:
+        for option in existing_options:
+            if option and option in text:
+                return option
+
+    if not value:
+        patterns = [
+            rf'"?{re.escape(field_name)}"?\s*[:：]\s*["“]?([^"”\n,，}}]+)',
+            r"(?:组合名称|链接组合名称|名称)\s*[:：]\s*([^。\n，,]+)",
+            r"(?:链接类型|类型)\s*[:：]\s*([^。\n，,]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.I)
+            if match:
+                value = match.group(1).strip()
+                break
+
+    if not value:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        short_lines = [
+            line.strip("-* 0123456789.、：:")
+            for line in lines
+            if not line.startswith(("我们", "根据", "以下", "说明", "分析", "推荐", "因为"))
+        ]
+        value = (short_lines[-1] if short_lines else (lines[-1] if lines else text)).strip()
+
+    value = re.sub(r"^(?:最终)?(?:组合名称|链接组合名称|链接类型|类型|名称)\s*[:：]\s*", "", value).strip()
+    value = re.split(r"[。；;\n\r]", value)[0].strip()
+    value = value.strip("\"'“”‘’` ，,。")
+    if existing_options:
+        for option in existing_options:
+            if option == value or (option and option in value):
+                return option
+    return value[:max_chars].strip()
+
+
 class CostHistoryDialog(QDialog):
     """查看和删除成本历史记录。"""
 
@@ -52,7 +189,7 @@ class CostHistoryDialog(QDialog):
         super().__init__(parent)
         self.db = db_manager
         self.setWindowTitle("历史成本")
-        self.resize(900, 520)
+        self.resize(1020, 520)
         self.init_ui()
         self.load_data()
 
@@ -72,7 +209,7 @@ class CostHistoryDialog(QDialog):
 
         self.model = QStandardItemModel()
         self.model.setHorizontalHeaderLabels([
-            "时间", "规格编码", "原成本", "新成本", "变化金额", "变化百分比", "来源"
+            "时间", "商品名称", "规格编码", "原成本", "新成本", "变化金额", "变化百分比", "来源"
         ])
         self.table_view = QTableView()
         self.table_view.setModel(self.model)
@@ -118,26 +255,35 @@ class CostHistoryDialog(QDialog):
         keyword = self.search_input.text().strip()
         if keyword:
             rows = self.db.safe_fetchall(
-                """SELECT id, import_time, spec_code, old_cost_price, new_cost_price,
-                          change_amount, change_percent, source
+                """SELECT cost_history.id, cost_history.import_time,
+                          COALESCE(cost_library.spec_name, '') AS spec_name,
+                          cost_history.spec_code, cost_history.old_cost_price,
+                          cost_history.new_cost_price, cost_history.change_amount,
+                          cost_history.change_percent, cost_history.source
                    FROM cost_history
-                   WHERE spec_code LIKE ?
-                   ORDER BY import_time DESC, id DESC""",
+                   LEFT JOIN cost_library ON cost_library.spec_code = cost_history.spec_code
+                   WHERE cost_history.spec_code LIKE ?
+                   ORDER BY cost_history.import_time DESC, cost_history.id DESC""",
                 (f"%{keyword}%",),
             )
         else:
             rows = self.db.safe_fetchall(
-                """SELECT id, import_time, spec_code, old_cost_price, new_cost_price,
-                          change_amount, change_percent, source
+                """SELECT cost_history.id, cost_history.import_time,
+                          COALESCE(cost_library.spec_name, '') AS spec_name,
+                          cost_history.spec_code, cost_history.old_cost_price,
+                          cost_history.new_cost_price, cost_history.change_amount,
+                          cost_history.change_percent, cost_history.source
                    FROM cost_history
-                   ORDER BY import_time DESC, id DESC"""
+                   LEFT JOIN cost_library ON cost_library.spec_code = cost_history.spec_code
+                   ORDER BY cost_history.import_time DESC, cost_history.id DESC"""
             )
 
-        for history_id, import_time, spec_code, old_cost, new_cost, amount, percent, source in rows:
+        for history_id, import_time, spec_name, spec_code, old_cost, new_cost, amount, percent, source in rows:
             row = self.model.rowCount()
             self.model.insertRow(row)
             values = [
                 self._format_history_date(import_time),
+                str(spec_name or ""),
                 str(spec_code or ""),
                 self._format_price(old_cost),
                 self._format_price(new_cost),
@@ -155,9 +301,9 @@ class CostHistoryDialog(QDialog):
         self.lbl_count.setText(f"共 {self.model.rowCount()} 条历史")
 
     def copy_spec_code(self, index):
-        if not index.isValid() or index.column() != 1:
+        if not index.isValid() or index.column() != 2:
             return
-        item = self.model.item(index.row(), 1)
+        item = self.model.item(index.row(), 2)
         spec_code = item.text().strip() if item else ""
         if not spec_code:
             return
@@ -730,6 +876,17 @@ class AIPickDialog(QDialog):
             QMessageBox.critical(self, "创建失败", f"创建 AI 选品链接失败：{e}")
             return
 
+        if self.main_window and hasattr(self.main_window, "record_product_operation"):
+            self.main_window.record_product_operation(
+                product_db_id,
+                f"新建链接：商品ID {product_id}，标题：{title}",
+                metric="新建链接",
+                old="",
+                new=product_id,
+                change_type="product_created",
+            )
+        if self.main_window and hasattr(self.main_window, "record_store_link_change"):
+            self.main_window.record_store_link_change(store_id, "add", product_id, title)
         if self.main_window and hasattr(self.main_window, "load_data_safe"):
             self.main_window.load_data_safe()
         QMessageBox.information(self, "成功", f"已创建空白链接：{product_id}\n已写入 {len(specs)} 条规格。")
@@ -1192,8 +1349,9 @@ class CostItemCreateDialog(QDialog):
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        self.cost_mode = self.db.get_cost_library_mode() if hasattr(self.db, "get_cost_library_mode") else "total"
         self.setWindowTitle("新增商品")
-        self.resize(520, 260)
+        self.resize(540, 340 if self.cost_mode == "detail" else 260)
         self.init_ui()
         self.load_categories()
 
@@ -1203,6 +1361,9 @@ class CostItemCreateDialog(QDialog):
         category_layout = QHBoxLayout()
         category_layout.addWidget(QLabel("商品类型:"))
         self.category_combo = QComboBox()
+        self.category_combo.setEditable(True)
+        self.category_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.category_combo.lineEdit().setPlaceholderText("输入商品类型关键字搜索...")
         category_layout.addWidget(self.category_combo)
         layout.addLayout(category_layout)
 
@@ -1225,10 +1386,22 @@ class CostItemCreateDialog(QDialog):
         layout.addLayout(quantity_layout)
 
         cost_layout = QHBoxLayout()
-        cost_layout.addWidget(QLabel("成本价:"))
+        cost_layout.addWidget(QLabel("产品单成本:" if self.cost_mode == "detail" else "成本价:"))
         self.cost_input = QLineEdit()
         cost_layout.addWidget(self.cost_input)
         layout.addLayout(cost_layout)
+
+        self.weight_input = QLineEdit()
+        if self.cost_mode == "detail":
+            weight_layout = QHBoxLayout()
+            weight_layout.addWidget(QLabel("单个重量kg:"))
+            weight_layout.addWidget(self.weight_input)
+            layout.addLayout(weight_layout)
+            misc_fee = self.db.get_cost_misc_fee() if hasattr(self.db, "get_cost_misc_fee") else 0
+            note = QLabel(f"详细成本模式：总成本 = 产品单成本 × 数量 + 杂费 {misc_fee:.2f} + 快递费（按模板自动计算）")
+            note.setStyleSheet("color: #666; padding: 4px;")
+            note.setWordWrap(True)
+            layout.addWidget(note)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -1251,25 +1424,47 @@ class CostItemCreateDialog(QDialog):
                ORDER BY sort_order, label"""
         )
         self.category_combo.clear()
+        self.category_labels = []
         for (label,) in rows:
-            self.category_combo.addItem(str(label), str(label))
+            text = str(label)
+            self.category_labels.append(text)
+            self.category_combo.addItem(text, text)
+        completer = QCompleter(self.category_labels, self.category_combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        self.category_combo.setCompleter(completer)
 
     def _parse_cost(self):
         text = self.cost_input.text().replace("¥", "").replace("$", "").replace(",", "").strip()
         if not text:
-            raise ValueError("成本价不能为空")
+            raise ValueError("产品单成本不能为空" if self.cost_mode == "detail" else "成本价不能为空")
         value = float(text)
         if value < 0:
-            raise ValueError("成本价不能小于 0")
+            raise ValueError("产品单成本不能小于 0" if self.cost_mode == "detail" else "成本价不能小于 0")
+        return value
+
+    def _parse_unit_weight(self):
+        text = self.weight_input.text().replace(",", "").strip()
+        if not text:
+            raise ValueError("单个重量不能为空")
+        match = re.search(r"\d+(?:\.\d+)?", text)
+        if not match:
+            raise ValueError("单个重量必须是数字")
+        value = float(match.group(0))
+        if value <= 0:
+            raise ValueError("单个重量必须大于 0")
         return value
 
     def create_item(self):
-        category_label = str(self.category_combo.currentData() or "").strip()
+        category_label = str(self.category_combo.currentText() or "").strip()
         spec_name = self.name_input.text().strip()
         spec_code = self.code_input.text().strip()
         quantity = self.quantity_input.text().strip()
         if not category_label:
             QMessageBox.warning(self, "提示", "请先在商品类型管理中创建商品类型，或先导入带商品类型的成本表。")
+            return
+        if category_label not in getattr(self, "category_labels", []):
+            QMessageBox.warning(self, "提示", "请选择已有商品类型，不要直接输入新的类型。")
             return
         if not spec_name:
             QMessageBox.warning(self, "提示", "商品名称不能为空。")
@@ -1281,9 +1476,21 @@ class CostItemCreateDialog(QDialog):
             QMessageBox.warning(self, "提示", f"规格编码已存在：{spec_code}")
             return
         try:
-            cost_price = self._parse_cost()
+            input_cost = self._parse_cost()
+            product_cost = None
+            unit_weight = None
+            shipping_fee = None
+            misc_fee = None
+            cost_calc_mode = "total"
+            if self.cost_mode == "detail":
+                product_cost = input_cost
+                unit_weight = self._parse_unit_weight()
+                cost_price, shipping_fee, misc_fee, _total_weight = self.db.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                cost_calc_mode = "detail"
+            else:
+                cost_price = input_cost
         except ValueError as e:
-            QMessageBox.warning(self, "成本价格式错误", str(e))
+            QMessageBox.warning(self, "成本格式错误", str(e))
             return
 
         category_color = self.db.ensure_cost_category(category_label) if hasattr(self.db, "ensure_cost_category") else ""
@@ -1292,9 +1499,13 @@ class CostItemCreateDialog(QDialog):
         try:
             self.db.safe_execute(
                 """INSERT INTO cost_library
-                   (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order, manual_sort_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL)""",
-                (spec_code, spec_name, quantity, category_label, category_color, cost_price, next_order),
+                   (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order,
+                    manual_sort_order, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)""",
+                (
+                    spec_code, spec_name, quantity, category_label, category_color, cost_price, next_order,
+                    product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
+                ),
             )
             if hasattr(self.db, "normalize_cost_category_colors"):
                 self.db.normalize_cost_category_colors()
@@ -1361,10 +1572,14 @@ class CostLinkCreateDialog(QDialog):
         type_layout.addWidget(btn_ai_type)
         layout.addLayout(type_layout)
 
-        preview_names = "、".join([str(spec.get("spec_name") or "") for spec in self.specs[:4] if spec.get("spec_name")])
-        if len(self.specs) > 4:
+        preview_names = "、".join([str(spec.get("spec_name") or "") for spec in self.specs[:8] if spec.get("spec_name")])
+        if len(self.specs) > 8:
             preview_names += "..."
-        layout.addWidget(QLabel(f"将写入 {len(self.specs)} 条规格，售价默认 0，权重默认 0。{preview_names}"))
+        preview_label = QLabel(f"将写入 {len(self.specs)} 条规格，售价默认 0，权重默认 0。\n{preview_names}")
+        preview_label.setWordWrap(True)
+        preview_label.setMaximumWidth(620)
+        preview_label.setStyleSheet("color: #555; padding: 4px;")
+        layout.addWidget(preview_label)
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         btn_create = QPushButton("创建")
@@ -1401,25 +1616,52 @@ class CostLinkCreateDialog(QDialog):
             )
         return "\n".join(lines)
 
+    def _existing_link_types(self):
+        rows = self.db.safe_fetchall(
+            "SELECT DISTINCT link_type FROM products WHERE COALESCE(link_type, '') <> '' ORDER BY link_type"
+        )
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+    def _existing_combo_names(self):
+        rows = self.db.safe_fetchall("SELECT name FROM link_combinations ORDER BY sort_order, name")
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
     def _call_ai_text(self, purpose):
         api_key = self.db.get_setting("ai_api_key", "") if hasattr(self.db, "get_setting") else ""
         if not api_key:
             raise RuntimeError("未配置 API Key，请先到 API 配置里填写。")
         api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
         model = self.db.get_setting("ai_model", "deepseek-v4-flash")
-        task = (
-            "根据这些商品生成一个链接组合名称，体现这一组商品面向的人群、用途或组合场景。只输出名称，15个中文以内。"
-            if purpose == "combo"
-            else "根据这些商品生成这条链接自己的链接类型。只输出一个短类型名，12个中文以内。"
+        existing_types = self._existing_link_types()
+        existing_combos = self._existing_combo_names()
+        if purpose == "combo":
+            field_name = "name"
+            max_chars = 40
+            task = (
+                "为这次选中的商品生成一个链接组合名称。组合名称不是商品标题，应该体现人群、用途或组合场景。"
+                "优先参考现有链接类型和已有组合名称的风格，但不要直接输出解释。"
+                "必须只返回 JSON，例如 {\"name\":\"儿童启蒙资料组合\"}。"
+            )
+        else:
+            field_name = "link_type"
+            max_chars = 40
+            task = (
+                "为这次选中的商品选择链接类型。先从现有链接类型中选择最符合的一个；"
+                "只有现有链接类型都不符合时，才生成一个新的短链接类型。"
+                "必须只返回 JSON，例如 {\"link_type\":\"儿童启蒙资料\"}。"
+            )
+        reference = (
+            "现有链接类型:\n" + ("\n".join(f"- {item}" for item in existing_types) or "无") +
+            "\n\n已有链接组合名称:\n" + ("\n".join(f"- {item}" for item in existing_combos) or "无")
         )
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "只输出最终文本，不要解释，不要代码块。"},
-                {"role": "user", "content": f"{task}\n\n商品:\n{self._ai_context()}"},
+                {"role": "system", "content": "你是电商链接分类助手。只输出一个 JSON 对象，不要解释，不要代码块，不要推理过程。"},
+                {"role": "user", "content": f"{task}\n\n{reference}\n\n本次商品:\n{self._ai_context()}"},
             ],
             "temperature": 0.3,
-            "max_tokens": 120,
+            "max_tokens": 300,
         }
         import requests
         response = requests.post(
@@ -1432,12 +1674,14 @@ class CostLinkCreateDialog(QDialog):
             raise RuntimeError(f"AI请求失败：HTTP {response.status_code}\n{response.text[:300]}")
         data = response.json()
         message = data.get("choices", [{}])[0].get("message", {})
-        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
-        content = re.sub(r"^```(?:text)?\s*|\s*```$", "", content, flags=re.I).strip()
-        content = content.strip("\"'“”‘’` \n\r\t")
+        content = str(message.get("content") or "").strip()
         if not content:
             raise RuntimeError(f"AI返回内容为空。API URL: {api_url}\n模型:{model}\n返回内容:{str(data)[:500]}")
-        return content.splitlines()[0].strip()[:40]
+        options = existing_types if purpose == "type" else existing_combos + existing_types
+        value = _clean_ai_short_value(content, field_name, options, max_chars)
+        if not value:
+            raise RuntimeError(f"AI返回内容无法识别。返回内容:{content[:300]}")
+        return value
 
     def generate_combo_name(self):
         try:
@@ -1516,6 +1760,17 @@ class CostLinkCreateDialog(QDialog):
             self.db.conn.rollback()
             QMessageBox.critical(self, "创建失败", f"创建链接失败：{e}")
             return
+        if self.main_window and hasattr(self.main_window, "record_product_operation"):
+            self.main_window.record_product_operation(
+                product_db_id,
+                f"新建链接：商品ID {product_id}，标题：{title}",
+                metric="新建链接",
+                old="",
+                new=product_id,
+                change_type="product_created",
+            )
+        if self.main_window and hasattr(self.main_window, "record_store_link_change"):
+            self.main_window.record_store_link_change(store_id, "add", product_id, title)
         if self.main_window and hasattr(self.main_window, "load_data_safe"):
             self.main_window.load_data_safe()
         QMessageBox.information(self, "成功", f"已创建空白链接：{product_id}\n已写入 {len(self.specs)} 条规格。")
@@ -1760,12 +2015,35 @@ class LinkCombinationDialog(QDialog):
             for pid, title, spec_name, spec_code, category in rows
         )
 
+    def _existing_link_types(self):
+        rows = self.db.safe_fetchall(
+            "SELECT DISTINCT link_type FROM products WHERE COALESCE(link_type, '') <> '' ORDER BY link_type"
+        )
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+    def _existing_combo_names(self):
+        rows = self.db.safe_fetchall("SELECT name FROM link_combinations ORDER BY sort_order, name")
+        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
     def _call_ai_text(self, prompt, context):
         api_key = self.db.get_setting("ai_api_key", "") if hasattr(self.db, "get_setting") else ""
         if not api_key:
             raise RuntimeError("未配置 API Key，请先到 API 配置里填写。")
         api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
         model = self.db.get_setting("ai_model", "deepseek-v4-flash")
+        is_type = "链接类型" in prompt
+        field_name = "link_type" if is_type else "name"
+        existing_types = self._existing_link_types()
+        existing_combos = self._existing_combo_names()
+        reference = (
+            "现有链接类型:\n" + ("\n".join(f"- {item}" for item in existing_types) or "无") +
+            "\n\n已有链接组合名称:\n" + ("\n".join(f"- {item}" for item in existing_combos) or "无")
+        )
+        format_rule = (
+            "如果生成链接类型，先从现有链接类型中选择最符合的一个；没有符合的再生成新的。"
+            "如果生成组合名称，参考现有链接类型和已有组合名称的风格。"
+            f"必须只返回 JSON 对象，字段名为 {field_name}，不要解释，不要代码块。"
+        )
         import requests
         response = requests.post(
             api_url,
@@ -1773,11 +2051,11 @@ class LinkCombinationDialog(QDialog):
             json={
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "只输出最终文本，不要解释，不要代码块。"},
-                    {"role": "user", "content": f"{prompt}\n\n{context}"},
+                    {"role": "system", "content": "你是电商链接分类助手。只输出一个 JSON 对象，不要解释，不要代码块，不要推理过程。"},
+                    {"role": "user", "content": f"{format_rule}\n\n原任务:{prompt}\n\n{reference}\n\n商品信息:\n{context}"},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 120,
+                "max_tokens": 300,
             },
             timeout=60,
         )
@@ -1785,12 +2063,14 @@ class LinkCombinationDialog(QDialog):
             raise RuntimeError(f"AI请求失败：HTTP {response.status_code}\n{response.text[:300]}")
         data = response.json()
         message = data.get("choices", [{}])[0].get("message", {})
-        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
-        content = re.sub(r"^```(?:text)?\s*|\s*```$", "", content, flags=re.I).strip()
-        content = content.strip("\"'“”‘’` \n\r\t")
+        content = str(message.get("content") or "").strip()
         if not content:
             raise RuntimeError(f"AI返回内容为空。API URL: {api_url}\n模型:{model}\n返回内容:{str(data)[:500]}")
-        return content.splitlines()[0].strip()[:40]
+        options = existing_types if is_type else existing_combos + existing_types
+        value = _clean_ai_short_value(content, field_name, options, 40)
+        if not value:
+            raise RuntimeError(f"AI返回内容无法识别。返回内容:{content[:300]}")
+        return value
 
     def ai_rename_current_combo(self):
         if self.current_combo_id is None:
@@ -1824,18 +2104,534 @@ class LinkCombinationDialog(QDialog):
             QMessageBox.warning(self, "AI生成失败", str(e))
 
 
+class ShippingRuleDialog(QDialog):
+    """设置成本库详细成本模式的快递费规则。"""
+
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.setWindowTitle("快递费设置")
+        self.resize(720, 460)
+        self.init_ui()
+        self.load_rules()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("重量单位：kg。按区间匹配，超过规则使用续重公式。"))
+        self.model = QStandardItemModel()
+        self.model.setHorizontalHeaderLabels(["起始重量kg", "结束重量kg", "费用"])
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        range_btns = QHBoxLayout()
+        btn_add = QPushButton("添加区间")
+        btn_add.clicked.connect(self.add_range)
+        btn_delete = QPushButton("删除区间")
+        btn_delete.clicked.connect(self.delete_selected_range)
+        range_btns.addWidget(btn_add)
+        range_btns.addWidget(btn_delete)
+        range_btns.addStretch()
+        layout.addLayout(range_btns)
+
+        over_layout = QHBoxLayout()
+        self.over_threshold = QLineEdit()
+        self.over_base_fee = QLineEdit()
+        self.over_deduct_weight = QLineEdit()
+        self.over_step_weight = QLineEdit()
+        self.over_step_fee = QLineEdit()
+        for label, widget in [
+            ("超过kg", self.over_threshold),
+            ("基础费", self.over_base_fee),
+            ("扣减kg", self.over_deduct_weight),
+            ("续重单位kg", self.over_step_weight),
+            ("每续重费用", self.over_step_fee),
+        ]:
+            over_layout.addWidget(QLabel(label))
+            widget.setFixedWidth(72)
+            over_layout.addWidget(widget)
+        layout.addLayout(over_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_default = QPushButton("恢复默认")
+        btn_default.clicked.connect(self.load_default_rules)
+        btn_save = QPushButton("保存")
+        btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        btn_save.clicked.connect(self.save_rules)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_default)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def _make_item(self, value):
+        item = QStandardItem("" if value is None else str(value))
+        item.setTextAlignment(Qt.AlignCenter)
+        return item
+
+    def load_default_rules(self):
+        rules = getattr(self.db, "DEFAULT_COST_SHIPPING_RULES", None) or {
+            "ranges": [
+                {"min": 0, "max": 0.5, "fee": 1.7},
+                {"min": 0.5, "max": 1, "fee": 1.9},
+                {"min": 1, "max": 2, "fee": 2.9},
+                {"min": 2, "max": 3, "fee": 3.2},
+            ],
+            "over": {"threshold": 3, "base_fee": 2.5, "deduct_weight": 1, "step_weight": 1, "step_fee": 1},
+        }
+        self._apply_rules(rules)
+
+    def load_rules(self):
+        self._apply_rules(self.db.get_cost_shipping_rules() if hasattr(self.db, "get_cost_shipping_rules") else {})
+
+    def _apply_rules(self, rules):
+        self.model.setRowCount(0)
+        for rule in rules.get("ranges", []):
+            self.add_range(rule.get("min", ""), rule.get("max", ""), rule.get("fee", ""))
+        over = rules.get("over", {})
+        self.over_threshold.setText(str(over.get("threshold", 3)))
+        self.over_base_fee.setText(str(over.get("base_fee", 2.5)))
+        self.over_deduct_weight.setText(str(over.get("deduct_weight", 1)))
+        self.over_step_weight.setText(str(over.get("step_weight", 1)))
+        self.over_step_fee.setText(str(over.get("step_fee", 1)))
+
+    def add_range(self, min_weight="", max_weight="", fee=""):
+        row = self.model.rowCount()
+        self.model.insertRow(row)
+        self.model.setItem(row, 0, self._make_item(min_weight))
+        self.model.setItem(row, 1, self._make_item(max_weight))
+        self.model.setItem(row, 2, self._make_item(fee))
+
+    def delete_selected_range(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.model.removeRow(row)
+
+    def _parse_non_negative(self, text, field):
+        try:
+            value = float(str(text).strip())
+        except ValueError:
+            raise ValueError(f"{field} 必须是数字")
+        if value < 0:
+            raise ValueError(f"{field} 不能小于 0")
+        return value
+
+    def save_rules(self):
+        try:
+            ranges = []
+            for row in range(self.model.rowCount()):
+                min_value = self._parse_non_negative(self.model.item(row, 0).text(), "起始重量")
+                max_value = self._parse_non_negative(self.model.item(row, 1).text(), "结束重量")
+                fee = self._parse_non_negative(self.model.item(row, 2).text(), "费用")
+                if max_value <= min_value:
+                    raise ValueError(f"第 {row + 1} 行结束重量必须大于起始重量")
+                ranges.append({"min": min_value, "max": max_value, "fee": fee})
+            if not ranges:
+                raise ValueError("至少需要一条重量区间")
+            over = {
+                "threshold": self._parse_non_negative(self.over_threshold.text(), "超过重量"),
+                "base_fee": self._parse_non_negative(self.over_base_fee.text(), "基础费"),
+                "deduct_weight": self._parse_non_negative(self.over_deduct_weight.text(), "扣减重量"),
+                "step_weight": self._parse_non_negative(self.over_step_weight.text(), "续重单位"),
+                "step_fee": self._parse_non_negative(self.over_step_fee.text(), "每续重费用"),
+            }
+            if over["step_weight"] <= 0:
+                raise ValueError("续重单位必须大于 0")
+        except ValueError as e:
+            QMessageBox.warning(self, "格式错误", str(e))
+            return
+
+        if hasattr(self.db, "set_cost_shipping_rules"):
+            self.db.set_cost_shipping_rules({"ranges": ranges, "over": over})
+        self.accept()
+
+
+class MiscFeeDialog(QDialog):
+    """设置成本库详细成本模式的全局杂费。"""
+
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.setWindowTitle("杂费设置")
+        self.resize(360, 130)
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("每个规格固定杂费:"))
+        self.input_fee = QLineEdit(f"{self.db.get_cost_misc_fee():.2f}" if hasattr(self.db, "get_cost_misc_fee") else "0")
+        row.addWidget(self.input_fee)
+        layout.addLayout(row)
+        btns = QHBoxLayout()
+        btn_save = QPushButton("保存")
+        btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        btn_save.clicked.connect(self.save_fee)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+    def save_fee(self):
+        try:
+            value = float(self.input_fee.text().strip() or 0)
+            if value < 0:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "格式错误", "杂费必须是大于等于 0 的数字。")
+            return
+        if hasattr(self.db, "set_cost_misc_fee"):
+            self.db.set_cost_misc_fee(value)
+        self.accept()
+
+
+class UnlistedCostSpecsDialog(QDialog):
+    """展示当前成本库中尚未上架的规格文本。"""
+
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.setWindowTitle("未上架规格")
+        self.resize(760, 560)
+        layout = QVBoxLayout(self)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("筛选店铺:"))
+        self.store_combo = QComboBox()
+        self.store_combo.addItem("全部店铺", None)
+        for store_id, store_name in self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id"):
+            self.store_combo.addItem(str(store_name or f"店铺{store_id}"), store_id)
+        self.store_combo.currentIndexChanged.connect(self.refresh_text)
+        filter_layout.addWidget(self.store_combo)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+
+        layout.addWidget(QLabel("当前未上架规格文本，可复制给其他 AI 选品："))
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_copy = QPushButton("复制全部")
+        btn_copy.clicked.connect(self.copy_all)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(btn_copy)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+        self.refresh_text()
+
+    def refresh_text(self):
+        parent = self.parent()
+        store_id = self.store_combo.currentData()
+        if parent and hasattr(parent, "get_unlisted_specs_rows") and hasattr(parent, "_build_unlisted_specs_text"):
+            rows = parent.get_unlisted_specs_rows(store_id)
+            if rows:
+                text = parent._build_unlisted_specs_text(rows)
+            else:
+                text = "当前筛选范围内没有未上架规格。"
+            self.text_edit.setPlainText(text)
+
+    def copy_all(self):
+        QApplication.clipboard().setText(self.text_edit.toPlainText())
+        parent = self.parent()
+        if parent and hasattr(parent, "_show_copy_hint"):
+            parent._show_copy_hint("已复制")
+        else:
+            QToolTip.showText(QCursor.pos(), "已复制", self, self.rect(), 1200)
+
+
+class ProductAttributeDialog(QDialog):
+    """Edit a cost-library product attribute, optionally composing it from other specs."""
+
+    def __init__(self, db_manager, current_value="", current_spec_code="", current_spec_name="", auto_detect_disabled=False, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.current_spec_code = str(current_spec_code or "").strip()
+        self.current_spec_name = str(current_spec_name or "").strip()
+        self.auto_detect_disabled = bool(auto_detect_disabled)
+        self._auto_detected_combo = False
+        self._selection_changed = False
+        self.all_specs = []
+        self.selected_specs = {}
+        self.setWindowTitle("产品属性编辑")
+        self.resize(760, 560)
+        self.init_ui()
+        self.load_specs()
+        current_text = str(current_value or "").strip()
+        self.attribute_edit.setPlainText(current_text)
+        name_has_combo_mark = len(self._split_combo_parts(self.current_spec_name)) >= 2
+        if name_has_combo_mark or not self.auto_detect_disabled:
+            self.auto_detect_combo(self.current_spec_name)
+        self.on_combo_toggled(self.combo_check.isChecked())
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        self.attribute_label = QLabel("产品属性:")
+        layout.addWidget(self.attribute_label)
+        self.attribute_edit = QTextEdit()
+        self.attribute_edit.setPlaceholderText("输入产品属性，例如：17cm、A款17cm、A17cm+B20cm")
+        self.attribute_edit.setFixedHeight(110)
+        layout.addWidget(self.attribute_edit)
+
+        combo_bar = QHBoxLayout()
+        self.combo_check = QCheckBox("组合产品")
+        self.combo_check.toggled.connect(self.on_combo_toggled)
+        combo_bar.addWidget(self.combo_check)
+        combo_bar.addStretch()
+        layout.addLayout(combo_bar)
+
+        self.combo_widget = QWidget()
+        combo_layout = QVBoxLayout(self.combo_widget)
+        combo_layout.setContentsMargins(0, 0, 0, 0)
+
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("搜索单品规格:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("输入商品名称/规格编码/产品属性关键字，空格分隔...")
+        self.search_input.textChanged.connect(self.refresh_spec_table)
+        search_layout.addWidget(self.search_input)
+        combo_layout.addLayout(search_layout)
+
+        self.spec_model = QStandardItemModel()
+        self.spec_model.setHorizontalHeaderLabels(["商品名称", "规格编码", "产品属性"])
+        self.spec_table = QTableView()
+        self.spec_table.setModel(self.spec_model)
+        self.spec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.spec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.spec_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.spec_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.spec_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.spec_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.spec_table.clicked.connect(self.on_spec_clicked)
+        combo_layout.addWidget(self.spec_table, 1)
+
+        selected_title = QHBoxLayout()
+        selected_title.addWidget(QLabel("已选组合单品:"))
+        selected_title.addStretch()
+        btn_clear = QPushButton("清空")
+        btn_clear.clicked.connect(self.clear_combo_items)
+        selected_title.addWidget(btn_clear)
+        combo_layout.addLayout(selected_title)
+
+        self.selected_scroll = QScrollArea()
+        self.selected_scroll.setWidgetResizable(True)
+        self.selected_scroll.setFixedHeight(86)
+        self.selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.selected_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.selected_content = QWidget()
+        self.selected_chip_layout = QHBoxLayout(self.selected_content)
+        self.selected_chip_layout.setContentsMargins(6, 4, 6, 4)
+        self.selected_chip_layout.setSpacing(6)
+        self.selected_scroll.setWidget(self.selected_content)
+        combo_layout.addWidget(self.selected_scroll)
+        layout.addWidget(self.combo_widget, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_save = QPushButton("保存")
+        btn_save.clicked.connect(self.accept)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def on_combo_toggled(self, checked):
+        self.attribute_label.setVisible(not checked)
+        self.attribute_edit.setVisible(not checked)
+        self.combo_widget.setVisible(bool(checked))
+        self.resize(760, 560 if checked else 320)
+
+    def load_specs(self):
+        rows = self.db.safe_fetchall(
+            """SELECT COALESCE(spec_name, ''), spec_code, COALESCE(product_attribute, '')
+               FROM cost_library
+               WHERE COALESCE(spec_code, '') <> ''
+                 AND COALESCE(product_attribute, '') <> ''
+               ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END, sort_order, spec_code"""
+        )
+        self.all_specs = [
+            {"name": str(name or ""), "code": str(code or ""), "attribute": str(attribute or "")}
+            for name, code, attribute in rows
+            if str(code or "").strip() and str(code or "").strip() != self.current_spec_code
+        ]
+        self.refresh_spec_table()
+
+    def auto_detect_combo(self, text):
+        text = str(text or "").strip()
+        parts = self._split_combo_parts(text)
+        if len(parts) < 2:
+            return
+        selected = {}
+        for part in parts:
+            match = self._match_combo_part(part)
+            if not match:
+                continue
+            selected[match["code"]] = match
+        self.selected_specs = selected
+        self._auto_detected_combo = True
+        self.refresh_selected_table()
+        self.combo_check.setChecked(True)
+
+    def _split_combo_parts(self, text):
+        return [item.strip() for item in re.split(r"\+|＋|﹢", str(text or "")) if item.strip()]
+
+    def _match_combo_part(self, part):
+        part_norm = self._normalize_combo_text(part)
+        best = None
+        best_score = -1
+        for spec in self.all_specs:
+            candidates = [
+                f"{spec['name']}{spec['attribute']}",
+                str(spec["name"] or ""),
+                str(spec["attribute"] or ""),
+            ]
+            for candidate in candidates:
+                candidate_norm = self._normalize_combo_text(candidate)
+                if not candidate_norm:
+                    continue
+                if candidate_norm == part_norm:
+                    return spec
+                if candidate_norm in part_norm or part_norm in candidate_norm:
+                    score = min(len(candidate_norm), len(part_norm))
+                    if score > best_score:
+                        best = spec
+                        best_score = score
+        return best if best_score >= 2 else None
+
+    def _normalize_combo_text(self, value):
+        return re.sub(r"[\s,，。;；:：|｜/\\_\-（）()【】\\[\\]{}]+", "", str(value or "").strip().lower())
+
+    def refresh_spec_table(self):
+        self.spec_model.setRowCount(0)
+        text = self.search_input.text().strip().lower() if hasattr(self, "search_input") else ""
+        terms = [term for term in text.split() if term]
+        rows = []
+        for spec in self.all_specs:
+            haystack = f"{spec['name']} {spec['code']} {spec['attribute']}".lower()
+            if terms and not any(term in haystack for term in terms):
+                continue
+            hit_count = sum(1 for term in terms if term in haystack)
+            full_hit = 1 if text and text in haystack else 0
+            rows.append((full_hit, hit_count, spec))
+        rows.sort(key=lambda item: (-item[0], -item[1], item[2]["name"], item[2]["code"]))
+        for _full_hit, _hit_count, spec in rows:
+            row = self.spec_model.rowCount()
+            self.spec_model.insertRow(row)
+            for col, value in enumerate((spec["name"], spec["code"], spec["attribute"])):
+                item = QStandardItem(value)
+                item.setEditable(False)
+                item.setTextAlignment(Qt.AlignCenter)
+                if col == 0:
+                    item.setData(spec, Qt.UserRole)
+                self.spec_model.setItem(row, col, item)
+
+    def on_spec_clicked(self, index):
+        if not index.isValid() or not (QApplication.keyboardModifiers() & Qt.ControlModifier):
+            return
+        item = self.spec_model.item(index.row(), 0)
+        spec = item.data(Qt.UserRole) if item else None
+        if not spec:
+            return
+        code = spec["code"]
+        if code in self.selected_specs:
+            self.selected_specs.pop(code, None)
+        else:
+            self.selected_specs[code] = spec
+        self._selection_changed = True
+        self.refresh_selected_table()
+        self.attribute_edit.setPlainText(self.generated_attribute())
+
+    def refresh_selected_table(self):
+        if not hasattr(self, "selected_chip_layout"):
+            return
+        while self.selected_chip_layout.count():
+            item = self.selected_chip_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        if not self.selected_specs:
+            placeholder = QLabel("Ctrl+单击上方规格加入组合")
+            placeholder.setStyleSheet("color: #888; padding: 6px;")
+            self.selected_chip_layout.addWidget(placeholder)
+            self.selected_chip_layout.addStretch()
+            return
+        for spec in self.selected_specs.values():
+            code = spec["code"]
+            chip = QWidget()
+            chip.setObjectName("attributeComboChip")
+            chip.setFixedSize(168, 38)
+            chip.setToolTip(f"规格编码：{code}\n产品属性：{spec.get('attribute') or '-'}")
+            chip.setStyleSheet(
+                "QWidget#attributeComboChip { background-color: #eef7ff; border: 1px solid #9ec5fe; border-radius: 10px; }"
+            )
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(8, 4, 4, 4)
+            name_label = QLabel(str(spec.get("name") or code))
+            name_label.setStyleSheet("border: none; background: transparent; color: #1f4e79; font-weight: bold;")
+            remove_btn = QPushButton("×")
+            remove_btn.setFixedSize(20, 20)
+            remove_btn.setStyleSheet(
+                "QPushButton { border: none; background-color: #cfe2ff; color: #1f4e79; border-radius: 10px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #9ec5fe; }"
+            )
+            remove_btn.clicked.connect(lambda _checked=False, spec_code=code: self.remove_combo_item(spec_code))
+            chip_layout.addWidget(name_label, 1)
+            chip_layout.addWidget(remove_btn)
+            self.selected_chip_layout.addWidget(chip)
+        self.selected_chip_layout.addStretch()
+
+    def remove_selected_combo_item(self):
+        return
+
+    def remove_combo_item(self, code):
+        if code:
+            self.selected_specs.pop(code, None)
+            self._selection_changed = True
+            self.refresh_selected_table()
+            self.attribute_edit.setPlainText(self.generated_attribute())
+
+    def clear_combo_items(self):
+        self.selected_specs.clear()
+        self._selection_changed = True
+        self.refresh_selected_table()
+        self.attribute_edit.clear()
+
+    def generated_attribute(self):
+        parts = []
+        for spec in self.selected_specs.values():
+            name = str(spec.get("name") or "").strip()
+            attribute = str(spec.get("attribute") or "").strip()
+            parts.append(f"{name}{attribute}" if attribute else name)
+        return "+".join(part for part in parts if part)
+
+    def attribute_text(self):
+        if self.combo_check.isChecked() and self.selected_specs and self._selection_changed:
+            return self.generated_attribute()
+        return self.attribute_edit.toPlainText().strip()
+
+    def auto_detect_disable_value(self):
+        return 1 if self._auto_detected_combo and not self.combo_check.isChecked() else 0
+
+
 class CostLibraryDialog(QDialog):
     """查看、编辑和管理成本库对话框。"""
 
     COL_CATEGORY = 0
     COL_NAME = 1
     COL_CODE = 2
-    COL_QUANTITY = 3
-    COL_COST = 4
-    COL_TEST_PRICE = 5
-    COL_PROFIT = 6
-    COL_PROFIT_RATE = 7
-    COL_LISTED_COUNT = 8
+    COL_ATTRIBUTE = 3
+    COL_QUANTITY = 4
+    COL_PRODUCT_COST = 5
+    COL_UNIT_WEIGHT = 6
+    COL_SHIPPING_FEE = 7
+    COL_MISC_FEE = 8
+    COL_COST = 9
+    COL_LISTED_COUNT = 10
 
     CATEGORY_COLORS = [
         "#FFF2CC", "#DDEBF7", "#E2F0D9", "#FCE4D6", "#E4DFEC",
@@ -1849,8 +2645,10 @@ class CostLibraryDialog(QDialog):
         self._original_rows = {}
         self._loading = False
         self._recalculating = False
+        self.cost_mode = self._get_cost_mode()
+        self.listing_cart = {}
         self.setWindowTitle("成本库管理")
-        self.resize(1220, 640)
+        self.resize(1480, 720)
         try:
             self.init_ui()
             self._normalize_category_colors()
@@ -1867,14 +2665,53 @@ class CostLibraryDialog(QDialog):
         if hasattr(self, "table_view") and self.model.rowCount() >= 0:
             QTimer.singleShot(0, self._resize_columns_for_content)
 
+    def _get_cost_mode(self):
+        if hasattr(self.db, "get_cost_library_mode"):
+            return self.db.get_cost_library_mode()
+        return "total"
+
+    def on_cost_mode_changed(self):
+        self.cost_mode = self.mode_combo.currentData() or "total"
+        if hasattr(self.db, "set_cost_library_mode"):
+            self.db.set_cost_library_mode(self.cost_mode)
+        self._apply_cost_mode_visibility()
+        self.load_data()
+
+    def _apply_cost_mode_visibility(self):
+        if not hasattr(self, "table_view"):
+            return
+        detail = self.cost_mode == "detail"
+        for col in (self.COL_PRODUCT_COST, self.COL_UNIT_WEIGHT, self.COL_SHIPPING_FEE, self.COL_MISC_FEE):
+            self.table_view.setColumnHidden(col, not detail)
+        if hasattr(self, "btn_shipping_rules"):
+            self.btn_shipping_rules.setEnabled(detail)
+            self.btn_misc_fee.setEnabled(detail)
+
     def init_ui(self):
         self.model = QStandardItemModel()
         layout = QVBoxLayout(self)
 
-        self._debug_cl_label = QLabel("【板块:成本库对话框\n文件:cost_library.py】商品类型/商品名称/规格编码/成本价/测价测试/历史成本/手动编辑")
+        self._debug_cl_label = QLabel("【板块:成本库对话框\n文件:cost_library.py】商品类型/商品名称/规格编码/产品属性/成本价/历史成本/手动编辑")
         self._debug_cl_label.setStyleSheet("background-color: #F0E68C; color: #000; font-weight: bold; padding: 1px;")
         self._debug_cl_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._debug_cl_label)
+
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("成本模式:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("总成本模式", "total")
+        self.mode_combo.addItem("详细成本模式", "detail")
+        self.mode_combo.setCurrentIndex(1 if self.cost_mode == "detail" else 0)
+        self.mode_combo.currentIndexChanged.connect(self.on_cost_mode_changed)
+        self.btn_shipping_rules = QPushButton("快递费设置")
+        self.btn_shipping_rules.clicked.connect(self.show_shipping_settings)
+        self.btn_misc_fee = QPushButton("杂费设置")
+        self.btn_misc_fee.clicked.connect(self.show_misc_fee_settings)
+        mode_layout.addWidget(self.mode_combo)
+        mode_layout.addWidget(self.btn_shipping_rules)
+        mode_layout.addWidget(self.btn_misc_fee)
+        mode_layout.addStretch()
+        layout.addLayout(mode_layout)
 
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("搜索商品类型/商品名称/规格编码:"))
@@ -1898,7 +2735,10 @@ class CostLibraryDialog(QDialog):
         search_layout.addWidget(btn_history)
         layout.addLayout(search_layout)
 
-        self.model.setHorizontalHeaderLabels(["商品类型", "商品名称", "规格编码", "数量", "成本价", "测价", "利润", "利润率", "已上架规格数"])
+        self.model.setHorizontalHeaderLabels([
+            "商品类型", "商品名称", "规格编码", "产品属性", "数量", "产品成本", "单个重量kg",
+            "快递费", "杂费", "总成本", "已上架规格数"
+        ])
         self.model.itemChanged.connect(self.on_item_changed)
 
         self.table_view = QTableView()
@@ -1909,11 +2749,45 @@ class CostLibraryDialog(QDialog):
         self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table_view.setWordWrap(True)
         self.table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table_view.setStyleSheet(
+            "QTableView::item:hover { background-color: #ffffff; color: #000000; }"
+        )
         self.table_view.clicked.connect(self.copy_name_or_code)
+        self.table_view.doubleClicked.connect(self.open_product_attribute_editor)
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self.show_cost_table_context_menu)
         select_all_delegate = SelectAllLineEditDelegate(self.table_view)
+        multiline_delegate = MultiLineTextEditDelegate(self.table_view)
+        self.table_view.setItemDelegateForColumn(self.COL_CATEGORY, multiline_delegate)
+        self.table_view.setItemDelegateForColumn(self.COL_NAME, SpecNameBadgeDelegate(self.table_view))
+        self.table_view.setItemDelegateForColumn(self.COL_QUANTITY, multiline_delegate)
+        self.table_view.setItemDelegateForColumn(self.COL_ATTRIBUTE, FixedHeightWrapDelegate(self.table_view))
         self.table_view.setItemDelegateForColumn(self.COL_COST, select_all_delegate)
-        self.table_view.setItemDelegateForColumn(self.COL_TEST_PRICE, select_all_delegate)
+        self.table_view.setItemDelegateForColumn(self.COL_PRODUCT_COST, select_all_delegate)
+        self.table_view.setItemDelegateForColumn(self.COL_UNIT_WEIGHT, select_all_delegate)
         layout.addWidget(self.table_view)
+        self._apply_cost_mode_visibility()
+
+        cart_layout = QHBoxLayout()
+        self.cart_title_label = QLabel("上架车（0）")
+        self.cart_title_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        self.cart_scroll = QScrollArea()
+        self.cart_scroll.setWidgetResizable(True)
+        self.cart_scroll.setFixedHeight(58)
+        self.cart_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.cart_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.cart_content = QWidget()
+        self.cart_chip_layout = QHBoxLayout(self.cart_content)
+        self.cart_chip_layout.setContentsMargins(6, 4, 6, 4)
+        self.cart_chip_layout.setSpacing(6)
+        self.cart_scroll.setWidget(self.cart_content)
+        self.btn_clear_cart = QPushButton("清空上架车")
+        self.btn_clear_cart.clicked.connect(self.clear_listing_cart)
+        cart_layout.addWidget(self.cart_title_label)
+        cart_layout.addWidget(self.cart_scroll, 1)
+        cart_layout.addWidget(self.btn_clear_cart)
+        layout.addLayout(cart_layout)
+        self.refresh_listing_cart_view()
 
         btn_layout = QHBoxLayout()
         self.lbl_count = QLabel("共 0 条数据")
@@ -1921,6 +2795,8 @@ class CostLibraryDialog(QDialog):
         btn_category_manage.clicked.connect(self.show_category_manage)
         btn_link_combos = QPushButton("链接组合")
         btn_link_combos.clicked.connect(self.show_link_combinations)
+        btn_unlisted = QPushButton("未上架规格")
+        btn_unlisted.clicked.connect(self.show_unlisted_specs)
         btn_add_item = QPushButton("新增商品")
         btn_add_item.clicked.connect(self.show_create_item)
         btn_create_link = QPushButton("创建链接")
@@ -1940,6 +2816,7 @@ class CostLibraryDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(btn_category_manage)
         btn_layout.addWidget(btn_link_combos)
+        btn_layout.addWidget(btn_unlisted)
         btn_layout.addWidget(btn_add_item)
         btn_layout.addWidget(btn_create_link)
         btn_layout.addWidget(btn_save)
@@ -1955,12 +2832,17 @@ class CostLibraryDialog(QDialog):
             self._original_rows = {}
             search_text = self.search_input.text().strip()
             query = """SELECT cost_library.category_label, cost_library.spec_name, cost_library.spec_code,
-                              cost_library.quantity, cost_library.cost_price, cost_library.test_price,
+                              COALESCE(cost_library.product_attribute, '') AS product_attribute,
+                              COALESCE(cost_library.product_attribute_combo_disabled, 0) AS product_attribute_combo_disabled,
+                              cost_library.quantity, cost_library.cost_price,
                               cost_library.sort_order, cost_library.source_bg_color,
                               COALESCE(cost_categories.color, cost_library.category_color, '') AS category_color,
                               COALESCE(listed_specs.listed_count, 0) AS listed_count,
                               cost_library.manual_sort_order,
-                              cost_categories.sort_order AS category_sort_order
+                              cost_categories.sort_order AS category_sort_order,
+                              cost_library.product_cost, cost_library.unit_weight,
+                              cost_library.shipping_fee, cost_library.misc_fee,
+                              COALESCE(cost_library.cost_calc_mode, 'total') AS cost_calc_mode
                        FROM cost_library
                        LEFT JOIN cost_categories ON cost_categories.label = cost_library.category_label
                        LEFT JOIN (
@@ -1974,20 +2856,28 @@ class CostLibraryDialog(QDialog):
                                 cost_library.category_label,
                                 CASE WHEN cost_library.manual_sort_order IS NULL THEN 1 ELSE 0 END,
                                 cost_library.manual_sort_order,
-                                cost_library.sort_order,
-                                cost_library.spec_code"""
+                               cost_library.sort_order,
+                               cost_library.spec_code"""
             rows = self.db.safe_fetchall(query)
             rows = self._filter_and_sort_rows(rows, search_text)
-            for category_label, spec_name, spec_code, quantity, cost_price, test_price, sort_order, source_bg_color, category_color, listed_count, manual_sort_order, category_sort_order in rows:
+            for category_label, spec_name, spec_code, product_attribute, combo_disabled, quantity, cost_price, sort_order, source_bg_color, category_color, listed_count, manual_sort_order, category_sort_order, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode in rows:
                 category_value = str(category_label or "")
                 name_value = str(spec_name or "")
                 code_value = str(spec_code or "")
+                attribute_value = str(product_attribute or "")
+                combo_disabled_value = int(combo_disabled or 0)
                 quantity_value = self._format_quantity(quantity)
                 listed_count_value = str(int(listed_count or 0))
                 cost_value = float(cost_price) if cost_price is not None else 0.0
-                test_value = float(test_price) if test_price is not None else None
+                product_cost_value = float(product_cost) if product_cost is not None else None
+                unit_weight_value = float(unit_weight) if unit_weight is not None else None
+                shipping_value = float(shipping_fee) if shipping_fee is not None else None
+                misc_value = float(misc_fee) if misc_fee is not None else None
                 row_color = category_color or source_bg_color or ""
-                self._original_rows[code_value] = (category_value, name_value, cost_value, test_value)
+                self._original_rows[code_value] = (
+                    category_value, name_value, attribute_value, combo_disabled_value, quantity_value, cost_value,
+                    product_cost_value, unit_weight_value, shipping_value, misc_value, str(cost_calc_mode or "total")
+                )
 
                 row_index = self.model.rowCount()
                 self.model.insertRow(row_index)
@@ -1995,20 +2885,27 @@ class CostLibraryDialog(QDialog):
                 self._set_item(row_index, self.COL_CATEGORY, category_value, editable=True, bg_color=row_color)
                 self._set_item(row_index, self.COL_NAME, name_value, editable=True, bg_color=row_color)
                 self._set_item(row_index, self.COL_CODE, code_value, editable=False, bg_color=row_color)
-                self._set_item(row_index, self.COL_QUANTITY, quantity_value, editable=False, bg_color=row_color)
-                self._set_item(row_index, self.COL_COST, f"{cost_value:.2f}", editable=True, bg_color=row_color)
-                self._set_item(
-                    row_index,
-                    self.COL_TEST_PRICE,
-                    "" if test_value is None else f"{test_value:.2f}",
-                    editable=True,
-                    bg_color=row_color,
-                )
-                self._set_item(row_index, self.COL_PROFIT, "", editable=False, bg_color=row_color)
-                self._set_item(row_index, self.COL_PROFIT_RATE, "", editable=False, bg_color=row_color)
+                self._set_item(row_index, self.COL_ATTRIBUTE, attribute_value, editable=False, bg_color=row_color)
+                attr_item = self.model.item(row_index, self.COL_ATTRIBUTE)
+                if attr_item:
+                    attr_item.setData(combo_disabled_value, Qt.UserRole)
+                self._set_item(row_index, self.COL_QUANTITY, quantity_value, editable=(self.cost_mode == "detail"), bg_color=row_color)
+                self._set_item(row_index, self.COL_PRODUCT_COST, "" if product_cost_value is None else f"{product_cost_value:.2f}", editable=(self.cost_mode == "detail"), bg_color=row_color)
+                self._set_item(row_index, self.COL_UNIT_WEIGHT, "" if unit_weight_value is None else f"{unit_weight_value:.4f}".rstrip("0").rstrip("."), editable=(self.cost_mode == "detail"), bg_color=row_color)
+                self._set_item(row_index, self.COL_SHIPPING_FEE, "" if shipping_value is None else f"{shipping_value:.2f}", editable=False, bg_color=row_color)
+                self._set_item(row_index, self.COL_MISC_FEE, "" if misc_value is None else f"{misc_value:.2f}", editable=False, bg_color=row_color)
+                self._set_item(row_index, self.COL_COST, f"{cost_value:.2f}", editable=(self.cost_mode != "detail"), bg_color=row_color)
                 self._set_item(row_index, self.COL_LISTED_COUNT, listed_count_value, editable=False, bg_color=row_color)
+                if code_value in self.listing_cart:
+                    self.listing_cart[code_value].update({
+                        "spec_name": name_value,
+                        "spec_code": code_value,
+                        "category_label": category_value,
+                        "quantity": quantity_value,
+                    })
                 self.recalculate_row(row_index)
             self._resize_columns_for_content()
+            self.refresh_listing_cart_view()
             self.lbl_count.setText(f"共 {self.model.rowCount()} 条数据")
         except Exception:
             import traceback
@@ -2026,23 +2923,35 @@ class CostLibraryDialog(QDialog):
         self.table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table_view.verticalHeader().setDefaultSectionSize(44)
         self.table_view.verticalHeader().setMinimumSectionSize(36)
+        self.table_view.verticalHeader().setMaximumSectionSize(120)
 
     def _resize_columns_for_content(self):
         widths = {
             self.COL_CATEGORY: 110,
             self.COL_NAME: 300,
             self.COL_CODE: 190,
+            self.COL_ATTRIBUTE: 150,
             self.COL_QUANTITY: 76,
+            self.COL_PRODUCT_COST: 92,
+            self.COL_UNIT_WEIGHT: 96,
+            self.COL_SHIPPING_FEE: 82,
+            self.COL_MISC_FEE: 76,
             self.COL_COST: 86,
-            self.COL_TEST_PRICE: 86,
-            self.COL_PROFIT: 86,
-            self.COL_PROFIT_RATE: 96,
             self.COL_LISTED_COUNT: 110,
         }
         for col, width in widths.items():
             self.table_view.setColumnWidth(col, width)
 
         self.table_view.resizeRowsToContents()
+        self._cap_row_heights()
+
+    def _cap_row_heights(self):
+        if not hasattr(self, "table_view"):
+            return
+        max_height = 76
+        for row in range(self.model.rowCount()):
+            if self.table_view.rowHeight(row) > max_height:
+                self.table_view.setRowHeight(row, max_height)
 
     def _format_quantity(self, value):
         if value is None:
@@ -2060,6 +2969,9 @@ class CostLibraryDialog(QDialog):
         return str(int(round(number)))
 
     def copy_name_or_code(self, index):
+        if index.isValid() and QApplication.keyboardModifiers() & Qt.ControlModifier:
+            self.toggle_listing_cart_row(index.row())
+            return
         if not index.isValid() or index.column() not in (self.COL_NAME, self.COL_CODE):
             return
         item = self.model.item(index.row(), index.column())
@@ -2069,12 +2981,190 @@ class CostLibraryDialog(QDialog):
         QApplication.clipboard().setText(text)
         self._show_copy_hint("已复制")
 
+    def open_product_attribute_editor(self, index):
+        if not index.isValid() or index.column() != self.COL_ATTRIBUTE:
+            return
+        attribute_item = self.model.item(index.row(), self.COL_ATTRIBUTE)
+        code_item = self.model.item(index.row(), self.COL_CODE)
+        name_item = self.model.item(index.row(), self.COL_NAME)
+        current_value = attribute_item.text().strip() if attribute_item else ""
+        spec_code = code_item.text().strip() if code_item else ""
+        spec_name = name_item.text().strip() if name_item else ""
+        auto_disabled = bool(attribute_item.data(Qt.UserRole)) if attribute_item else False
+        dialog = ProductAttributeDialog(self.db, current_value, spec_code, spec_name, auto_disabled, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        new_value = dialog.attribute_text()
+        combo_disabled = dialog.auto_detect_disable_value()
+        if attribute_item:
+            attribute_item.setText(new_value)
+            attribute_item.setData(combo_disabled, Qt.UserRole)
+        else:
+            self._set_item(index.row(), self.COL_ATTRIBUTE, new_value, editable=False)
+            new_item = self.model.item(index.row(), self.COL_ATTRIBUTE)
+            if new_item:
+                new_item.setData(combo_disabled, Qt.UserRole)
+        QTimer.singleShot(0, self._resize_columns_for_content)
+
     def _show_copy_hint(self, text):
         main_window = self.parent()
         if main_window and hasattr(main_window, "show_toast"):
             main_window.show_toast(text, 1200)
         else:
             QToolTip.showText(QCursor.pos(), text, self, self.rect(), 1200)
+
+    def _row_to_cart_spec(self, row):
+        name_item = self.model.item(row, self.COL_NAME)
+        code_item = self.model.item(row, self.COL_CODE)
+        category_item = self.model.item(row, self.COL_CATEGORY)
+        quantity_item = self.model.item(row, self.COL_QUANTITY)
+        spec_code = code_item.text().strip() if code_item else ""
+        if not spec_code:
+            return None
+        return {
+            "spec_name": name_item.text().strip() if name_item else "",
+            "spec_code": spec_code,
+            "category_label": category_item.text().strip() if category_item else "",
+            "quantity": quantity_item.text().strip() if quantity_item else "",
+        }
+
+    def toggle_listing_cart_row(self, row):
+        spec = self._row_to_cart_spec(row)
+        if not spec:
+            return
+        spec_code = spec["spec_code"]
+        if spec_code in self.listing_cart:
+            self.listing_cart.pop(spec_code, None)
+            self._show_copy_hint("已移出上架车")
+        else:
+            self.listing_cart[spec_code] = spec
+            self._show_copy_hint("已加入上架车")
+        self.refresh_listing_cart_view()
+
+    def remove_listing_cart_item(self, spec_code):
+        self.listing_cart.pop(spec_code, None)
+        self.refresh_listing_cart_view()
+
+    def clear_listing_cart(self):
+        if not self.listing_cart:
+            return
+        self.listing_cart.clear()
+        self.refresh_listing_cart_view()
+        self._show_copy_hint("已清空上架车")
+
+    def refresh_listing_cart_view(self):
+        if not hasattr(self, "cart_chip_layout"):
+            return
+        while self.cart_chip_layout.count():
+            item = self.cart_chip_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.cart_title_label.setText(f"上架车（{len(self.listing_cart)}）")
+        self.btn_clear_cart.setEnabled(bool(self.listing_cart))
+        if not self.listing_cart:
+            placeholder = QLabel("Ctrl+单击规格加入上架车")
+            placeholder.setStyleSheet("color: #888; padding: 6px;")
+            self.cart_chip_layout.addWidget(placeholder)
+            self.cart_chip_layout.addStretch()
+            return
+        for spec_code, spec in self.listing_cart.items():
+            category = spec.get("category_label") or "未分类"
+            spec_name = spec.get("spec_name") or spec_code
+            chip = QWidget()
+            chip.setObjectName("listingCartChip")
+            chip.setFixedSize(178, 50)
+            chip.setToolTip(f"规格编码：{spec_code}\n数量：{spec.get('quantity') or '-'}\n点击移出上架车")
+            chip.setStyleSheet(
+                "QWidget#listingCartChip { background-color: #fffdf2; border: 1px solid #f1d98b; border-radius: 10px; }"
+                "QWidget#listingCartChip:hover { background-color: #ffffff; color: #000000; border: 1px solid #d0d0d0; }"
+                "QWidget#listingCartChip:hover QLabel { color: #000000; }"
+            )
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(8, 4, 4, 4)
+            chip_layout.setSpacing(4)
+            text_layout = QVBoxLayout()
+            text_layout.setContentsMargins(0, 0, 0, 0)
+            text_layout.setSpacing(1)
+            category_label = QLabel(category)
+            category_label.setStyleSheet("color: #8a5a00; font-size: 11px; font-weight: bold; border: none; background: transparent;")
+            category_label.setToolTip(category)
+            name_label = QLabel(spec_name)
+            name_label.setStyleSheet("color: #245269; font-size: 12px; font-weight: bold; border: none; background: transparent;")
+            name_label.setToolTip(spec_name)
+            text_layout.addWidget(category_label)
+            text_layout.addWidget(name_label)
+            remove_btn = QPushButton("×")
+            remove_btn.setFixedSize(20, 20)
+            remove_btn.setStyleSheet(
+                "QPushButton { border: none; background-color: #f3d47a; color: #704600; border-radius: 10px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #e8b94f; }"
+            )
+            remove_btn.clicked.connect(lambda _checked=False, code=spec_code: self.remove_listing_cart_item(code))
+            chip_layout.addLayout(text_layout, 1)
+            chip_layout.addWidget(remove_btn)
+            self.cart_chip_layout.addWidget(chip)
+        self.cart_chip_layout.addStretch()
+
+    def show_cost_table_context_menu(self, pos):
+        index = self.table_view.indexAt(pos)
+        if not index.isValid() or index.column() != self.COL_CATEGORY:
+            return
+        menu = QMenu(self)
+        action_move = menu.addAction("移动到其他商品类型")
+        selected = menu.exec_(self.table_view.viewport().mapToGlobal(pos))
+        if selected == action_move:
+            self.move_row_category(index.row())
+
+    def move_row_category(self, row):
+        code_item = self.model.item(row, self.COL_CODE)
+        category_item = self.model.item(row, self.COL_CATEGORY)
+        spec_code = code_item.text().strip() if code_item else ""
+        current_category = category_item.text().strip() if category_item else ""
+        if not spec_code:
+            QMessageBox.warning(self, "提示", "当前行没有规格编码，无法移动商品类型。")
+            return
+
+        rows = self.db.safe_fetchall(
+            """SELECT label FROM cost_categories
+               WHERE COALESCE(label, '') <> ''
+               ORDER BY sort_order, label"""
+        )
+        categories = [str(row_data[0]).strip() for row_data in rows if str(row_data[0] or "").strip()]
+        categories = [label for label in categories if label != current_category]
+        if not categories:
+            QMessageBox.warning(self, "提示", "没有可移动到的其他商品类型，请先在商品类型管理中创建或导入商品类型。")
+            return
+
+        target, ok = QInputDialog.getItem(
+            self,
+            "移动到其他商品类型",
+            f"将规格 [{spec_code}] 移动到：",
+            categories,
+            0,
+            False,
+        )
+        if not ok or not target:
+            return
+
+        try:
+            if hasattr(self.db, "update_cost_spec_category"):
+                self.db.update_cost_spec_category(spec_code, target)
+            else:
+                category_color = self._category_color(target)
+                self.db.safe_execute(
+                    "UPDATE cost_library SET category_label=?, category_color=? WHERE spec_code=?",
+                    (target, category_color, spec_code),
+                )
+            if hasattr(self.db, "update_all_product_category_labels"):
+                self.db.update_all_product_category_labels()
+        except Exception as e:
+            QMessageBox.critical(self, "移动失败", f"移动商品类型失败：{e}")
+            return
+
+        self._normalize_category_colors()
+        self.load_data()
+        self._show_copy_hint("已移动")
 
     def _split_search_terms(self, search_text):
         return [term.strip().lower() for term in search_text.split() if term.strip()]
@@ -2104,7 +3194,7 @@ class CostLibraryDialog(QDialog):
         return 10**9
 
     def _row_sort_key(self, row):
-        category_label, spec_name, spec_code, quantity, _cost_price, _test_price, sort_order, _source_bg_color, _category_color, _listed_count, manual_sort_order, category_sort_order = row
+        category_label, spec_name, spec_code, _product_attribute, _combo_disabled, quantity, _cost_price, sort_order, _source_bg_color, _category_color, _listed_count, manual_sort_order, category_sort_order = row[:13]
         return (
             1 if not str(category_label or "").strip() else 0,
             category_sort_order if category_sort_order is not None else 10**9,
@@ -2128,7 +3218,7 @@ class CostLibraryDialog(QDialog):
 
         matched = []
         for row in rows:
-            category_label, spec_name, spec_code, quantity, cost_price, test_price, sort_order, source_bg_color, category_color = row[:9]
+            category_label, spec_name, spec_code, product_attribute, _combo_disabled, quantity, cost_price, sort_order, source_bg_color, category_color = row[:10]
             haystack = f"{category_label or ''} {spec_name or ''} {spec_code or ''}".lower()
             hit_count = sum(1 for term in terms if term in haystack)
             if hit_count <= 0:
@@ -2168,36 +3258,56 @@ class CostLibraryDialog(QDialog):
             raise ValueError("测价不能小于 0")
         return price
 
+    def _parse_optional_non_negative(self, text, field):
+        value = str(text).replace("¥", "").replace("$", "").replace(",", "").strip()
+        if value == "":
+            return None
+        parsed = float(value)
+        if parsed < 0:
+            raise ValueError(f"{field}不能小于 0")
+        return parsed
+
+    def _parse_required_non_negative(self, text, field):
+        parsed = self._parse_optional_non_negative(text, field)
+        if parsed is None:
+            raise ValueError(f"{field}不能为空")
+        return parsed
+
     def on_item_changed(self, item):
         if self._loading or self._recalculating:
             return
-        if item.column() in (self.COL_COST, self.COL_TEST_PRICE):
+        if item.column() in (self.COL_QUANTITY, self.COL_PRODUCT_COST, self.COL_UNIT_WEIGHT, self.COL_COST):
             self.recalculate_row(item.row())
             QTimer.singleShot(0, self._resize_columns_for_content)
 
     def recalculate_row(self, row):
         cost_item = self.model.item(row, self.COL_COST)
-        test_item = self.model.item(row, self.COL_TEST_PRICE)
-        profit_item = self.model.item(row, self.COL_PROFIT)
-        rate_item = self.model.item(row, self.COL_PROFIT_RATE)
-        if not cost_item or not test_item or not profit_item or not rate_item:
-            return
-
-        try:
-            cost = self._parse_required_price(cost_item.text())
-            test_price = self._parse_optional_price(test_item.text())
-        except ValueError:
+        if not cost_item:
             return
 
         self._recalculating = True
         try:
-            if test_price is None:
-                profit_item.setText("")
-                rate_item.setText("")
-                return
-            profit = test_price - cost
-            profit_item.setText(f"{profit:.2f}")
-            rate_item.setText("" if test_price == 0 else f"{profit / test_price * 100:.2f}%")
+            if self.cost_mode == "detail":
+                product_item = self.model.item(row, self.COL_PRODUCT_COST)
+                weight_item = self.model.item(row, self.COL_UNIT_WEIGHT)
+                quantity_item = self.model.item(row, self.COL_QUANTITY)
+                shipping_item = self.model.item(row, self.COL_SHIPPING_FEE)
+                misc_item = self.model.item(row, self.COL_MISC_FEE)
+                product_text = product_item.text().strip() if product_item else ""
+                weight_text = weight_item.text().strip() if weight_item else ""
+                if product_text and weight_text and hasattr(self.db, "calculate_detailed_cost"):
+                    product_cost = self._parse_required_non_negative(product_text, "产品成本")
+                    unit_weight = self._parse_required_non_negative(weight_text, "单个重量")
+                    quantity = quantity_item.text().strip() if quantity_item else ""
+                    total_cost, shipping_fee, misc_fee, _total_weight = self.db.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                    cost_item.setText(f"{total_cost:.2f}")
+                    if shipping_item:
+                        shipping_item.setText(f"{shipping_fee:.2f}")
+                    if misc_item:
+                        misc_item.setText(f"{misc_fee:.2f}")
+            self._parse_required_price(cost_item.text())
+        except ValueError:
+            return
         finally:
             self._recalculating = False
 
@@ -2209,37 +3319,76 @@ class CostLibraryDialog(QDialog):
             category_item = self.model.item(row, self.COL_CATEGORY)
             name_item = self.model.item(row, self.COL_NAME)
             code_item = self.model.item(row, self.COL_CODE)
+            attribute_item = self.model.item(row, self.COL_ATTRIBUTE)
+            quantity_item = self.model.item(row, self.COL_QUANTITY)
+            product_item = self.model.item(row, self.COL_PRODUCT_COST)
+            weight_item = self.model.item(row, self.COL_UNIT_WEIGHT)
+            shipping_item = self.model.item(row, self.COL_SHIPPING_FEE)
+            misc_item = self.model.item(row, self.COL_MISC_FEE)
             cost_item = self.model.item(row, self.COL_COST)
-            test_item = self.model.item(row, self.COL_TEST_PRICE)
             spec_code = code_item.text().strip() if code_item else ""
-            if not spec_code or not cost_item or not test_item:
+            if not spec_code or not cost_item:
                 continue
 
             category_label = category_item.text().strip() if category_item else ""
             spec_name = name_item.text().strip() if name_item else ""
+            product_attribute = attribute_item.text().strip() if attribute_item else ""
+            combo_disabled = int(attribute_item.data(Qt.UserRole) or 0) if attribute_item else 0
+            quantity = quantity_item.text().strip() if quantity_item else ""
             try:
-                new_cost = self._parse_required_price(cost_item.text())
-                new_test_price = self._parse_optional_price(test_item.text())
+                product_text = product_item.text().strip() if product_item else ""
+                weight_text = weight_item.text().strip() if weight_item else ""
+                use_detail = self.cost_mode == "detail" and (product_text or weight_text)
+                product_cost = None
+                unit_weight = None
+                shipping_fee = None
+                misc_fee = None
+                cost_calc_mode = "total"
+                if use_detail:
+                    product_cost = self._parse_required_non_negative(product_text, "产品成本")
+                    unit_weight = self._parse_required_non_negative(weight_text, "单个重量")
+                    new_cost, shipping_fee, misc_fee, _total_weight = self.db.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                    if cost_item:
+                        cost_item.setText(f"{new_cost:.2f}")
+                    if shipping_item:
+                        shipping_item.setText(f"{shipping_fee:.2f}")
+                    if misc_item:
+                        misc_item.setText(f"{misc_fee:.2f}")
+                    cost_calc_mode = "detail"
+                else:
+                    new_cost = self._parse_required_price(cost_item.text())
             except ValueError as e:
-                QMessageBox.warning(self, "价格格式错误", f"第 {row + 1} 行 [{spec_code}]：{e}")
+                QMessageBox.warning(self, "成本格式错误", f"第 {row + 1} 行 [{spec_code}]：{e}")
                 return
 
-            old_category, old_name, old_cost, old_test_price = self._original_rows.get(spec_code, ("", "", None, None))
+            old_category, old_name, old_attribute, old_combo_disabled, old_quantity, old_cost, old_product_cost, old_unit_weight, old_shipping_fee, old_misc_fee, old_mode = self._original_rows.get(
+                spec_code, ("", "", "", 0, "", None, None, None, None, None, "total")
+            )
             category_changed = category_label != old_category
             name_changed = spec_name != old_name
+            attribute_changed = product_attribute != old_attribute
+            combo_disabled_changed = combo_disabled != int(old_combo_disabled or 0)
+            quantity_changed = quantity != old_quantity
             cost_changed = old_cost is None or abs(new_cost - old_cost) > 0.001
-            test_changed = (
-                (old_test_price is None and new_test_price is not None)
-                or (old_test_price is not None and new_test_price is None)
-                or (
-                    old_test_price is not None
-                    and new_test_price is not None
-                    and abs(new_test_price - old_test_price) > 0.001
-                )
+            detail_changed = (
+                quantity_changed
+                or old_mode != cost_calc_mode
+                or ((old_product_cost is None) != (product_cost is None))
+                or (old_product_cost is not None and product_cost is not None and abs(product_cost - old_product_cost) > 0.001)
+                or ((old_unit_weight is None) != (unit_weight is None))
+                or (old_unit_weight is not None and unit_weight is not None and abs(unit_weight - old_unit_weight) > 0.0001)
+                or ((old_shipping_fee is None) != (shipping_fee is None))
+                or (old_shipping_fee is not None and shipping_fee is not None and abs(shipping_fee - old_shipping_fee) > 0.001)
+                or ((old_misc_fee is None) != (misc_fee is None))
+                or (old_misc_fee is not None and misc_fee is not None and abs(misc_fee - old_misc_fee) > 0.001)
             )
-            if category_changed or name_changed or cost_changed or test_changed:
+            if category_changed or name_changed or attribute_changed or combo_disabled_changed or cost_changed or detail_changed:
                 category_color = self._category_color(category_label) if category_label else ""
-                updates.append((spec_code, category_label, category_color, spec_name, new_cost, new_test_price))
+                updates.append((
+                    spec_code, category_label, category_color, spec_name, quantity,
+                    product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
+                    new_cost, product_attribute, combo_disabled,
+                ))
             if cost_changed:
                 cost_history_changes.append((spec_code, old_cost, new_cost))
 
@@ -2250,12 +3399,18 @@ class CostLibraryDialog(QDialog):
         import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             self.db.conn.execute("BEGIN TRANSACTION")
-            for spec_code, category_label, category_color, spec_name, new_cost, new_test_price in updates:
+            for spec_code, category_label, category_color, spec_name, quantity, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, new_cost, product_attribute, combo_disabled in updates:
                 self.db.cursor.execute(
                     """UPDATE cost_library
-                       SET category_label=?, category_color=?, spec_name=?, cost_price=?, test_price=?
+                       SET category_label=?, category_color=?, spec_name=?, quantity=?,
+                           product_cost=?, unit_weight=?, shipping_fee=?, misc_fee=?, cost_calc_mode=?,
+                           cost_price=?, product_attribute=?, product_attribute_combo_disabled=?
                        WHERE spec_code=?""",
-                    (category_label, category_color, spec_name, new_cost, new_test_price, spec_code),
+                    (
+                        category_label, category_color, spec_name, quantity,
+                        product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
+                        new_cost, product_attribute, combo_disabled, spec_code,
+                    ),
                 )
 
             for spec_code, old_cost, new_cost in cost_history_changes:
@@ -2312,6 +3467,24 @@ class CostLibraryDialog(QDialog):
         self._normalize_category_colors()
         self.load_data()
 
+    def _refresh_detail_costs_after_settings(self):
+        try:
+            changed = self.db.recalculate_detailed_cost_library(record_history=True, source="manual") if hasattr(self.db, "recalculate_detailed_cost_library") else 0
+            self.load_data()
+            QMessageBox.information(self, "成功", f"设置已保存，已刷新 {changed} 条详细成本数据。")
+        except Exception as e:
+            QMessageBox.critical(self, "刷新失败", f"重新计算详细成本失败：{e}")
+
+    def show_shipping_settings(self):
+        dialog = ShippingRuleDialog(self.db, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_detail_costs_after_settings()
+
+    def show_misc_fee_settings(self):
+        dialog = MiscFeeDialog(self.db, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_detail_costs_after_settings()
+
     def show_history(self):
         dialog = CostHistoryDialog(self.db, self)
         dialog.exec_()
@@ -2333,6 +3506,70 @@ class CostLibraryDialog(QDialog):
         dialog.exec_()
         self.load_data()
 
+    def _build_unlisted_specs_text(self, rows):
+        grouped = {}
+        for category_label, spec_name, spec_code, quantity in rows:
+            category = str(category_label or "").strip() or "未分类"
+            grouped.setdefault(category, []).append((
+                str(spec_name or "").strip(),
+                str(spec_code or "").strip(),
+                self._format_quantity(quantity),
+            ))
+
+        lines = []
+        for category in sorted(grouped.keys()):
+            items = grouped[category]
+            lines.append(f"【{category}】未上架规格（{len(items)}个）")
+            for index, (spec_name, spec_code, quantity) in enumerate(items, start=1):
+                parts = [f"{index}. 商品名称：{spec_name or '-'}", f"规格编码：{spec_code or '-'}"]
+                if quantity:
+                    parts.append(f"数量：{quantity}")
+                lines.append("；".join(parts))
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def get_unlisted_specs_rows(self, store_id=None):
+        if store_id is None:
+            return self.db.safe_fetchall(
+                """SELECT cost_library.category_label, cost_library.spec_name,
+                          cost_library.spec_code, cost_library.quantity
+                   FROM cost_library
+                   LEFT JOIN (
+                       SELECT spec_code, COUNT(*) AS listed_count
+                       FROM product_specs
+                       WHERE COALESCE(spec_code, '') <> ''
+                       GROUP BY spec_code
+                   ) listed_specs ON listed_specs.spec_code = cost_library.spec_code
+                   WHERE COALESCE(listed_specs.listed_count, 0) = 0
+                   ORDER BY CASE WHEN COALESCE(cost_library.category_label, '') = '' THEN 1 ELSE 0 END,
+                            cost_library.category_label,
+                            cost_library.sort_order,
+                            cost_library.spec_code"""
+            )
+        return self.db.safe_fetchall(
+            """SELECT cost_library.category_label, cost_library.spec_name,
+                      cost_library.spec_code, cost_library.quantity
+               FROM cost_library
+               LEFT JOIN (
+                   SELECT product_specs.spec_code, COUNT(*) AS listed_count
+                   FROM product_specs
+                   JOIN products ON products.id = product_specs.product_id
+                   WHERE COALESCE(product_specs.spec_code, '') <> ''
+                     AND products.store_id = ?
+                   GROUP BY product_specs.spec_code
+               ) listed_specs ON listed_specs.spec_code = cost_library.spec_code
+               WHERE COALESCE(listed_specs.listed_count, 0) = 0
+               ORDER BY CASE WHEN COALESCE(cost_library.category_label, '') = '' THEN 1 ELSE 0 END,
+                        cost_library.category_label,
+                        cost_library.sort_order,
+                        cost_library.spec_code""",
+            (store_id,),
+        )
+
+    def show_unlisted_specs(self):
+        dialog = UnlistedCostSpecsDialog(self.db, self)
+        dialog.exec_()
+
     def _selected_cost_specs(self):
         rows = sorted({index.row() for index in self.table_view.selectedIndexes()})
         specs = []
@@ -2352,13 +3589,28 @@ class CostLibraryDialog(QDialog):
             })
         return specs
 
+    def _cart_cost_specs(self):
+        return [
+            {
+                "spec_name": spec.get("spec_name", ""),
+                "spec_code": spec.get("spec_code", ""),
+                "category_label": spec.get("category_label", ""),
+            }
+            for spec in self.listing_cart.values()
+            if spec.get("spec_code")
+        ]
+
     def create_selected_link(self):
-        specs = self._selected_cost_specs()
+        use_cart = bool(self.listing_cart)
+        specs = self._cart_cost_specs() if use_cart else self._selected_cost_specs()
         if not specs:
             QMessageBox.warning(self, "提示", "请先选中要创建链接的规格。")
             return
         dialog = CostLinkCreateDialog(self.db, specs, self.parent(), self)
         if dialog.exec_() == QDialog.Accepted:
+            if use_cart:
+                self.listing_cart.clear()
+                self.refresh_listing_cart_view()
             self.load_data()
 
     def delete_selected(self):
