@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 from PyQt5.QtCore import QEvent, Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QCursor, QPainter, QPen, QStandardItem, QStandardItemModel
+from PyQt5.QtGui import QBrush, QColor, QCursor, QFontMetrics, QPainter, QPen, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -88,10 +88,13 @@ class MultiLineTextEditDelegate(QStyledItemDelegate):
 class SpecNameBadgeDelegate(MultiLineTextEditDelegate):
     """Draw a small single/combined badge in the bottom-right of spec names."""
 
+    COMBO_STATE_ROLE = Qt.UserRole + 101
+
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
         text = str(index.data(Qt.DisplayRole) or "")
-        is_combo = bool(re.search(r"\+|＋|﹢", text))
+        combo_state = index.data(self.COMBO_STATE_ROLE)
+        is_combo = bool(combo_state) if combo_state is not None else bool(re.search(r"\+|＋|﹢", text))
         label = "组合" if is_combo else "单品"
         bg_color = QColor("#fff2cc" if is_combo else "#eaf8ee")
         border_color = QColor("#d6a400" if is_combo else "#5aa469")
@@ -99,15 +102,18 @@ class SpecNameBadgeDelegate(MultiLineTextEditDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
-        metrics = option.fontMetrics
-        badge_width = metrics.horizontalAdvance(label) + 12
-        badge_height = 18
-        x = option.rect.right() - badge_width - 4
-        y = option.rect.bottom() - badge_height - 4
+        font = option.font
+        font.setPointSize(max(7, font.pointSize() - 2))
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        badge_width = metrics.horizontalAdvance(label) + 8
+        badge_height = 14
+        x = option.rect.right() - badge_width - 3
+        y = option.rect.bottom() - badge_height - 3
         badge_rect = option.rect.__class__(x, y, badge_width, badge_height)
         painter.setPen(QPen(border_color, 1))
         painter.setBrush(QBrush(bg_color))
-        painter.drawRoundedRect(badge_rect, 6, 6)
+        painter.drawRoundedRect(badge_rect, 5, 5)
         painter.setPen(text_color)
         painter.drawText(badge_rect, Qt.AlignCenter, label)
         painter.restore()
@@ -2347,14 +2353,25 @@ class UnlistedCostSpecsDialog(QDialog):
 class ProductAttributeDialog(QDialog):
     """Edit a cost-library product attribute, optionally composing it from other specs."""
 
-    def __init__(self, db_manager, current_value="", current_spec_code="", current_spec_name="", auto_detect_disabled=False, parent=None):
+    def __init__(
+        self,
+        db_manager,
+        current_value="",
+        current_spec_code="",
+        current_spec_name="",
+        auto_detect_disabled=False,
+        force_combo=False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.db = db_manager
         self.current_spec_code = str(current_spec_code or "").strip()
         self.current_spec_name = str(current_spec_name or "").strip()
         self.auto_detect_disabled = bool(auto_detect_disabled)
+        self.initial_combo_state = bool(force_combo)
         self._auto_detected_combo = False
         self._selection_changed = False
+        self._source_has_combo_mark = False
         self.all_specs = []
         self.selected_specs = {}
         self.setWindowTitle("产品属性编辑")
@@ -2364,7 +2381,19 @@ class ProductAttributeDialog(QDialog):
         current_text = str(current_value or "").strip()
         self.attribute_edit.setPlainText(current_text)
         name_has_combo_mark = len(self._split_combo_parts(self.current_spec_name)) >= 2
-        if name_has_combo_mark or not self.auto_detect_disabled:
+        attribute_has_combo_mark = len(self._split_combo_parts(current_text)) >= 2
+        self._source_has_combo_mark = name_has_combo_mark or attribute_has_combo_mark
+        if self.initial_combo_state:
+            if attribute_has_combo_mark:
+                self.auto_detect_combo(current_text)
+            elif name_has_combo_mark:
+                self.auto_detect_combo(self.current_spec_name)
+            else:
+                self.combo_check.setChecked(True)
+                self.refresh_selected_table()
+        elif not self.auto_detect_disabled and attribute_has_combo_mark:
+            self.auto_detect_combo(current_text)
+        elif not self.auto_detect_disabled and name_has_combo_mark:
             self.auto_detect_combo(self.current_spec_name)
         self.on_combo_toggled(self.combo_check.isChecked())
 
@@ -2457,7 +2486,10 @@ class ProductAttributeDialog(QDialog):
         self.all_specs = [
             {"name": str(name or ""), "code": str(code or ""), "attribute": str(attribute or "")}
             for name, code, attribute in rows
-            if str(code or "").strip() and str(code or "").strip() != self.current_spec_code
+            if str(code or "").strip()
+            and str(code or "").strip() != self.current_spec_code
+            and len(self._split_combo_parts(str(name or ""))) < 2
+            and len(self._split_combo_parts(str(attribute or ""))) < 2
         ]
         self.refresh_spec_table()
 
@@ -2476,6 +2508,8 @@ class ProductAttributeDialog(QDialog):
         self._auto_detected_combo = True
         self.refresh_selected_table()
         self.combo_check.setChecked(True)
+        if selected:
+            self.attribute_edit.setPlainText(self.generated_attribute())
 
     def _split_combo_parts(self, text):
         return [item.strip() for item in re.split(r"\+|＋|﹢", str(text or "")) if item.strip()]
@@ -2562,16 +2596,20 @@ class ProductAttributeDialog(QDialog):
             return
         for spec in self.selected_specs.values():
             code = spec["code"]
+            name = str(spec.get("name") or code)
+            attribute = str(spec.get("attribute") or "").strip()
+            full_text = f"{name}{attribute}" if attribute else name
             chip = QWidget()
             chip.setObjectName("attributeComboChip")
             chip.setFixedSize(168, 38)
-            chip.setToolTip(f"规格编码：{code}\n产品属性：{spec.get('attribute') or '-'}")
+            chip.setToolTip(f"完整规格：{full_text}\n商品名称：{name}\n规格编码：{code}\n产品属性：{attribute or '-'}")
             chip.setStyleSheet(
                 "QWidget#attributeComboChip { background-color: #eef7ff; border: 1px solid #9ec5fe; border-radius: 10px; }"
             )
             chip_layout = QHBoxLayout(chip)
             chip_layout.setContentsMargins(8, 4, 4, 4)
-            name_label = QLabel(str(spec.get("name") or code))
+            name_label = QLabel(name)
+            name_label.setToolTip(chip.toolTip())
             name_label.setStyleSheet("border: none; background: transparent; color: #1f4e79; font-weight: bold;")
             remove_btn = QPushButton("×")
             remove_btn.setFixedSize(20, 20)
@@ -2610,12 +2648,16 @@ class ProductAttributeDialog(QDialog):
         return "+".join(part for part in parts if part)
 
     def attribute_text(self):
-        if self.combo_check.isChecked() and self.selected_specs and self._selection_changed:
+        if self.combo_check.isChecked():
             return self.generated_attribute()
         return self.attribute_edit.toPlainText().strip()
 
     def auto_detect_disable_value(self):
-        return 1 if self._auto_detected_combo and not self.combo_check.isChecked() else 0
+        if self.combo_check.isChecked():
+            return 0
+        if self.initial_combo_state or self._source_has_combo_mark or self.auto_detect_disabled:
+            return 1
+        return 0
 
 
 class CostLibraryDialog(QDialog):
@@ -2676,6 +2718,17 @@ class CostLibraryDialog(QDialog):
             self.db.set_cost_library_mode(self.cost_mode)
         self._apply_cost_mode_visibility()
         self.load_data()
+
+    def _is_combo_spec(self, spec_name, product_attribute, combo_disabled):
+        if int(combo_disabled or 0):
+            return False
+        text = f"{spec_name or ''} {product_attribute or ''}"
+        return bool(re.search(r"\+|＋|﹢", text))
+
+    def _set_name_combo_state(self, row, is_combo):
+        item = self.model.item(row, self.COL_NAME)
+        if item:
+            item.setData(bool(is_combo), SpecNameBadgeDelegate.COMBO_STATE_ROLE)
 
     def _apply_cost_mode_visibility(self):
         if not hasattr(self, "table_view"):
@@ -2874,6 +2927,7 @@ class CostLibraryDialog(QDialog):
                 shipping_value = float(shipping_fee) if shipping_fee is not None else None
                 misc_value = float(misc_fee) if misc_fee is not None else None
                 row_color = category_color or source_bg_color or ""
+                is_combo = self._is_combo_spec(name_value, attribute_value, combo_disabled_value)
                 self._original_rows[code_value] = (
                     category_value, name_value, attribute_value, combo_disabled_value, quantity_value, cost_value,
                     product_cost_value, unit_weight_value, shipping_value, misc_value, str(cost_calc_mode or "total")
@@ -2884,6 +2938,7 @@ class CostLibraryDialog(QDialog):
 
                 self._set_item(row_index, self.COL_CATEGORY, category_value, editable=True, bg_color=row_color)
                 self._set_item(row_index, self.COL_NAME, name_value, editable=True, bg_color=row_color)
+                self._set_name_combo_state(row_index, is_combo)
                 self._set_item(row_index, self.COL_CODE, code_value, editable=False, bg_color=row_color)
                 self._set_item(row_index, self.COL_ATTRIBUTE, attribute_value, editable=False, bg_color=row_color)
                 attr_item = self.model.item(row_index, self.COL_ATTRIBUTE)
@@ -2991,7 +3046,8 @@ class CostLibraryDialog(QDialog):
         spec_code = code_item.text().strip() if code_item else ""
         spec_name = name_item.text().strip() if name_item else ""
         auto_disabled = bool(attribute_item.data(Qt.UserRole)) if attribute_item else False
-        dialog = ProductAttributeDialog(self.db, current_value, spec_code, spec_name, auto_disabled, self)
+        is_combo = bool(name_item.data(SpecNameBadgeDelegate.COMBO_STATE_ROLE)) if name_item else False
+        dialog = ProductAttributeDialog(self.db, current_value, spec_code, spec_name, auto_disabled, is_combo, self)
         if dialog.exec_() != QDialog.Accepted:
             return
         new_value = dialog.attribute_text()
@@ -3004,6 +3060,10 @@ class CostLibraryDialog(QDialog):
             new_item = self.model.item(index.row(), self.COL_ATTRIBUTE)
             if new_item:
                 new_item.setData(combo_disabled, Qt.UserRole)
+        self._set_name_combo_state(index.row(), self._is_combo_spec(spec_name, new_value, combo_disabled))
+        name_item = self.model.item(index.row(), self.COL_NAME)
+        if name_item:
+            name_item.emitDataChanged()
         QTimer.singleShot(0, self._resize_columns_for_content)
 
     def _show_copy_hint(self, text):

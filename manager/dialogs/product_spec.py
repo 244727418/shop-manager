@@ -4,6 +4,7 @@ import os
 import re
 import json
 import time
+import html
 import requests
 from datetime import datetime, timedelta, date
 
@@ -14,9 +15,9 @@ from PyQt5.QtWidgets import (
     QProgressDialog, QApplication, QInputDialog, QTextEdit, QScrollArea,
     QGraphicsOpacityEffect, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
     QPlainTextEdit, QSlider, QSplitter, QButtonGroup, QDateEdit, QMenu, QAction,
-    QShortcut,
+    QShortcut, QToolTip,
 )
-from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve, QDate, QByteArray, QBuffer, QIODevice
+from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve, QDate, QByteArray, QBuffer, QIODevice, QPoint
 from PyQt5.QtGui import QColor, QPixmap, QIcon, QIntValidator, QKeySequence, QPalette, QFontMetrics
 
 try:
@@ -914,6 +915,15 @@ class ProductSpecDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.installEventFilter(self)
+        self.table.setMouseTracking(True)
+        self.table.viewport().setMouseTracking(True)
+        self.table.viewport().installEventFilter(self)
+        self._spec_code_hover_timer = QTimer(self)
+        self._spec_code_hover_timer.setSingleShot(True)
+        self._spec_code_hover_timer.timeout.connect(self._show_spec_code_hover_tooltip)
+        self._spec_code_hover_target = None
+        self._spec_code_hover_visible = False
+        self._spec_code_hover_html = ""
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_spec_row_context_menu)
         self._apply_spec_table_headers_and_column_sizing()
@@ -1894,28 +1904,117 @@ class ProductSpecDialog(QDialog):
         if not self._is_editable_spec_table_cell(row, col):
             return False
         item = self._ensure_editable_spec_item(row, col)
-        self.table.blockSignals(True)
-        try:
-            item.setText(initial_text)
-        finally:
-            self.table.blockSignals(False)
         self.table.editItem(item)
-        QTimer.singleShot(0, self._move_active_table_editor_cursor_to_end)
+        QTimer.singleShot(0, lambda text=initial_text: self._seed_active_table_editor(text))
         return True
 
-    def _move_active_table_editor_cursor_to_end(self):
+    def _active_table_editor(self):
         editor = QApplication.focusWidget()
         if not editor or not self.table.isAncestorOf(editor):
             editors = self.table.findChildren(QLineEdit) + self.table.findChildren(QPlainTextEdit)
             editor = editors[-1] if editors else None
+        return editor
+
+    def _seed_active_table_editor(self, text):
+        editor = self._active_table_editor()
         if isinstance(editor, QLineEdit):
+            editor.setText(text)
             editor.deselect()
             editor.setCursorPosition(len(editor.text()))
         elif isinstance(editor, QPlainTextEdit):
+            editor.setPlainText(text)
             cursor = editor.textCursor()
             cursor.clearSelection()
             cursor.movePosition(cursor.End)
             editor.setTextCursor(cursor)
+
+    def _handle_spec_code_hover_move(self, event):
+        if self.table.state() == QAbstractItemView.EditingState:
+            self._clear_spec_code_hover_tooltip()
+            return
+
+        index = self.table.indexAt(event.pos())
+        if not index.isValid() or index.column() != self.COL_SPEC_CODE:
+            self._clear_spec_code_hover_tooltip()
+            return
+
+        item = self.table.item(index.row(), self.COL_SPEC_CODE)
+        spec_code = item.text().strip() if item else ""
+        if not spec_code:
+            self._clear_spec_code_hover_tooltip()
+            return
+
+        target = (index.row(), index.column(), spec_code)
+        old_target = self._spec_code_hover_target
+        if old_target and old_target == target:
+            if getattr(self, "_spec_code_hover_visible", False) and getattr(self, "_spec_code_hover_html", ""):
+                self._show_spec_code_hover_text(index.row(), index.column(), self._spec_code_hover_html)
+            return
+
+        QToolTip.hideText()
+        self._spec_code_hover_target = target
+        self._spec_code_hover_visible = False
+        self._spec_code_hover_html = ""
+        self._spec_code_hover_timer.start(1000)
+
+    def _clear_spec_code_hover_tooltip(self):
+        if hasattr(self, "_spec_code_hover_timer"):
+            self._spec_code_hover_timer.stop()
+        self._spec_code_hover_target = None
+        self._spec_code_hover_visible = False
+        self._spec_code_hover_html = ""
+        QToolTip.hideText()
+
+    def _show_spec_code_hover_tooltip(self):
+        target = getattr(self, "_spec_code_hover_target", None)
+        if not target:
+            return
+        row, col, spec_code = target
+        if row < 0 or row >= self.table.rowCount() or self.table.isColumnHidden(col):
+            return
+        current_item = self.table.item(row, self.COL_SPEC_CODE)
+        if not current_item or current_item.text().strip() != spec_code:
+            return
+
+        tooltip = self._spec_code_contains_tooltip_html(spec_code)
+        if tooltip:
+            self._spec_code_hover_html = tooltip
+            self._spec_code_hover_visible = True
+            self._show_spec_code_hover_text(row, col, tooltip)
+
+    def _show_spec_code_hover_text(self, row, col, tooltip):
+        index = self.table.model().index(row, col)
+        if not index.isValid():
+            return
+        cell_rect = self.table.visualRect(index)
+        if cell_rect.isNull():
+            return
+        viewport = self.table.viewport()
+        tooltip_pos = viewport.mapToGlobal(cell_rect.bottomLeft() + QPoint(8, 8))
+        QToolTip.showText(tooltip_pos, tooltip, viewport, cell_rect.adjusted(-2, -2, 2, 2), 30000)
+
+    def _spec_code_contains_tooltip_html(self, spec_code):
+        spec_code = str(spec_code or "").strip()
+        if not spec_code:
+            return ""
+        composition = self._cost_product_composition_for_code(spec_code)
+        code_html = html.escape(spec_code)
+        lines = [
+            "<html><body style='white-space: nowrap;'>",
+            f"规格编码：{code_html}<br>"
+        ]
+        if not composition["found"]:
+            lines.append("未找到成本库规格信息")
+        elif not composition["items"]:
+            lines.append("未填写包含规格")
+        else:
+            lines.append("包含产品：<br>")
+            for item in composition["items"]:
+                name = html.escape(item.get("name") or "-")
+                param = html.escape(item.get("param") or "-")
+                lines.append(f"商品名称：<b>{name}</b>　产品属性：{param}<br>")
+        lines.append("</body></html>")
+        return "".join(lines)
 
     def _copy_selected_spec_cells(self):
         ranges = self.table.selectedRanges()
@@ -2000,6 +2099,15 @@ class ProductSpecDialog(QDialog):
 
     def eventFilter(self, obj, event):
         """事件过滤器：处理标签双击事件"""
+        table = getattr(self, "table", None)
+        if table is not None and obj == table.viewport():
+            if event.type() == QEvent.MouseMove:
+                self._handle_spec_code_hover_move(event)
+                return False
+            if event.type() in (QEvent.Leave, QEvent.MouseButtonPress, QEvent.Wheel):
+                self._clear_spec_code_hover_tooltip()
+                return False
+
         if obj == getattr(self, "table", None) and event.type() == QEvent.KeyPress:
             if self._handle_spec_table_key_press(event):
                 return True
@@ -2656,7 +2764,7 @@ class ProductSpecDialog(QDialog):
             self._restore_latest_import_history_if_needed()
             # 0. 加载优惠券和新客立减金额
             discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
                 (self.product_id,)
             )
             if discount_rows:
@@ -2668,6 +2776,7 @@ class ProductSpecDialog(QDialog):
                 is_marketing = discount_rows[0][5] if discount_rows[0][5] else 0
                 is_natural_flow = discount_rows[0][6] if discount_rows[0][6] else 0
                 is_sitewide_managed = discount_rows[0][7] if discount_rows[0][7] else 0
+                saved_roi_input_mode = discount_rows[0][8] if len(discount_rows[0]) > 8 and discount_rows[0][8] in ("roi", "bid") else "roi"
                 
                 self.coupon_input.setText(str(int(round(coupon_amount))) if coupon_amount > 0 else "")
                 self.new_customer_input.setText(str(int(round(new_customer_discount))) if new_customer_discount > 0 else "")
@@ -2682,6 +2791,8 @@ class ProductSpecDialog(QDialog):
                 self.is_sitewide_managed = bool(is_sitewide_managed) and not self.is_natural_flow
                 self._initial_is_natural_flow = self.is_natural_flow
                 self._initial_is_sitewide_managed = self.is_sitewide_managed
+                self.roi_input_mode = saved_roi_input_mode
+                self._initial_roi_input_mode = self.roi_input_mode
                 self._update_promotion_mode_buttons()
                 self._apply_roi_bid_input_mode()
                 self.update_tag_button_styles()
@@ -2918,6 +3029,20 @@ class ProductSpecDialog(QDialog):
             
             # 5. 加载完成后，计算一次综合毛利
             self.calculate_total_margin()
+            if getattr(self, "roi_input_mode", "roi") == "bid":
+                try:
+                    saved_roi = float(self.current_roi_input.text()) if self.current_roi_input.text().strip() else 0.0
+                except ValueError:
+                    saved_roi = 0.0
+                if saved_roi > 0:
+                    saved_bid = self._calc_bid_from_roi(saved_roi)
+                    self._roi_bid_syncing = True
+                    try:
+                        self.transaction_bid_input.setText(f"{saved_bid:.2f}" if saved_bid is not None else "")
+                    finally:
+                        self._roi_bid_syncing = False
+            if hasattr(self, 'lbl_gross_break_even'):
+                self.calculate_roi_metrics()
             self.update_remaining_weight_label()
             self.update_total_orders_label()
             self.update_compare_columns()
@@ -3671,10 +3796,11 @@ class ProductSpecDialog(QDialog):
         layout.addWidget(text_edit, 1)
 
         def refresh_text():
-            text_edit.setPlainText(
+            text_edit.setHtml(
                 self._build_basic_info_summary(
                     include_weight=chk_include_weight.isChecked(),
-                    include_roi=chk_include_roi.isChecked()
+                    include_roi=chk_include_roi.isChecked(),
+                    rich=True
                 )
             )
 
@@ -3689,7 +3815,13 @@ class ProductSpecDialog(QDialog):
                 pass
 
         def copy_text():
-            QApplication.clipboard().setText(text_edit.toPlainText())
+            QApplication.clipboard().setText(
+                self._build_basic_info_summary(
+                    include_weight=chk_include_weight.isChecked(),
+                    include_roi=chk_include_roi.isChecked(),
+                    rich=False
+                )
+            )
             btn_copy.setText("已复制")
             btn_copy.setStyleSheet("background-color: #1e7e34; color: white; font-weight: bold; padding: 7px 18px; border-radius: 4px;")
             copy_feedback_timer.start(500)
@@ -3714,8 +3846,10 @@ class ProductSpecDialog(QDialog):
 
         dialog.exec_()
 
-    def _build_basic_info_summary(self, include_weight=False, include_roi=False):
+    def _build_basic_info_summary(self, include_weight=False, include_roi=False, rich=False):
         """从当前窗口状态生成可复制的链接基础信息。"""
+        if rich:
+            return self._build_basic_info_summary_html(include_weight, include_roi)
         lines = [
             "链接基础信息",
             f"标题：{self.product_name or '-'}",
@@ -3729,7 +3863,7 @@ class ProductSpecDialog(QDialog):
         for row in range(self.table.rowCount()):
             spec_name = self._compose_spec_name(row).strip()
             spec_code = self._table_text(row, self.COL_SPEC_CODE)
-            product_attribute = self._cost_product_attribute_for_code(spec_code)
+            composition = self._cost_product_composition_for_code(spec_code)
             cost = self._table_text(row, self.COL_COST)
             sale_price = self._table_text(row, self.COL_SALE_PRICE)
             final_price = self._table_text(row, self.COL_FINAL_PRICE)
@@ -3739,19 +3873,20 @@ class ProductSpecDialog(QDialog):
             if not any([spec_name, cost, sale_price, final_price, margin_rate, weight]):
                 continue
 
-            parts = [
-                f"规格：{spec_name or '-'}",
-                f"产品属性：{product_attribute}",
-                f"成本：{cost or '-'}",
-                f"售价：{sale_price or '-'}",
-                f"券后价：{final_price or '-'}",
-                f"毛利率：{margin_rate or '-'}"
-            ]
+            parts = [f"{len(spec_lines) + 1}. 规格：{spec_name or '-'}", f"编码：{spec_code or '-'}", "包含产品："]
+            if not composition["found"]:
+                parts.append("  - 未找到成本库规格信息")
+            elif not composition["items"]:
+                parts.append("  - 未填写包含规格")
+            else:
+                for product in composition["items"]:
+                    parts.append(f"  - 商品名称：{product.get('name') or '-'}；产品属性：{product.get('param') or '-'}")
+            parts.append(f"成本：{cost or '-'}，售价：{sale_price or '-'}，券后价：{final_price or '-'}，毛利率：{margin_rate or '-'}")
             if include_weight:
                 parts.append(f"权重：{weight or '-'}")
-            spec_lines.append(f"{len(spec_lines) + 1}. " + "，".join(parts))
+            spec_lines.append("\n".join(parts))
 
-        lines.extend(spec_lines or ["暂无规格"])
+        lines.extend(["\n\n".join(spec_lines)] if spec_lines else ["暂无规格"])
 
         if include_roi:
             lines.extend(["", "投产比分析："])
@@ -3759,18 +3894,130 @@ class ProductSpecDialog(QDialog):
 
         return "\n".join(lines)
 
+    def _build_basic_info_summary_html(self, include_weight=False, include_roi=False):
+        html_parts = [
+            "<html><body style=\"font-family:'Microsoft YaHei UI','YouYuan',sans-serif; font-size:13px; line-height:1.45;\">",
+            "<div><b>链接基础信息</b></div>",
+            f"<div>标题：{html.escape(self.product_name or '-')}</div>",
+            f"<div>商品ID：{html.escape(self.product_code or '-')}</div>",
+            f"<div>{html.escape(self.lbl_total_margin.text().strip() if hasattr(self, 'lbl_total_margin') else '当前综合毛利率：0.00%')}</div>",
+            "<br><div><b>规格情况：</b></div>"
+        ]
+
+        spec_index = 0
+        for row in range(self.table.rowCount()):
+            spec_name = self._compose_spec_name(row).strip()
+            spec_code = self._table_text(row, self.COL_SPEC_CODE)
+            composition = self._cost_product_composition_for_code(spec_code)
+            cost = self._table_text(row, self.COL_COST)
+            sale_price = self._table_text(row, self.COL_SALE_PRICE)
+            final_price = self._table_text(row, self.COL_FINAL_PRICE)
+            margin_rate = self._table_text(row, self.COL_MARGIN_RATE)
+            weight = self._clean_weight_text(self._table_text(row, self.COL_WEIGHT))
+
+            if not any([spec_name, cost, sale_price, final_price, margin_rate, weight]):
+                continue
+
+            spec_index += 1
+            html_parts.append("<div style='margin-top:10px;'>")
+            html_parts.append(f"<div>{spec_index}. 规格：{html.escape(spec_name or '-')}</div>")
+            html_parts.append(f"<div>编码：{html.escape(spec_code or '-')}</div>")
+            html_parts.append("<div>包含产品：</div>")
+            if not composition["found"]:
+                html_parts.append("<div style='margin-left:18px;'>- 未找到成本库规格信息</div>")
+            elif not composition["items"]:
+                html_parts.append("<div style='margin-left:18px;'>- 未填写包含规格</div>")
+            else:
+                for product in composition["items"]:
+                    name = html.escape(product.get("name") or "-")
+                    param = html.escape(product.get("param") or "-")
+                    html_parts.append(f"<div style='margin-left:18px;'>- 商品名称：<b>{name}</b>；产品属性：{param}</div>")
+            detail = f"成本：{cost or '-'}，售价：{sale_price or '-'}，券后价：{final_price or '-'}，毛利率：{margin_rate or '-'}"
+            if include_weight:
+                detail += f"，权重：{weight or '-'}"
+            html_parts.append(f"<div>{html.escape(detail)}</div>")
+            html_parts.append("</div>")
+
+        if spec_index == 0:
+            html_parts.append("<div>暂无规格</div>")
+
+        if include_roi:
+            html_parts.append("<br><div><b>投产比分析：</b></div>")
+            for line in self._build_roi_summary_lines():
+                html_parts.append(f"<div>{html.escape(line)}</div>")
+
+        html_parts.append("</body></html>")
+        return "".join(html_parts)
+
     def _cost_product_attribute_for_code(self, spec_code):
-        spec_code = str(spec_code or "").strip()
-        if not spec_code:
+        composition = self._cost_product_composition_for_code(spec_code)
+        if not composition["found"] or not composition["items"]:
             return ""
+        return "；".join(
+            f"{item.get('name') or '-'}({item.get('param') or '-'})"
+            for item in composition["items"]
+        )
+
+    def _cost_product_composition_for_code(self, spec_code):
+        spec_code = str(spec_code or "").strip()
+        empty = {"found": False, "items": []}
+        if not spec_code:
+            return empty
         try:
             rows = self.db.safe_fetchall(
-                "SELECT COALESCE(product_attribute, '') FROM cost_library WHERE spec_code=?",
+                "SELECT COALESCE(spec_name, ''), COALESCE(product_attribute, '') FROM cost_library WHERE spec_code=?",
                 (spec_code,),
             )
-            return str(rows[0][0] or "").strip() if rows else ""
         except Exception:
-            return ""
+            rows = []
+        if not rows:
+            return empty
+
+        spec_name = str(rows[0][0] or "").strip()
+        product_attribute = str(rows[0][1] or "").strip()
+        is_combo = any(mark in product_attribute for mark in ("+", "＋", "﹢"))
+        if is_combo:
+            parts = [part.strip() for part in re.split(r"\+|＋|﹢", product_attribute) if part.strip()]
+            return {"found": True, "items": [self._split_cost_product_part(part) for part in parts]}
+
+        name = spec_name or product_attribute or spec_code
+        param = product_attribute if spec_name and product_attribute and product_attribute != spec_name else ""
+        return {"found": True, "items": [{"name": name, "param": param}]}
+
+    def _split_cost_product_part(self, part):
+        text = str(part or "").strip()
+        if not text:
+            return {"name": "", "param": ""}
+        for candidate in self._cost_product_component_candidates():
+            name = candidate.get("name", "")
+            if not name:
+                continue
+            if text == name:
+                return {"name": name, "param": candidate.get("attribute", "")}
+            if text.startswith(name):
+                param = text[len(name):].strip()
+                return {"name": name, "param": param or candidate.get("attribute", "")}
+        return {"name": text, "param": ""}
+
+    def _cost_product_component_candidates(self):
+        cache = getattr(self, "_cost_product_component_cache", None)
+        if cache is not None:
+            return cache
+        try:
+            rows = self.db.safe_fetchall(
+                """SELECT COALESCE(spec_name, ''), COALESCE(product_attribute, '')
+                   FROM cost_library
+                   WHERE COALESCE(spec_name, '') <> ''
+                   ORDER BY LENGTH(COALESCE(spec_name, '')) DESC"""
+            )
+        except Exception:
+            rows = []
+        self._cost_product_component_cache = [
+            {"name": str(name or "").strip(), "attribute": str(attribute or "").strip()}
+            for name, attribute in rows
+            if str(name or "").strip()
+        ]
+        return self._cost_product_component_cache
 
     def _table_text(self, row, col):
         item = self.table.item(row, col)
@@ -6384,7 +6631,7 @@ SKU名称尽量接近35字，最多不超过40字。
             ]
 
             old_discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_natural_flow, is_sitewide_managed FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
                 (self.product_id,)
             )
             old_coupon = old_discount_rows[0][0] if old_discount_rows and old_discount_rows[0][0] else 0
@@ -6393,6 +6640,7 @@ SKU名称尽量接近35字，最多不超过40字。
             old_return_rate = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
             old_natural_flow = old_discount_rows[0][4] if old_discount_rows and old_discount_rows[0][4] else 0
             old_sitewide_managed = old_discount_rows[0][5] if old_discount_rows and old_discount_rows[0][5] else 0
+            old_roi_input_mode = old_discount_rows[0][6] if old_discount_rows and len(old_discount_rows[0]) > 6 and old_discount_rows[0][6] in ("roi", "bid") else "roi"
             old_discount_amount = max(old_coupon, old_new_customer)
             old_margin_pct = self._calculate_weighted_margin_from_specs(old_specs_for_margin, old_discount_amount)
             old_avg_price = self._calculate_weighted_avg_price_from_specs(old_specs_for_margin)
@@ -6486,6 +6734,11 @@ SKU名称尽量接近35字，最多不超过40字。
             is_marketing = 0
             is_natural_flow = 1 if getattr(self, "is_natural_flow", False) else 0
             is_sitewide_managed = 1 if getattr(self, "is_sitewide_managed", False) and not is_natural_flow else 0
+            roi_input_mode = getattr(self, "roi_input_mode", "roi")
+            if roi_input_mode not in ("roi", "bid"):
+                roi_input_mode = "roi"
+            if roi_input_mode != old_roi_input_mode:
+                param_changed = True
             old_limited_time = 0
             old_marketing = 0
             
@@ -6578,8 +6831,8 @@ SKU名称尽量接近35字，最多不超过40字。
                 net_break_even_roi = 1 / net_margin_formula if net_margin_formula > 0 else 0
                 
                 self.db.safe_execute(
-                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, return_rate=?, is_limited_time=?, is_marketing=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=? WHERE id=?",
-                    (coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, net_break_even_roi, self.product_id)
+                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, return_rate=?, is_limited_time=?, is_marketing=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=?, roi_input_mode=? WHERE id=?",
+                    (coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, net_break_even_roi, roi_input_mode, self.product_id)
                 )
             except ValueError:
                 pass

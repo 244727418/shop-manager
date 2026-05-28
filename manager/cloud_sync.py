@@ -765,15 +765,15 @@ class CloudSyncManager:
             table_order = [
                 'stores', 'products', 'product_specs', 'cost_categories',
                 'cost_library', 'cost_history', 'imported_orders', 'import_history',
-                'records', 'store_records', 'daily_records', 'profit_records',
+                'records', 'product_image_history', 'store_records', 'daily_records', 'profit_records',
                 'promotion_daily_data', 'historical_data', 'manual_margin_data', 'store_temp_images',
-                'settings', 'ai_prompts', 'ai_common_prompts', 'store_prompts',
+                'daily_tasks', 'task_reminders', 'settings', 'ai_prompts', 'ai_common_prompts', 'store_prompts',
                 'knowledge_base', 'link_combinations',
             ]
             delete_order = [
-                'imported_orders', 'import_history', 'records', 'store_records',
+                'imported_orders', 'import_history', 'records', 'product_image_history', 'store_records',
                 'daily_records', 'profit_records', 'promotion_daily_data', 'historical_data',
-                'manual_margin_data', 'store_temp_images', 'product_specs',
+                'manual_margin_data', 'store_temp_images', 'daily_tasks', 'task_reminders', 'product_specs',
                 'products', 'stores', 'cost_history', 'cost_library',
                 'cost_categories', 'settings', 'ai_prompts', 'ai_common_prompts',
                 'store_prompts', 'knowledge_base', 'link_combinations',

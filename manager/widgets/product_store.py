@@ -426,7 +426,7 @@ class ProductWidget(QWidget):
                     self.main_app.update_product_row_height(self.prod_id)
                 return
             product_rows = self.main_app.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi, is_natural_flow, is_sitewide_managed, store_id FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi, is_natural_flow, is_sitewide_managed, store_id, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
                 (self.prod_id,)
             )
             max_discount = 0
@@ -437,6 +437,7 @@ class ProductWidget(QWidget):
             is_sitewide_managed = 0
             sitewide_roi = 0
             store_id = None
+            roi_input_mode = "roi"
             if product_rows:
                 coupon = product_rows[0][0] if product_rows[0][0] else 0
                 new_customer = product_rows[0][1] if product_rows[0][1] else 0
@@ -447,10 +448,13 @@ class ProductWidget(QWidget):
                 is_natural_flow = product_rows[0][5] if product_rows[0][5] else 0
                 is_sitewide_managed = product_rows[0][6] if product_rows[0][6] else 0
                 store_id = product_rows[0][7] if product_rows[0][7] else None
+                roi_input_mode = product_rows[0][8] if len(product_rows[0]) > 8 and product_rows[0][8] in ("roi", "bid") else "roi"
                 if store_id:
                     store_rows = self.main_app.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (store_id,))
                     sitewide_roi = store_rows[0][0] if store_rows and store_rows[0][0] else 0
             total_weighted_margin = 0.0
+            total_weighted_price = 0.0
+            total_weighted_gross_profit = 0.0
             total_weight = 0.0
             for r in rows:
                 spec_code, sale_price, weight = r[0], r[1], r[2]
@@ -464,9 +468,13 @@ class ProductWidget(QWidget):
                 if final_price > 0 and cost > 0:
                     margin = (final_price - cost) / final_price
                     total_weighted_margin += margin * weight
+                    total_weighted_price += final_price * weight
+                    total_weighted_gross_profit += (final_price - cost) * weight
                     total_weight += weight
             if total_weight > 0:
                 final_margin_pct = (total_weighted_margin / total_weight) * 100
+                avg_price = total_weighted_price / total_weight
+                avg_gross_profit = total_weighted_gross_profit / total_weight
                 discount_info = f"(减{max_discount:.0f})" if max_discount > 0 else ""
                 self.margin_label.setText(f"毛利:{final_margin_pct:.1f}%{discount_info}")
                 self.margin_label.show()
@@ -479,6 +487,18 @@ class ProductWidget(QWidget):
                     and not is_natural_flow
                 ):
                     self._apply_real_promotion_display(store_id, margin_rate_decimal, net_break_even_roi)
+                    if hasattr(self.main_app, "update_product_row_height"):
+                        self.main_app.update_product_row_height(self.prod_id)
+                    return
+                if roi_input_mode == "bid" and not is_natural_flow and not is_sitewide_managed:
+                    self._apply_bid_mode_display(
+                        avg_price,
+                        avg_gross_profit,
+                        margin_rate_decimal,
+                        current_roi,
+                        return_rate,
+                        net_break_even_roi,
+                    )
                     if hasattr(self.main_app, "update_product_row_height"):
                         self.main_app.update_product_row_height(self.prod_id)
                     return
@@ -532,6 +552,76 @@ class ProductWidget(QWidget):
             self.link_order_label.setText("单量：0单")
             if hasattr(self.main_app, "update_product_row_height"):
                 self.main_app.update_product_row_height(self.prod_id)
+
+    def _get_current_display_order_count(self):
+        try:
+            year = int(getattr(self.main_app, "year", 0) or 0)
+            month = int(getattr(self.main_app, "month", 0) or 0)
+            if year > 0 and month > 0:
+                prefix = f"{year:04d}-{month:02d}"
+                rows = self.main_app.db.safe_fetchall(
+                    "SELECT order_count FROM imported_orders WHERE product_id=? AND order_date LIKE ?",
+                    (self.prod_code, f"{prefix}%")
+                )
+                if rows:
+                    return sum(float(row[0] or 0) for row in rows)
+            rows = self.main_app.db.safe_fetchall(
+                "SELECT order_count FROM imported_orders WHERE product_id=?",
+                (self.prod_code,)
+            )
+            return sum(float(row[0] or 0) for row in rows) if rows else 0.0
+        except Exception as e:
+            print(f"读取链接单量失败: {e}")
+            return 0.0
+
+    def _apply_bid_mode_display(self, avg_price, avg_gross_profit, margin_rate_decimal, current_roi, return_rate, net_break_even_roi):
+        order_count = self._get_current_display_order_count()
+        gross_profit_total = avg_gross_profit * order_count
+        self.margin_label.setText(f"毛利润:¥{gross_profit_total:.2f} 均毛利:¥{avg_gross_profit:.2f}")
+        self.margin_label.show()
+
+        return_factor = max(0.0, 1 - float(return_rate or 0) / 100)
+        if avg_price > 0 and current_roi and current_roi > 0 and return_factor > 0:
+            bid = avg_price / (current_roi * return_factor)
+            net_margin_decimal = margin_rate_decimal * return_factor - 0.006 - (1 / current_roi)
+            avg_net_profit = avg_price * net_margin_decimal
+            net_profit_total = avg_net_profit * order_count
+            net_margin_pct = net_margin_decimal * 100
+            status = self._get_net_profit_status(net_margin_pct)
+            self.net_profit_label.setText(f"净利润:¥{net_profit_total:.2f} {status}")
+
+            if net_profit_total > 0:
+                self.net_profit_label.setStyleSheet("color: #006400; font-weight: bold; font-size: 13px;")
+            elif abs(net_profit_total) < 0.000001:
+                self.net_profit_label.setStyleSheet("color: #daa520; font-weight: bold; font-size: 13px;")
+            else:
+                self.net_profit_label.setStyleSheet("color: #dc143c; font-weight: bold; font-size: 13px;")
+            self.net_profit_label.show()
+
+            if net_break_even_roi and net_break_even_roi > 0:
+                break_even_bid = avg_price / (net_break_even_roi * return_factor)
+                bid_multiple = break_even_bid / bid if bid > 0 else None
+                multiple_text = f"{bid_multiple:.2f}倍" if bid_multiple is not None else "--"
+            else:
+                multiple_text = "--"
+            self.roi_label.setText(
+                f'<span style="color: #666666; font-weight: bold;">出价:</span>'
+                f'<span style="color: #e74c3c; font-weight: bold;">¥{bid:.2f}</span> '
+                f'<span style="color: #666666; font-weight: bold;">出价倍数:</span>'
+                f'<span style="color: #3498db; font-weight: bold;">{multiple_text}</span>'
+            )
+        else:
+            self.net_profit_label.setText("净利润: --")
+            self.net_profit_label.setStyleSheet("color: #999; font-weight: bold; font-size: 13px;")
+            self.net_profit_label.show()
+            self.roi_label.setText(
+                '<span style="color: #666666; font-weight: bold;">出价:</span>'
+                '<span style="color: #e74c3c; font-weight: bold;">--</span> '
+                '<span style="color: #666666; font-weight: bold;">出价倍数:</span>'
+                '<span style="color: #3498db; font-weight: bold;">--</span>'
+            )
+        self.link_order_label.setText(f"单量：{order_count:.0f}单")
+        self.update_link_order_count()
 
     def update_link_order_count(self):
         try:

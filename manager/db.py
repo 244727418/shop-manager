@@ -208,6 +208,12 @@ class SafeDatabaseManager:
                     print("已添加link_type字段到products表")
                 except Exception as e:
                     print(f"添加link_type字段失败: {e}")
+            if 'roi_input_mode' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN roi_input_mode TEXT DEFAULT 'roi'")
+                    print("已添加roi_input_mode字段到products表")
+                except Exception as e:
+                    print(f"添加roi_input_mode字段失败: {e}")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
                                 (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL, test_price REAL,

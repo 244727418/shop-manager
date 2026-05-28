@@ -1,5 +1,5 @@
-# ================= 版本信息 =================
-VERSION = "3.13"
+﻿# ================= 版本信息 =================
+VERSION = "3.14"
 
 # ================= 系统标准库 =================
 import sys
@@ -3406,7 +3406,7 @@ class ShopManagerApp(QMainWindow):
             btn_cancel = QPushButton("取消")
             btn_cancel.clicked.connect(dialog.reject)
             btn_layout.addWidget(btn_ok)
-            btn_layout.addWidget(btn_cancel)
+            btn_layout.addWidget(bt3n_cancel)
             layout.addLayout(btn_layout)
             
             # 显示对话框
