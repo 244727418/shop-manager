@@ -1,5 +1,5 @@
 ﻿# ================= 版本信息 =================
-VERSION = "3.14"
+VERSION = "3.15.1"
 
 # ================= 系统标准库 =================
 import sys
@@ -82,7 +82,7 @@ except ImportError:
 try:
     from manager.dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
-        CostLibraryDialog, ApiConfigDialog,
+        CostLibraryDialog, MaterialLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, TaskReminderPopupDialog, ProductSpecDialog,
     )
@@ -90,7 +90,7 @@ try:
 except ImportError:
     from dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
-        CostLibraryDialog, ApiConfigDialog,
+        CostLibraryDialog, MaterialLibraryDialog, ApiConfigDialog,
         ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog,
         DailyTaskDialog, TaskReminderPopupDialog, ProductSpecDialog,
     )
@@ -659,6 +659,144 @@ class SettingsDialog(QDialog):
             self.reject()
 
 
+class ArchivedProductsDialog(QDialog):
+    """已下架链接管理窗口。"""
+
+    def __init__(self, main_app):
+        super().__init__(main_app)
+        self.main_app = main_app
+        self.db = main_app.db
+        self.setWindowTitle("已下架链接")
+        self.resize(920, 560)
+        self.init_ui()
+        self.load_stores()
+        self.load_products()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("筛选店铺:"))
+        self.store_combo = QComboBox()
+        self.store_combo.currentIndexChanged.connect(self.load_products)
+        filter_layout.addWidget(self.store_combo)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["店铺", "商品ID", "标题", "商品类型", "链接类型", "下架时间"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        layout.addWidget(self.table)
+
+        btn_layout = QHBoxLayout()
+        btn_refresh = QPushButton("刷新")
+        btn_restore = QPushButton("恢复上架")
+        btn_delete = QPushButton("彻底删除")
+        btn_close = QPushButton("关闭")
+        btn_refresh.clicked.connect(self.load_products)
+        btn_restore.clicked.connect(self.restore_selected)
+        btn_delete.clicked.connect(self.delete_selected)
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_refresh)
+        btn_layout.addWidget(btn_restore)
+        btn_layout.addWidget(btn_delete)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+    def load_stores(self):
+        current = self.store_combo.currentData()
+        self.store_combo.blockSignals(True)
+        self.store_combo.clear()
+        self.store_combo.addItem("全部店铺", None)
+        for store_id, store_name in self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id"):
+            self.store_combo.addItem(str(store_name or f"店铺{store_id}"), store_id)
+        idx = self.store_combo.findData(current)
+        self.store_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.store_combo.blockSignals(False)
+
+    def load_products(self):
+        store_id = self.store_combo.currentData() if hasattr(self, "store_combo") else None
+        params = []
+        where = ["COALESCE(p.is_archived, 0)=1"]
+        if store_id is not None:
+            where.append("p.store_id=?")
+            params.append(store_id)
+        rows = self.db.safe_fetchall(f"""
+            SELECT p.id, p.name, COALESCE(p.title, ''), COALESCE(p.product_category_label, ''),
+                   COALESCE(p.link_type, ''), COALESCE(p.archived_at, ''), COALESCE(s.name, '')
+            FROM products p
+            LEFT JOIN stores s ON s.id=p.store_id
+            WHERE {' AND '.join(where)}
+            ORDER BY s.sort_order, p.archived_at DESC, p.sort_order, p.id
+        """, tuple(params))
+        self.table.setRowCount(0)
+        for row_idx, row in enumerate(rows):
+            product_id, code, title, category, link_type, archived_at, store_name = row
+            self.table.insertRow(row_idx)
+            values = [store_name, code, title, category or "无", link_type or "无", archived_at]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if col == 0:
+                    item.setData(Qt.UserRole, product_id)
+                self.table.setItem(row_idx, col, item)
+
+    def _selected_product_ids(self):
+        product_ids = []
+        for index in self.table.selectionModel().selectedRows():
+            item = self.table.item(index.row(), 0)
+            product_id = item.data(Qt.UserRole) if item else None
+            if product_id is not None:
+                product_ids.append(product_id)
+        return product_ids
+
+    def restore_selected(self):
+        product_ids = self._selected_product_ids()
+        if not product_ids:
+            QMessageBox.information(self, "提示", "请先选择要恢复的链接。")
+            return
+        for product_id in product_ids:
+            rows = self.db.safe_fetchall("SELECT store_id, name, title FROM products WHERE id=?", (product_id,))
+            store_id = rows[0][0] if rows else None
+            code = rows[0][1] if rows else ""
+            title = rows[0][2] if rows else ""
+            self.db.safe_execute("UPDATE products SET is_archived=0, archived_at=NULL WHERE id=?", (product_id,))
+            if store_id and hasattr(self.main_app, "record_store_link_change"):
+                self.main_app.record_store_link_change(store_id, "restore", code, title)
+        self.load_products()
+        self.main_app.load_data_safe()
+
+    def delete_selected(self):
+        product_ids = self._selected_product_ids()
+        if not product_ids:
+            QMessageBox.information(self, "提示", "请先选择要彻底删除的链接。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认彻底删除",
+            f"确定彻底删除选中的 {len(product_ids)} 个已下架链接吗？\n该操作会删除规格、操作记录、主图历史，不能恢复。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        for product_id in product_ids:
+            self.db.safe_execute("DELETE FROM product_specs WHERE product_id=?", (product_id,))
+            self.db.safe_execute("DELETE FROM records WHERE product_id=?", (product_id,))
+            self.db.safe_execute("DELETE FROM product_image_history WHERE product_id=?", (product_id,))
+            self.db.safe_execute("DELETE FROM products WHERE id=?", (product_id,))
+        self.load_products()
+        self.main_app.load_data_safe()
+
+
 class ShopManagerApp(QMainWindow):
     PRODUCT_ROW_HEIGHT = 160
     STORE_ROW_HEIGHT = 140
@@ -693,6 +831,7 @@ class ShopManagerApp(QMainWindow):
         self._tag_filter_global_filter_installed = False
         self.current_store_filter = set()  # 店铺筛选状态
         self.daily_task_dialog = None
+        self.store_margin_dialogs = {}
         self._active_reminder_ids = set()
         self._task_reminder_popup_active = False
         self._record_tooltip_cell = None
@@ -1062,6 +1201,113 @@ class ShopManagerApp(QMainWindow):
         cloud_normalized = self._normalized_sync_data(cloud_data)
         return json.dumps(local_normalized, ensure_ascii=False, sort_keys=True) != json.dumps(cloud_normalized, ensure_ascii=False, sort_keys=True)
 
+    def _close_account_scoped_windows(self):
+        """关闭会持有旧数据库或旧店铺 ID 的窗口。"""
+        try:
+            for dialog in list(getattr(self, "store_margin_dialogs", {}).values()):
+                try:
+                    dialog.close()
+                except Exception:
+                    pass
+            self.store_margin_dialogs.clear()
+
+            daily_dialog = getattr(self, "daily_task_dialog", None)
+            if daily_dialog is not None:
+                try:
+                    daily_dialog.close()
+                except Exception:
+                    pass
+                self.daily_task_dialog = None
+
+            for attr_name in ("cost_library_dialog", "material_library_dialog"):
+                dialog = getattr(self, attr_name, None)
+                if dialog is not None:
+                    try:
+                        dialog.close()
+                    except Exception:
+                        pass
+                    setattr(self, attr_name, None)
+        except Exception as e:
+            print(f"关闭账号相关窗口失败: {e}")
+
+    def _clear_account_scoped_ui_state(self):
+        """清理换账号后不能跨库复用的行映射、筛选和搜索状态。"""
+        try:
+            for timer_name in ("_scroll_save_timer", "search_timer", "_record_tooltip_timer"):
+                timer = getattr(self, timer_name, None)
+                if timer is not None and timer.isActive():
+                    timer.stop()
+
+            if hasattr(self, "tag_filter_menu") and self.tag_filter_menu:
+                self.tag_filter_menu.close()
+            if hasattr(self, "store_filter_menu") and self.store_filter_menu:
+                self.store_filter_menu.close()
+
+            self.current_search_match_ids = None
+            self._search_highlighted_rows = set()
+            self.current_category_filter = ""
+            self.current_store_filter = set()
+            self.current_filter_tags = set()
+            self._active_reminder_ids.clear()
+            self._task_reminder_popup_active = False
+
+            if hasattr(self, "search_input"):
+                self.search_input.blockSignals(True)
+                self.search_input.clear()
+                self.search_input.blockSignals(False)
+            if hasattr(self, "category_filter_input"):
+                self.category_filter_input.blockSignals(True)
+                self.category_filter_input.clear()
+                self.category_filter_input.blockSignals(False)
+
+            for btn_name in (
+                "btn_filter_coupon", "btn_filter_new_customer", "btn_filter_limited_time",
+                "btn_filter_marketing", "btn_filter_natural_flow", "btn_filter_sitewide",
+                "btn_filter_profit", "btn_filter_loss", "btn_filter_break_even",
+                "btn_filter_missing_roi_bid",
+            ):
+                btn = getattr(self, btn_name, None)
+                if btn is not None:
+                    btn.blockSignals(True)
+                    btn.setChecked(False)
+                    btn.blockSignals(False)
+
+            if hasattr(self, "btn_tag_filter"):
+                self.btn_tag_filter.setText("🏷️ 筛选")
+            if hasattr(self, "btn_store_filter"):
+                self.btn_store_filter.setText("🏪 店铺")
+
+            self.row_data_map.clear()
+            self.row_store_map.clear()
+            self.product_store_map.clear()
+            if hasattr(self, "table"):
+                self.table.clearSelection()
+                self.table.setRowCount(0)
+            if hasattr(self, "frozen_table"):
+                self.frozen_table.clearSelection()
+                self.frozen_table.setRowCount(0)
+        except Exception as e:
+            print(f"清理账号界面状态失败: {e}")
+
+    def _refresh_account_bound_controls_from_db(self):
+        """从当前数据库恢复会随账号变化的控件状态。"""
+        try:
+            self.product_sort_mode = self.db.get_setting("product_sort_mode", "order") or "order"
+            if hasattr(self, "product_sort_combo"):
+                idx = self.product_sort_combo.findData(self.product_sort_mode)
+                if idx >= 0:
+                    self.product_sort_combo.blockSignals(True)
+                    self.product_sort_combo.setCurrentIndex(idx)
+                    self.product_sort_combo.blockSignals(False)
+
+            if hasattr(self, "btn_real_promotion_mode"):
+                self.btn_real_promotion_mode.blockSignals(True)
+                self.btn_real_promotion_mode.setChecked(self.db.get_setting("real_promotion_data_mode", "0") == "1")
+                self.btn_real_promotion_mode.blockSignals(False)
+                self._update_real_promotion_mode_button_style()
+        except Exception as e:
+            print(f"刷新账号控件状态失败: {e}")
+
     def replace_database_from_local_profile(self, profile_path, account_id):
         """用本地账号档案替换当前主库，并刷新界面。"""
         if not os.path.exists(profile_path):
@@ -1075,8 +1321,8 @@ class ShopManagerApp(QMainWindow):
             return True, db_path
 
         try:
-            if hasattr(self, '_scroll_save_timer') and self._scroll_save_timer.isActive():
-                self._scroll_save_timer.stop()
+            self._close_account_scoped_windows()
+            self._clear_account_scoped_ui_state()
 
             try:
                 self.db.conn.commit()
@@ -1093,8 +1339,10 @@ class ShopManagerApp(QMainWindow):
             os.replace(temp_path, db_path)
 
             self.db = SafeDatabaseManager()
+            self.db.init_default_prompts()
             if self.cloud_manager:
                 self.cloud_manager.db = self.db
+            self._refresh_account_bound_controls_from_db()
             self.load_data_safe()
             if self.cloud_manager:
                 self.cloud_manager.set_active_data_account(account_id)
@@ -1822,6 +2070,42 @@ class ShopManagerApp(QMainWindow):
         self.btn_view_cost.clicked.connect(self.show_cost_library)
         bottom_left_layout.addWidget(self.btn_view_cost)
 
+        self.btn_material_library = QPushButton("素材库")
+        self.btn_material_library.setFixedSize(78, 26)
+        self.btn_material_library.setStyleSheet("""
+            QPushButton {
+                background-color: #20c997;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #17a589;
+            }
+        """)
+        self.btn_material_library.clicked.connect(self.show_material_library)
+        bottom_left_layout.addWidget(self.btn_material_library)
+
+        self.btn_archived_products = QPushButton("已下架")
+        self.btn_archived_products.setFixedSize(70, 26)
+        self.btn_archived_products.setStyleSheet("""
+            QPushButton {
+                background-color: #795548;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #5d4037;
+            }
+        """)
+        self.btn_archived_products.clicked.connect(self.show_archived_products)
+        bottom_left_layout.addWidget(self.btn_archived_products)
+
         self.btn_real_promotion_mode = QPushButton("真实推广数据模式")
         self.btn_real_promotion_mode.setCheckable(True)
         self.btn_real_promotion_mode.setFixedSize(125, 26)
@@ -2441,7 +2725,8 @@ class ShopManagerApp(QMainWindow):
         cutoff = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         rows = self.db.safe_fetchall("""
             SELECT record_date, cost, transaction_amount, net_transaction_amount, net_roi,
-                   net_orders, promotion_impression_share
+                   net_orders, promotion_impression_share, cost_per_net_order,
+                   ctr, click_conversion_rate, net_profit, net_margin_rate
             FROM promotion_daily_data
             WHERE store_id=? AND product_id=? AND record_date<=?
             ORDER BY record_date DESC
@@ -2458,6 +2743,11 @@ class ShopManagerApp(QMainWindow):
             "net_roi": float(row[4] or 0),
             "net_orders": float(row[5] or 0),
             "promotion_impression_share": float(row[6] or 0),
+            "cost_per_net_order": float(row[7] or 0),
+            "ctr": float(row[8] or 0),
+            "click_conversion_rate": float(row[9] or 0),
+            "net_profit": None if row[10] is None else float(row[10]),
+            "net_margin_rate": None if row[11] is None else float(row[11]),
         }
 
     def force_refresh_product_widget(self, product_id):
@@ -2525,11 +2815,40 @@ class ShopManagerApp(QMainWindow):
 
     def open_store_margin_dialog(self, store_id, store_name):
         """打开店铺毛利管理对话框（供 StoreWidget 调用，避免 widgets 依赖本模块 Dialog）"""
+        try:
+            current_store = self.db.safe_fetchall("SELECT name FROM stores WHERE id=?", (store_id,))
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"读取当前账号店铺失败：{e}")
+            return
+
+        if not current_store:
+            self.load_data_safe()
+            QMessageBox.warning(self, "店铺已失效", "当前店铺不属于已切换后的账号数据，已重新刷新主界面。")
+            return
+
+        store_name = current_store[0][0] or store_name
+
         def on_margin_changed(sid, new_margin):
             self.load_data_safe()
             self.refresh_store_weight_sync_flag(sid)
-        dialog = StoreMarginDialog(store_id, store_name, self, self, on_margin_changed)
-        dialog.exec_()
+
+        existing = self.store_margin_dialogs.get(store_id)
+        if existing is not None:
+            if existing.isMinimized():
+                existing.showNormal()
+            else:
+                existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = StoreMarginDialog(store_id, store_name, self, None, on_margin_changed)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.destroyed.connect(lambda _=None, sid=store_id: self.store_margin_dialogs.pop(sid, None))
+        self.store_margin_dialogs[store_id] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def refresh_store_weight_sync_flag(self, store_id):
         """刷新店铺的权重已同步标签（供 StoreMarginDialog 调用）"""
@@ -2545,6 +2864,7 @@ class ShopManagerApp(QMainWindow):
         dialog = ProductSpecDialog(db, product_id, product_code, product_title, parent)
         dialog.main_app = self
         dialog.show()
+        return dialog
 
     def open_profit_calculator_dialog(self, margin_rate, avg_price, store_id, store_name, scope, parent, db):
         """打开利润计算器对话框（供 StoreMarginDialog 等调用）"""
@@ -2621,10 +2941,12 @@ class ShopManagerApp(QMainWindow):
                 return None
             gross_margin_pct = (total_weighted_margin / total_weight) * 100
             margin_rate_decimal = gross_margin_pct / 100
-            if self.is_real_promotion_data_mode() and not is_natural_flow and store_id and product_code:
+            if self.is_real_promotion_data_mode() and store_id and product_code:
                 promo = self.get_latest_promotion_data(store_id, product_code)
                 if not promo:
                     return None
+                if promo.get("net_margin_rate") is not None:
+                    return float(promo.get("net_margin_rate"))
                 cost = float(promo.get("cost") or 0)
                 net_amount = float(promo.get("net_transaction_amount") or 0)
                 if net_amount > 0:
@@ -2820,7 +3142,7 @@ class ShopManagerApp(QMainWindow):
                 row_idx += 1
                 
                 products_raw = self.db.safe_fetchall(
-                    "SELECT id, name, title, image_data, sort_order, product_category_label FROM products WHERE store_id=?",
+                    "SELECT id, name, title, image_data, sort_order, product_category_label FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                     (store_id,),
                 )
                 products = self._sort_products_for_display(products_raw)
@@ -3198,38 +3520,37 @@ class ShopManagerApp(QMainWindow):
                 self.year = today.year
                 self.month = today.month
                 self.load_data_safe()
-            day = today.day
-            if 0 < day < self.table.columnCount():
-                v_scroll = self.table.verticalScrollBar()
-                saved_y = v_scroll.value()
-                h_scroll = self.table.horizontalScrollBar()
-                has_filter = bool(self.current_store_filter)
-                if has_filter:
-                    for row in range(self.table.rowCount()):
-                        self.table.setRowHidden(row, False)
-                        self.frozen_table.setRowHidden(row, False)
-                target_index = self.table.model().index(0, day)
-                self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
-                self.table.setCurrentCell(0, day)
-                if has_filter:
-                    for row in range(self.table.rowCount()):
-                        prod_id = self.row_data_map.get(row)
-                        store_id_at_row = self.row_store_map.get(row)
-                        should_hide = True
-                        if row in self.row_store_map:
-                            if self.row_store_map[row] in self.current_store_filter:
-                                should_hide = False
-                        elif prod_id:
-                            product_store_id = self.product_store_map.get(prod_id)
-                            if product_store_id and product_store_id in self.current_store_filter:
-                                should_hide = False
-                        if should_hide:
-                            self.table.setRowHidden(row, True)
-                            self.frozen_table.setRowHidden(row, True)
-                v_scroll.setValue(saved_y)
-                self.show_toast(f"已定位到今天: {today.month}月{today.day}日")
+                QTimer.singleShot(90, lambda: self._scroll_to_day_column(today.day, f"已定位到今天: {today.month}月{today.day}日"))
+            else:
+                self._scroll_to_day_column(today.day, f"已定位到今天: {today.month}月{today.day}日")
         except Exception as e:
             print(f"定位今天失败: {e}")
+
+    def _scroll_to_day_column(self, day, toast_text=""):
+        try:
+            if not (0 < day < self.table.columnCount()):
+                return
+            v_scroll = self.table.verticalScrollBar()
+            saved_y = v_scroll.value() if v_scroll else None
+            h_scroll = self.table.horizontalScrollBar()
+            if h_scroll:
+                col_x = self.table.columnViewportPosition(day)
+                absolute_x = h_scroll.value() + col_x
+                target_x = absolute_x - max(0, (self.table.viewport().width() - self.table.columnWidth(day)) // 2)
+                h_scroll.setValue(max(h_scroll.minimum(), min(h_scroll.maximum(), target_x)))
+            visible_row = 0
+            for row in range(self.table.rowCount()):
+                if not self.table.isRowHidden(row):
+                    visible_row = row
+                    break
+            self.table.setCurrentCell(visible_row, day)
+            if v_scroll and saved_y is not None:
+                v_scroll.setValue(saved_y)
+            self.update_frozen_geometry()
+            if toast_text:
+                self.show_toast(toast_text)
+        except Exception as e:
+            print(f"滚动到日期列失败: {e}")
 
     def _locate_today_on_startup(self):
         try:
@@ -3237,12 +3558,7 @@ class ShopManagerApp(QMainWindow):
             if self.year != today.year or self.month != today.month:
                 return
             day = today.day
-            if not (0 < day < self.table.columnCount()):
-                return
-            target_index = self.table.model().index(0, day)
-            self.table.scrollTo(target_index, QAbstractItemView.PositionAtCenter)
-            self.table.setCurrentCell(0, day)
-            self.update_frozen_geometry()
+            self._scroll_to_day_column(day)
         except Exception as e:
             print(f"启动定位今天失败: {e}")
 
@@ -3263,7 +3579,13 @@ class ShopManagerApp(QMainWindow):
         try:
             now = datetime.now()
             time_str = now.strftime("%H:%M")
-            action_text = "链接上架" if action == "add" else "链接删除"
+            action_map = {
+                "add": "链接上架",
+                "delete": "链接删除",
+                "archive": "链接下架",
+                "restore": "链接恢复上架",
+            }
+            action_text = action_map.get(action, "链接变更")
             product_id = str(product_id or "").strip()
             product_title = str(product_title or "").strip()
             log_text = f"【{action_text}】商品ID：{product_id}｜标题：{product_title}"
@@ -3406,7 +3728,7 @@ class ShopManagerApp(QMainWindow):
             btn_cancel = QPushButton("取消")
             btn_cancel.clicked.connect(dialog.reject)
             btn_layout.addWidget(btn_ok)
-            btn_layout.addWidget(bt3n_cancel)
+            btn_layout.addWidget(btn_cancel)
             layout.addLayout(btn_layout)
             
             # 显示对话框
@@ -4286,7 +4608,10 @@ class ShopManagerApp(QMainWindow):
             
             for store in stores:
                 store_id, store_name = store
-                products = self.db.safe_fetchall("SELECT id, name FROM products WHERE store_id=? ORDER BY sort_order", (store_id,))
+                products = self.db.safe_fetchall(
+                    "SELECT id, name FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0 ORDER BY sort_order",
+                    (store_id,)
+                )
                 
                 for prod in products:
                     prod_id, prod_name = prod
@@ -4622,8 +4947,60 @@ class ShopManagerApp(QMainWindow):
 
     def show_cost_library(self):
         """打开成本库管理窗口"""
-        dialog = CostLibraryDialog(self.db, self)
+        existing = getattr(self, "cost_library_dialog", None)
+        if existing is not None:
+            if existing.isMinimized():
+                existing.showNormal()
+            else:
+                existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = CostLibraryDialog(self.db, main_window=self, parent=None)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda _=None: setattr(self, "cost_library_dialog", None))
+        self.cost_library_dialog = dialog
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_material_library(self):
+        """打开素材库窗口"""
+        existing = getattr(self, "material_library_dialog", None)
+        if existing is not None:
+            if existing.isMinimized():
+                existing.showNormal()
+            else:
+                existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = MaterialLibraryDialog(self.db, self)
+        dialog.destroyed.connect(lambda _=None: setattr(self, "material_library_dialog", None))
+        self.material_library_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_link_material_library(self, product_db_id):
+        """打开素材库并跳转到指定链接的素材目录"""
+        self.show_material_library()
+        dialog = getattr(self, "material_library_dialog", None)
+        if dialog is None:
+            return
+        if hasattr(dialog, "open_link_material_for_product"):
+            dialog.open_link_material_for_product(product_db_id)
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_archived_products(self):
+        """打开已下架链接窗口"""
+        dialog = ArchivedProductsDialog(self)
+        dialog.exec_()
 
     def show_cloud_login_dialog(self):
         """打开云同步登录窗口"""

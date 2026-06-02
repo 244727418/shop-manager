@@ -6,8 +6,8 @@ import re
 import time
 from datetime import datetime
 
-from PyQt5.QtCore import QEvent, Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QCursor, QFontMetrics, QPainter, QPen, QStandardItem, QStandardItemModel
+from PyQt5.QtCore import QEvent, QSize, Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor, QCursor, QFontMetrics, QPainter, QPen, QPixmap, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -68,9 +68,7 @@ class MultiLineTextEditDelegate(QStyledItemDelegate):
         model.setData(index, editor.toPlainText().strip(), Qt.EditRole)
 
     def updateEditorGeometry(self, editor, option, index):
-        rect = option.rect
-        rect.setHeight(max(rect.height(), 92))
-        editor.setGeometry(rect)
+        editor.setGeometry(option.rect)
 
     def eventFilter(self, editor, event):
         if isinstance(editor, QTextEdit):
@@ -907,6 +905,7 @@ class CostCategoryManageDialog(QDialog):
         super().__init__(parent)
         self.db = db_manager
         self.current_category = ""
+        self._category_rows = []
         self.setWindowTitle("商品类型管理")
         self.resize(1080, 680)
         self.init_ui()
@@ -919,6 +918,10 @@ class CostCategoryManageDialog(QDialog):
         left_widget = QDialog()
         left = QVBoxLayout(left_widget)
         left.addWidget(QLabel("商品类型（双击颜色格可修改颜色）"))
+        self.category_search = QLineEdit()
+        self.category_search.setPlaceholderText("搜索商品类型...")
+        self.category_search.textChanged.connect(self.apply_category_filter)
+        left.addWidget(self.category_search)
         self.category_model = QStandardItemModel()
         self.category_model.setHorizontalHeaderLabels(["商品类型", "颜色", "规格数", "链接数"])
         self.category_table = QTableView()
@@ -937,6 +940,10 @@ class CostCategoryManageDialog(QDialog):
         right_widget = QDialog()
         right = QVBoxLayout(right_widget)
         right.addWidget(QLabel("当前类型规格（拖拽左侧行号调整顺序，保存后生效）"))
+        self.spec_search = QLineEdit()
+        self.spec_search.setPlaceholderText("搜索商品名称或规格编码...")
+        self.spec_search.textChanged.connect(lambda: self.load_specs_for_category(self.current_category))
+        right.addWidget(self.spec_search)
         self.spec_model = QStandardItemModel()
         self.spec_model.setHorizontalHeaderLabels(["商品名称", "规格编码", "当前已上架规格数量"])
         self.spec_table = QTableView()
@@ -965,6 +972,8 @@ class CostCategoryManageDialog(QDialog):
         layout.addWidget(splitter)
 
         btn_layout = QHBoxLayout()
+        btn_rename = QPushButton("重命名商品类型")
+        btn_rename.clicked.connect(self.rename_current_category)
         btn_save = QPushButton("保存修改")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         btn_save.clicked.connect(self.save_changes)
@@ -973,6 +982,7 @@ class CostCategoryManageDialog(QDialog):
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.reject)
         btn_layout.addStretch()
+        btn_layout.addWidget(btn_rename)
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_refresh)
         btn_layout.addWidget(btn_close)
@@ -1000,11 +1010,21 @@ class CostCategoryManageDialog(QDialog):
         return isinstance(color, str) and bool(re.fullmatch(r"#[0-9A-Fa-f]{6}", color.strip()))
 
     def load_categories(self):
-        current = self.current_category
         if hasattr(self.db, "sync_cost_categories"):
             self.db.sync_cost_categories()
+        self._category_rows = self.db.get_cost_categories_with_counts() if hasattr(self.db, "get_cost_categories_with_counts") else []
+        self.apply_category_filter()
+
+    def apply_category_filter(self):
+        current = self.current_category
         self.category_model.setRowCount(0)
-        rows = self.db.get_cost_categories_with_counts() if hasattr(self.db, "get_cost_categories_with_counts") else []
+        keyword = self.category_search.text().strip().lower() if hasattr(self, "category_search") else ""
+        rows = []
+        for label, color, spec_count, link_count in self._category_rows:
+            haystack = str(label or "").lower()
+            if keyword and keyword not in haystack:
+                continue
+            rows.append((label, color, spec_count, link_count))
         select_row = 0
         for label, color, spec_count, link_count in rows:
             row = self.category_model.rowCount()
@@ -1029,8 +1049,44 @@ class CostCategoryManageDialog(QDialog):
             self.load_specs_for_category(item.text() if item else "")
 
     def on_category_double_clicked(self, index):
-        if index.isValid() and index.column() == 1:
+        if not index.isValid():
+            return
+        if index.column() == 0:
+            self.rename_category_at_row(index.row())
+        elif index.column() == 1:
             self.choose_category_color(index.row())
+
+    def rename_current_category(self):
+        index = self.category_table.currentIndex()
+        if not index.isValid():
+            QMessageBox.warning(self, "提示", "请先选择要重命名的商品类型。")
+            return
+        self.rename_category_at_row(index.row())
+
+    def rename_category_at_row(self, row):
+        item = self.category_model.item(row, 0)
+        old_label = item.text().strip() if item else ""
+        if not old_label:
+            return
+        new_label, ok = QInputDialog.getText(self, "重命名商品类型", "请输入新的商品类型名称:", text=old_label)
+        new_label = new_label.strip() if ok else ""
+        if not ok or not new_label or new_label == old_label:
+            return
+        try:
+            if hasattr(self.db, "rename_cost_category"):
+                self.db.rename_cost_category(old_label, new_label)
+            else:
+                raise RuntimeError("当前数据库管理器不支持商品类型重命名。")
+            self.current_category = new_label
+            if hasattr(self.db, "update_all_product_category_labels"):
+                self.db.update_all_product_category_labels()
+        except Exception as e:
+            QMessageBox.critical(self, "重命名失败", f"商品类型重命名失败：{e}")
+            return
+        parent = self.parent()
+        if parent and hasattr(parent, "load_data"):
+            parent.load_data()
+        self.load_categories()
 
     def load_specs_for_category(self, label):
         self.current_category = str(label or "")
@@ -1052,6 +1108,13 @@ class CostCategoryManageDialog(QDialog):
             (self.current_category,),
         )
         rows = self._sort_specs(rows)
+        keyword = self.spec_search.text().strip().lower() if hasattr(self, "spec_search") else ""
+        if keyword:
+            terms = [term for term in keyword.split() if term]
+            rows = [
+                row for row in rows
+                if any(term in f"{row[0] or ''} {row[1] or ''}".lower() for term in terms)
+            ]
         for spec_name, spec_code, listed_count, _manual, _sort_order in rows:
             self._append_spec_row(spec_name, spec_code, listed_count)
         self._reset_visual_order()
@@ -1783,6 +1846,229 @@ class CostLinkCreateDialog(QDialog):
         self.accept()
 
 
+class LinkAddToCombinationDialog(QDialog):
+    """选择现有链接加入当前链接组合。"""
+
+    def __init__(self, db_manager, combo_id, store_id=None, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.combo_id = combo_id
+        self.store_id = store_id
+        self.setWindowTitle("添加链接到组合")
+        self.resize(860, 620)
+        self.init_ui()
+        self.load_links()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("搜索链接ID/标题:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("输入链接ID或标题关键字，空格分隔...")
+        self.search_input.textChanged.connect(self.load_links)
+        search_layout.addWidget(self.search_input)
+        layout.addLayout(search_layout)
+
+        self.model = QStandardItemModel()
+        self.model.setHorizontalHeaderLabels(["图片", "链接ID", "标题", "当前组合"])
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(Qt.ElideNone)
+        self.table.setIconSize(QSize(58, 58))
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(0, 72)
+        layout.addWidget(self.table)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("确认添加")
+        btn_ok.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def _make_item(self, text, user_data=None):
+        item = QStandardItem(str(text or ""))
+        item.setEditable(False)
+        item.setTextAlignment(Qt.AlignCenter)
+        if user_data is not None:
+            item.setData(user_data, Qt.UserRole)
+        return item
+
+    def _make_image_item(self, image_data, user_data=None):
+        item = QStandardItem("")
+        item.setEditable(False)
+        item.setTextAlignment(Qt.AlignCenter)
+        if user_data is not None:
+            item.setData(user_data, Qt.UserRole)
+        if image_data:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(bytes(image_data)):
+                item.setData(pixmap.scaled(58, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation), Qt.DecorationRole)
+            else:
+                item.setText("无图")
+        else:
+            item.setText("无图")
+        return item
+
+    def load_links(self):
+        self.model.setRowCount(0)
+        params = []
+        where = []
+        if self.store_id is not None:
+            where.append("p.store_id = ?")
+            params.append(self.store_id)
+        keyword = self.search_input.text().strip().lower() if hasattr(self, "search_input") else ""
+        sql = """SELECT p.id, p.name, COALESCE(p.title, ''), p.image_data, COALESCE(lc.name, '')
+                 FROM products p
+                 LEFT JOIN link_combinations lc ON lc.id = p.link_combo_id"""
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY COALESCE(p.sort_order, 0), p.id"
+        rows = self.db.safe_fetchall(sql, tuple(params))
+        terms = [term for term in keyword.split() if term]
+        for product_id, product_code, title, image_data, combo_name in rows:
+            haystack = f"{product_code or ''} {title or ''}".lower()
+            if terms and not any(term in haystack for term in terms):
+                continue
+            row = self.model.rowCount()
+            self.model.insertRow(row)
+            self.model.setItem(row, 0, self._make_image_item(image_data, product_id))
+            self.model.setItem(row, 1, self._make_item(product_code, product_id))
+            self.model.setItem(row, 2, self._make_item(title))
+            self.model.setItem(row, 3, self._make_item(combo_name or "未分组"))
+        self.table.resizeRowsToContents()
+
+    def selected_product_ids(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        ids = []
+        for row in rows:
+            item = self.model.item(row, 1)
+            product_id = item.data(Qt.UserRole) if item else None
+            if product_id and product_id not in ids:
+                ids.append(product_id)
+        return ids
+
+
+class LinkUnclassifiedClassifyDialog(QDialog):
+    """查看当前店铺未加入链接组合的链接，并触发 AI 归类。"""
+
+    def __init__(self, owner, store_id=None, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.db = owner.db
+        self.store_id = store_id
+        self.products = []
+        self.setWindowTitle("未分类链接AI归类")
+        self.resize(940, 680)
+        self.init_ui()
+        self.load_links()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        title = QLabel("当前筛选店铺下尚未加入链接组合的链接")
+        layout.addWidget(title)
+
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("搜索链接ID/标题:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("输入链接ID或标题关键字，空格分隔...")
+        self.search_input.textChanged.connect(self.load_links)
+        search_layout.addWidget(self.search_input)
+        layout.addLayout(search_layout)
+
+        self.model = QStandardItemModel()
+        self.model.setHorizontalHeaderLabels(["图片", "链接ID", "标题", "店铺", "规格数"])
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(Qt.ElideNone)
+        self.table.setIconSize(QSize(58, 58))
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(0, 72)
+        layout.addWidget(self.table)
+
+        btn_layout = QHBoxLayout()
+        self.lbl_count = QLabel("共 0 条未分类链接")
+        btn_classify = QPushButton("AI归类未分类链接")
+        btn_classify.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
+        btn_classify.clicked.connect(self.classify_links)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(self.lbl_count)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_classify)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+    def _make_item(self, text, user_data=None):
+        item = QStandardItem(str(text or ""))
+        item.setEditable(False)
+        item.setTextAlignment(Qt.AlignCenter)
+        if user_data is not None:
+            item.setData(user_data, Qt.UserRole)
+        return item
+
+    def load_links(self):
+        self.model.setRowCount(0)
+        self.products = self.owner.product_context_rows(only_unclassified=True, store_id=self.store_id)
+        terms = [term for term in self.search_input.text().strip().lower().split() if term]
+        visible = []
+        for product in self.products:
+            haystack = f"{product.get('code') or ''} {product.get('title') or ''}".lower()
+            if terms and not any(term in haystack for term in terms):
+                continue
+            visible.append(product)
+        for product in visible:
+            row = self.model.rowCount()
+            self.model.insertRow(row)
+            self.model.setItem(row, 0, self.owner._make_product_image_item(product.get("image_data"), product.get("product_id")))
+            self.model.setItem(row, 1, self._make_item(product.get("code"), product.get("product_id")))
+            self.model.setItem(row, 2, self._make_item(product.get("title")))
+            self.model.setItem(row, 3, self._make_item(product.get("store_name")))
+            self.model.setItem(row, 4, self._make_item(len(product.get("specs") or [])))
+        self.table.resizeRowsToContents()
+        self.lbl_count.setText(f"共 {len(visible)} 条未分类链接")
+
+    def visible_products(self):
+        visible_ids = []
+        for row in range(self.model.rowCount()):
+            item = self.model.item(row, 1)
+            product_id = item.data(Qt.UserRole) if item else None
+            if product_id:
+                visible_ids.append(product_id)
+        product_map = {product.get("product_id"): product for product in self.products}
+        return [product_map[product_id] for product_id in visible_ids if product_id in product_map]
+
+    def classify_links(self):
+        products = self.visible_products()
+        if not products:
+            QMessageBox.information(self, "提示", "当前没有可归类的未分类链接。")
+            return
+        updated = self.owner.classify_products_with_ai(products, self)
+        if updated:
+            self.load_links()
+
+
 class LinkCombinationDialog(QDialog):
     """查看和维护链接组合及链接类型。"""
 
@@ -1798,6 +2084,20 @@ class LinkCombinationDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("筛选店铺:"))
+        self.store_filter_combo = QComboBox()
+        self.store_filter_combo.addItem("全部店铺", None)
+        for store_id, store_name in self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id"):
+            self.store_filter_combo.addItem(str(store_name or f"店铺{store_id}"), store_id)
+        self.store_filter_combo.currentIndexChanged.connect(self.on_store_filter_changed)
+        btn_ai_classify = QPushButton("未分类链接AI归类")
+        btn_ai_classify.clicked.connect(self.show_unclassified_classify_dialog)
+        filter_layout.addWidget(self.store_filter_combo)
+        filter_layout.addStretch()
+        filter_layout.addWidget(btn_ai_classify)
+        layout.addLayout(filter_layout)
+
         splitter = QSplitter(Qt.Horizontal)
 
         left_widget = QDialog()
@@ -1808,8 +2108,11 @@ class LinkCombinationDialog(QDialog):
         self.combo_table = QTableView()
         self.combo_table.setModel(self.combo_model)
         self.combo_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.combo_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.combo_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.combo_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.combo_table.clicked.connect(self.on_combo_clicked)
+        self.combo_table.customContextMenuRequested.connect(self.show_combo_context_menu)
         self.combo_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.combo_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         left.addWidget(self.combo_table)
@@ -1818,10 +2121,13 @@ class LinkCombinationDialog(QDialog):
         btn_add_combo.clicked.connect(self.add_combo)
         btn_rename_combo = QPushButton("重命名")
         btn_rename_combo.clicked.connect(self.rename_combo)
+        btn_delete_combo = QPushButton("删除组合")
+        btn_delete_combo.clicked.connect(self.delete_selected_combos)
         btn_ai_combo = QPushButton("AI生成组合名称")
         btn_ai_combo.clicked.connect(self.ai_rename_current_combo)
         left_btns.addWidget(btn_add_combo)
         left_btns.addWidget(btn_rename_combo)
+        left_btns.addWidget(btn_delete_combo)
         left_btns.addWidget(btn_ai_combo)
         left.addLayout(left_btns)
 
@@ -1829,28 +2135,38 @@ class LinkCombinationDialog(QDialog):
         right = QVBoxLayout(right_widget)
         right.addWidget(QLabel("组合内链接"))
         self.link_model = QStandardItemModel()
-        self.link_model.setHorizontalHeaderLabels(["链接ID", "标题", "链接类型", "店铺", "规格数"])
+        self.link_model.setHorizontalHeaderLabels(["图片", "链接ID", "标题", "链接类型", "店铺", "规格数"])
         self.link_table = QTableView()
         self.link_table.setModel(self.link_model)
         self.link_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.link_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.link_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
-        self.link_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.link_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.link_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.link_table.setWordWrap(True)
+        self.link_table.setTextElideMode(Qt.ElideNone)
+        self.link_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.link_table.verticalHeader().setDefaultSectionSize(72)
+        self.link_table.setIconSize(QSize(58, 58))
+        self.link_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.link_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.link_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.link_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.link_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.link_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.link_table.setColumnWidth(0, 72)
         right.addWidget(self.link_table)
         right_btns = QHBoxLayout()
         btn_ai_type = QPushButton("AI生成链接类型")
         btn_ai_type.clicked.connect(self.ai_set_selected_link_type)
         btn_move = QPushButton("移动到其他组合")
         btn_move.clicked.connect(self.move_selected_links)
+        btn_add_link = QPushButton("添加链接")
+        btn_add_link.clicked.connect(self.add_links_to_current_combo)
         btn_save = QPushButton("保存修改")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         btn_save.clicked.connect(self.save_link_types)
         right_btns.addWidget(btn_ai_type)
         right_btns.addWidget(btn_move)
+        right_btns.addWidget(btn_add_link)
         right_btns.addStretch()
         right_btns.addWidget(btn_save)
         right.addLayout(right_btns)
@@ -1878,10 +2194,35 @@ class LinkCombinationDialog(QDialog):
             item.setData(user_data, Qt.UserRole)
         return item
 
+    def _make_product_image_item(self, image_data, user_data=None):
+        item = QStandardItem("")
+        item.setEditable(False)
+        item.setTextAlignment(Qt.AlignCenter)
+        if user_data is not None:
+            item.setData(user_data, Qt.UserRole)
+        if image_data:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(bytes(image_data)):
+                item.setData(pixmap.scaled(58, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation), Qt.DecorationRole)
+            else:
+                item.setText("无图")
+        else:
+            item.setText("无图")
+        return item
+
+    def current_store_filter_id(self):
+        return self.store_filter_combo.currentData() if hasattr(self, "store_filter_combo") else None
+
+    def on_store_filter_changed(self):
+        if hasattr(self.db, "update_all_product_category_labels"):
+            self.db.update_all_product_category_labels(self.current_store_filter_id())
+        self.load_combos()
+
     def load_combos(self):
         previous = self.current_combo_id
         self.combo_model.setRowCount(0)
-        rows = self.db.get_link_combinations_with_counts() if hasattr(self.db, "get_link_combinations_with_counts") else []
+        store_id = self.current_store_filter_id()
+        rows = self.db.get_link_combinations_with_counts(store_id) if hasattr(self.db, "get_link_combinations_with_counts") else []
         select_row = 0
         for combo_id, name, _sort_order, link_count in rows:
             row = self.combo_model.rowCount()
@@ -1906,29 +2247,52 @@ class LinkCombinationDialog(QDialog):
         self.current_combo_id = item.data(Qt.UserRole) if item else None
         self.load_links(self.current_combo_id)
 
+    def show_combo_context_menu(self, pos):
+        index = self.combo_table.indexAt(pos)
+        if not index.isValid() or index.column() != 0:
+            return
+        if index.row() not in self._selected_combo_rows():
+            self.combo_table.selectRow(index.row())
+        item = self.combo_model.item(index.row(), 0)
+        self.current_combo_id = item.data(Qt.UserRole) if item else None
+        menu = QMenu(self)
+        delete_action = menu.addAction("删除选中组合")
+        action = menu.exec_(self.combo_table.viewport().mapToGlobal(pos))
+        if action == delete_action:
+            self.delete_selected_combos()
+
     def load_links(self, combo_id):
         self.link_model.setRowCount(0)
         if combo_id is None:
             return
+        store_id = self.current_store_filter_id()
+        store_clause = " AND p.store_id = ?" if store_id is not None else ""
+        params = [combo_id]
+        if store_id is not None:
+            params.append(store_id)
         rows = self.db.safe_fetchall(
-            """SELECT p.id, p.name, COALESCE(p.title, ''), COALESCE(p.link_type, ''),
+            f"""SELECT p.id, p.name, COALESCE(p.title, ''), COALESCE(p.link_type, ''),
+                      p.image_data,
                       COALESCE(s.name, ''), COUNT(ps.id) AS spec_count
                FROM products p
                LEFT JOIN stores s ON s.id = p.store_id
                LEFT JOIN product_specs ps ON ps.product_id = p.id
                WHERE p.link_combo_id = ?
-               GROUP BY p.id, p.name, p.title, p.link_type, s.name, p.sort_order
+               {store_clause}
+               GROUP BY p.id, p.name, p.title, p.link_type, p.image_data, s.name, p.sort_order
                ORDER BY COALESCE(p.sort_order, 0), p.id""",
-            (combo_id,),
+            tuple(params),
         )
-        for product_db_id, product_code, title, link_type, store_name, spec_count in rows:
+        for product_db_id, product_code, title, link_type, image_data, store_name, spec_count in rows:
             row = self.link_model.rowCount()
             self.link_model.insertRow(row)
-            self.link_model.setItem(row, 0, self._make_item(product_code, user_data=product_db_id))
-            self.link_model.setItem(row, 1, self._make_item(title))
-            self.link_model.setItem(row, 2, self._make_item(link_type, editable=True))
-            self.link_model.setItem(row, 3, self._make_item(store_name))
-            self.link_model.setItem(row, 4, self._make_item(int(spec_count or 0)))
+            self.link_model.setItem(row, 0, self._make_product_image_item(image_data, user_data=product_db_id))
+            self.link_model.setItem(row, 1, self._make_item(product_code, user_data=product_db_id))
+            self.link_model.setItem(row, 2, self._make_item(title))
+            self.link_model.setItem(row, 3, self._make_item(link_type, editable=True))
+            self.link_model.setItem(row, 4, self._make_item(store_name))
+            self.link_model.setItem(row, 5, self._make_item(int(spec_count or 0)))
+        self.link_table.resizeRowsToContents()
 
     def add_combo(self):
         name, ok = QInputDialog.getText(self, "新增链接组合", "请输入链接组合名称:")
@@ -1944,6 +2308,53 @@ class LinkCombinationDialog(QDialog):
         row = self.combo_table.currentIndex().row()
         item = self.combo_model.item(row, 0) if row >= 0 else None
         return item.text().strip() if item else ""
+
+    def _selected_combo_rows(self):
+        return sorted({index.row() for index in self.combo_table.selectedIndexes()})
+
+    def _selected_combo_ids_and_names(self):
+        combos = []
+        for row in self._selected_combo_rows():
+            item = self.combo_model.item(row, 0)
+            if not item:
+                continue
+            combo_id = item.data(Qt.UserRole)
+            name = item.text().strip()
+            if combo_id is not None and all(existing_id != combo_id for existing_id, _name in combos):
+                combos.append((combo_id, name))
+        return combos
+
+    def delete_selected_combos(self):
+        combos = self._selected_combo_ids_and_names()
+        if not combos and self.current_combo_id is not None:
+            combos = [(self.current_combo_id, self._current_combo_name())]
+        if not combos:
+            QMessageBox.warning(self, "提示", "请先选择要删除的链接组合。")
+            return
+        names = [name or str(combo_id) for combo_id, name in combos]
+        reply = QMessageBox.question(
+            self,
+            "确认删除链接组合",
+            "确定要删除选中的 {} 个链接组合吗？\n\n{}\n\n组合内链接不会被删除，只会解除链接组合归属。".format(
+                len(combos),
+                "\n".join(f"- {name}" for name in names[:12]) + ("\n..." if len(names) > 12 else ""),
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            if hasattr(self.db, "delete_link_combinations"):
+                self.db.delete_link_combinations([combo_id for combo_id, _name in combos])
+            else:
+                raise RuntimeError("当前数据库管理器不支持删除链接组合。")
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", f"删除链接组合失败：{e}")
+            return
+        self.current_combo_id = None
+        if self.main_window and hasattr(self.main_window, "load_data_safe"):
+            self.main_window.load_data_safe()
+        self.load_combos()
 
     def rename_combo(self):
         if self.current_combo_id is None:
@@ -1961,7 +2372,7 @@ class LinkCombinationDialog(QDialog):
         rows = sorted({index.row() for index in self.link_table.selectedIndexes()})
         ids = []
         for row in rows:
-            item = self.link_model.item(row, 0)
+            item = self.link_model.item(row, 1)
             product_id = item.data(Qt.UserRole) if item else None
             if product_id and product_id not in ids:
                 ids.append(product_id)
@@ -1970,8 +2381,8 @@ class LinkCombinationDialog(QDialog):
     def save_link_types(self):
         try:
             for row in range(self.link_model.rowCount()):
-                id_item = self.link_model.item(row, 0)
-                type_item = self.link_model.item(row, 2)
+                id_item = self.link_model.item(row, 1)
+                type_item = self.link_model.item(row, 3)
                 product_id = id_item.data(Qt.UserRole) if id_item else None
                 if product_id and hasattr(self.db, "update_product_link_type"):
                     self.db.update_product_link_type(product_id, type_item.text().strip() if type_item else "")
@@ -2002,6 +2413,219 @@ class LinkCombinationDialog(QDialog):
             if hasattr(self.db, "update_product_link_combo"):
                 self.db.update_product_link_combo(product_id, target_id)
         self.load_combos()
+
+    def add_links_to_current_combo(self):
+        if self.current_combo_id is None:
+            QMessageBox.warning(self, "提示", "请先选择一个链接组合。")
+            return
+        dialog = LinkAddToCombinationDialog(self.db, self.current_combo_id, self.current_store_filter_id(), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        product_ids = dialog.selected_product_ids()
+        if not product_ids:
+            QMessageBox.warning(self, "提示", "请先选择要添加的链接。")
+            return
+        try:
+            for product_id in product_ids:
+                if hasattr(self.db, "update_product_link_combo"):
+                    self.db.update_product_link_combo(product_id, self.current_combo_id)
+        except Exception as e:
+            QMessageBox.critical(self, "添加失败", f"添加链接失败：{e}")
+            return
+        if self.main_window and hasattr(self.main_window, "load_data_safe"):
+            self.main_window.load_data_safe()
+        self.load_combos()
+
+    def show_unclassified_classify_dialog(self):
+        dialog = LinkUnclassifiedClassifyDialog(self, self.current_store_filter_id(), self)
+        dialog.exec_()
+        self.load_combos()
+
+    def product_context_rows(self, only_unclassified=False, store_id=None):
+        params = []
+        where = []
+        if store_id is not None:
+            where.append("p.store_id=?")
+            params.append(store_id)
+        if only_unclassified:
+            where.append("p.link_combo_id IS NULL")
+        sql = """SELECT p.id, p.name, COALESCE(p.title, ''), COALESCE(p.link_type, ''),
+                        COALESCE(lc.name, ''), COALESCE(s.name, ''), p.image_data,
+                        COALESCE(ps.spec_name, ''), COALESCE(ps.spec_code, ''), COALESCE(cl.category_label, '')
+                 FROM products p
+                 LEFT JOIN stores s ON s.id = p.store_id
+                 LEFT JOIN link_combinations lc ON lc.id = p.link_combo_id
+                 LEFT JOIN product_specs ps ON ps.product_id = p.id
+                 LEFT JOIN cost_library cl ON cl.spec_code = ps.spec_code"""
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY COALESCE(p.sort_order, 0), p.id, ps.id"
+        rows = self.db.safe_fetchall(sql, tuple(params))
+        products = {}
+        order = []
+        for product_id, code, title, link_type, combo_name, store_name, image_data, spec_name, spec_code, category in rows:
+            if product_id not in products:
+                products[product_id] = {
+                    "product_id": product_id,
+                    "code": str(code or ""),
+                    "title": str(title or ""),
+                    "link_type": str(link_type or ""),
+                    "combo_name": str(combo_name or ""),
+                    "store_name": str(store_name or ""),
+                    "image_data": image_data,
+                    "specs": [],
+                }
+                order.append(product_id)
+            if spec_name or spec_code or category:
+                products[product_id]["specs"].append({
+                    "name": str(spec_name or ""),
+                    "code": str(spec_code or ""),
+                    "category": str(category or ""),
+                })
+        return [products[product_id] for product_id in order]
+
+    def classify_products_with_ai(self, products, message_parent=None):
+        if not products:
+            QMessageBox.information(self, "提示", "当前筛选范围内没有链接。")
+            return 0
+        message_parent = message_parent or self
+        try:
+            results = self._call_ai_classify_links(products)
+            if not results:
+                raise RuntimeError("AI没有返回可识别的归类结果。")
+            product_map = {idx: item for idx, item in enumerate(products, start=1)}
+            updated = 0
+            for result in results:
+                try:
+                    row_index = int(result.get("row_index") or result.get("rowIndex") or result.get("index") or 0)
+                except (TypeError, ValueError):
+                    row_index = 0
+                product = product_map.get(row_index)
+                if not product:
+                    continue
+                combo_name = str(result.get("combo_name") or result.get("combo") or result.get("name") or "").strip()
+                link_type = str(result.get("link_type") or result.get("type") or "").strip()
+                if not combo_name:
+                    continue
+                combo_id = self.db.ensure_link_combination(combo_name) if hasattr(self.db, "ensure_link_combination") else None
+                self.db.cursor.execute(
+                    "UPDATE products SET link_combo_id=?, link_type=? WHERE id=?",
+                    (combo_id, link_type or product.get("link_type", ""), product["product_id"]),
+                )
+                updated += 1
+            self.db.conn.commit()
+        except Exception as e:
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                pass
+            QMessageBox.warning(message_parent, "AI归类失败", str(e))
+            return 0
+        if self.main_window and hasattr(self.main_window, "load_data_safe"):
+            self.main_window.load_data_safe()
+        QMessageBox.information(message_parent, "成功", f"已归类 {updated} 条链接。")
+        self.load_combos()
+        return updated
+
+    def _call_ai_classify_links(self, products):
+        api_key = self.db.get_setting("ai_api_key", "") if hasattr(self.db, "get_setting") else ""
+        if not api_key:
+            raise RuntimeError("未配置 API Key，请先到 API 配置里填写。")
+        api_url = self.db.get_setting("ai_api_url", "https://api.deepseek.com/chat/completions")
+        model = self.db.get_setting("ai_model", "deepseek-v4-flash")
+        existing_types = self._existing_link_types()
+        existing_combos = self._existing_combo_names()
+        candidates = []
+        for idx, product in enumerate(products, start=1):
+            candidates.append({
+                "row_index": idx,
+                "link_id": product["code"],
+                "title": product["title"],
+                "current_link_type": product["link_type"],
+                "current_combo_name": product["combo_name"],
+                "specs": [
+                    {"name": spec["name"], "category": spec["category"]}
+                    for spec in product.get("specs", [])
+                ],
+            })
+        prompt = (
+            "请根据链接标题和规格产品，把每个链接归类到链接组合名称和链接类型。"
+            "同一用途/人群/场景/成套搭配的链接归到同一个组合名称。"
+            "链接类型优先从现有链接类型中选择，确实不合适再生成新的短类型。"
+            "组合名称可以复用已有组合名称，也可以生成新的组合名称。"
+            "必须返回标准JSON数组，每个对象只包含 row_index、combo_name、link_type。"
+            "不要解释，不要代码块。\n\n"
+            f"现有链接类型：{json.dumps(existing_types, ensure_ascii=False)}\n"
+            f"已有链接组合名称：{json.dumps(existing_combos, ensure_ascii=False)}\n"
+            f"链接列表：{json.dumps(candidates, ensure_ascii=False)}"
+        )
+        progress = QProgressDialog("正在调用 AI 归类链接...", "取消", 0, 2, self)
+        progress.setWindowTitle("AI归类")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            import requests
+            response = requests.post(
+                api_url,
+                headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "你是电商链接归类助手。只输出标准JSON数组，不要解释。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": max(2048, min(16000, len(products) * 80)),
+                },
+                timeout=120,
+            )
+            if progress.wasCanceled():
+                raise RuntimeError("已取消 AI 归类。")
+            if response.status_code != 200:
+                raise RuntimeError(f"AI请求失败：HTTP {response.status_code}\n{response.text[:500]}")
+            progress.setLabelText("正在解析 AI 归类结果...")
+            progress.setValue(1)
+            QApplication.processEvents()
+            data = response.json()
+            message = data.get("choices", [{}])[0].get("message", {})
+            content = str(message.get("content") or message.get("reasoning_content") or "").strip()
+            if not content:
+                raise RuntimeError(f"AI返回内容为空。API URL:{api_url}\n模型:{model}\n返回内容:{str(data)[:500]}")
+            return self._parse_ai_classify_result(content)
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+
+    def _parse_ai_classify_result(self, text):
+        text = str(text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        json_text = text[start:end + 1] if start != -1 and end > start else text
+        for candidate in (json_text, json_text.replace("'", '"')):
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    data = data.get("items") or data.get("results") or data.get("data") or []
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+            except json.JSONDecodeError:
+                continue
+        results = []
+        pattern = re.compile(
+            r"row[_\s-]*index[\"'\s:=：]+(\d+).*?(?:combo[_\s-]*name|组合名称|name)[\"'\s:=：]+([^,，\n;；}]+).*?(?:link[_\s-]*type|链接类型|type)[\"'\s:=：]+([^,，\n;；}]+)",
+            flags=re.I | re.S,
+        )
+        for row_index, combo_name, link_type in pattern.findall(text):
+            results.append({
+                "row_index": int(row_index),
+                "combo_name": str(combo_name).strip().strip("\"'“”"),
+                "link_type": str(link_type).strip().strip("\"'“”"),
+            })
+        return results
 
     def _spec_context_for_products(self, product_ids):
         if not product_ids:
@@ -2084,7 +2708,7 @@ class LinkCombinationDialog(QDialog):
             return
         product_ids = []
         for row in range(self.link_model.rowCount()):
-            item = self.link_model.item(row, 0)
+            item = self.link_model.item(row, 1)
             if item and item.data(Qt.UserRole):
                 product_ids.append(item.data(Qt.UserRole))
         try:
@@ -2103,7 +2727,7 @@ class LinkCombinationDialog(QDialog):
             link_type = self._call_ai_text("根据这些规格生成这条链接自己的链接类型。只输出一个短类型名，12个中文以内。", self._spec_context_for_products(product_ids))
             selected_rows = sorted({index.row() for index in self.link_table.selectedIndexes()})
             for row in selected_rows:
-                item = self.link_model.item(row, 2)
+                item = self.link_model.item(row, 3)
                 if item:
                     item.setText(link_type)
         except Exception as e:
@@ -2681,15 +3305,17 @@ class CostLibraryDialog(QDialog):
         "#CFE2F3", "#EADCF8", "#D5E8D4", "#FFE599", "#D9EAF7",
     ]
 
-    def __init__(self, db_manager, parent=None):
+    def __init__(self, db_manager, main_window=None, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        self.main_window = main_window or parent
         self._original_rows = {}
         self._loading = False
         self._recalculating = False
         self.cost_mode = self._get_cost_mode()
         self.listing_cart = {}
         self.setWindowTitle("成本库管理")
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
         self.resize(1480, 720)
         try:
             self.init_ui()
@@ -3067,7 +3693,7 @@ class CostLibraryDialog(QDialog):
         QTimer.singleShot(0, self._resize_columns_for_content)
 
     def _show_copy_hint(self, text):
-        main_window = self.parent()
+        main_window = self.main_window
         if main_window and hasattr(main_window, "show_toast"):
             main_window.show_toast(text, 1200)
         else:
@@ -3515,11 +4141,11 @@ class CostLibraryDialog(QDialog):
             self.db.normalize_cost_category_colors()
 
     def show_ai_pick(self):
-        dialog = AIPickDialog(self.db, self.parent(), self)
+        dialog = AIPickDialog(self.db, self.main_window, self)
         dialog.exec_()
 
     def import_cost_data(self):
-        parent = self.parent()
+        parent = self.main_window
         if not parent or not hasattr(parent, "import_cost_data"):
             QMessageBox.warning(self, "提示", "当前窗口无法调用导入成本表功能。")
             return
@@ -3562,7 +4188,7 @@ class CostLibraryDialog(QDialog):
             self.load_data()
 
     def show_link_combinations(self):
-        dialog = LinkCombinationDialog(self.db, self.parent(), self)
+        dialog = LinkCombinationDialog(self.db, self.main_window, self)
         dialog.exec_()
         self.load_data()
 
@@ -3666,7 +4292,7 @@ class CostLibraryDialog(QDialog):
         if not specs:
             QMessageBox.warning(self, "提示", "请先选中要创建链接的规格。")
             return
-        dialog = CostLinkCreateDialog(self.db, specs, self.parent(), self)
+        dialog = CostLinkCreateDialog(self.db, specs, self.main_window, self)
         if dialog.exec_() == QDialog.Accepted:
             if use_cart:
                 self.listing_cart.clear()

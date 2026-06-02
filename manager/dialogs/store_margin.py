@@ -3,6 +3,7 @@
 import os
 import json
 import time
+import re
 from io import BytesIO
 from datetime import datetime
 from PyQt5.QtWidgets import QHeaderView, QAbstractItemView
@@ -10,12 +11,17 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
     QAbstractItemView, QFileDialog, QComboBox, QScrollArea, QHeaderView,
-    QApplication, QPlainTextEdit, QProgressDialog
+    QApplication, QPlainTextEdit, QProgressDialog, QCheckBox
 )
 from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice, QObject, QThread
 from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator, QFont
 from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
 from PyQt5.QtGui import QClipboard
+
+try:
+    from manager.pdd_browser_monitor import BrowserMonitorError, PddBrowserMonitor
+except ImportError:
+    from pdd_browser_monitor import BrowserMonitorError, PddBrowserMonitor
 
 try:
     from openpyxl import load_workbook
@@ -88,6 +94,1863 @@ class StoreAiReportWorker(QObject):
         except Exception as e:
             if not self.cancelled:
                 self.failed.emit(f"生成报告失败：{str(e)}")
+
+
+class PddUnmatchedTaskWindow(QDialog):
+    """独立显示价格管理未匹配链接，用户可手动标记已处理。"""
+
+    def __init__(self, parent=None):
+        super().__init__(None)
+        self.records = {}
+        self.setWindowTitle("价格管理未匹配链接")
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.setWindowModality(Qt.NonModal)
+        self.resize(620, 360)
+
+        layout = QVBoxLayout(self)
+        self.lbl_summary = QLabel("未匹配链接 0 个")
+        self.lbl_summary.setStyleSheet("font-size: 12px; color: #555; padding: 4px 0;")
+        layout.addWidget(self.lbl_summary)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["完成", "商品ID", "未匹配原因", "商品标题"])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 64)
+        self.table.setColumnWidth(1, 150)
+        self.table.setColumnWidth(2, 180)
+        self.table.cellClicked.connect(self._handle_cell_clicked)
+        layout.addWidget(self.table)
+
+    def upsert_records(self, records):
+        for record in records or []:
+            product_id = str(record.get("product_id") or "").strip()
+            if not product_id:
+                continue
+            existing = self.records.get(product_id, {})
+            done = bool(existing.get("done"))
+            self.records[product_id] = {
+                "product_id": product_id,
+                "title": record.get("title") or existing.get("title") or "",
+                "reasons": record.get("reasons") or existing.get("reasons") or [],
+                "done": done,
+            }
+        self.refresh()
+
+    def remove_product_ids(self, product_ids):
+        for product_id in product_ids or []:
+            self.records.pop(str(product_id), None)
+        self.refresh()
+
+    def refresh(self):
+        records = list(self.records.values())
+        records.sort(key=lambda row: (bool(row.get("done")), row.get("product_id", "")))
+        self.table.setRowCount(len(records))
+        done_count = 0
+        for row_index, record in enumerate(records):
+            product_id = record.get("product_id", "")
+            done = bool(record.get("done"))
+            if done:
+                done_count += 1
+            checkbox = QCheckBox()
+            checkbox.setChecked(done)
+            checkbox.stateChanged.connect(lambda _state, pid=product_id: self.mark_done(pid))
+            checkbox_widget = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_widget)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            checkbox_layout.setAlignment(Qt.AlignCenter)
+            checkbox_layout.addWidget(checkbox)
+            self.table.setCellWidget(row_index, 0, checkbox_widget)
+
+            values = [
+                product_id,
+                "、".join(record.get("reasons") or []),
+                record.get("title", ""),
+            ]
+            for col_offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter if col_offset != 3 else Qt.AlignVCenter | Qt.AlignLeft)
+                if col_offset == 1:
+                    item.setToolTip("单击复制商品ID")
+                if done:
+                    font = item.font()
+                    font.setStrikeOut(True)
+                    item.setFont(font)
+                    item.setForeground(QColor("#95a5a6"))
+                    item.setBackground(QColor("#f2f3f4"))
+                self.table.setItem(row_index, col_offset, item)
+        self.lbl_summary.setText(f"未匹配链接 {len(records)} 个，已手动完成 {done_count} 个")
+
+    def mark_done(self, product_id):
+        product_id = str(product_id or "").strip()
+        if product_id in self.records:
+            self.records[product_id]["done"] = True
+            self.refresh()
+
+    def _handle_cell_clicked(self, row, col):
+        if col != 1:
+            return
+        item = self.table.item(row, col)
+        product_id = item.text().strip() if item else ""
+        if product_id:
+            QApplication.clipboard().setText(product_id)
+            self.lbl_summary.setText(f"商品ID {product_id} 已复制。")
+
+
+class PddProductMatchDialog(QDialog):
+    """拼多多商品列表 ID 抓取与本地店铺商品匹配测试窗口。"""
+
+    def __init__(self, db, monitor, default_store_id=None, parent=None, mode="combined", store_id_provider=None, owner=None):
+        super().__init__(parent)
+        self.db = db
+        self.monitor = monitor
+        self.default_store_id = default_store_id
+        self.mode = mode
+        self.store_id_provider = store_id_provider
+        self.owner = owner or parent
+        self.missing_ids = []
+        self.last_debug_info = {}
+        self.last_product_id = ""
+        self.last_title = ""
+        self.last_product_images = []
+        self.last_specs = []
+        self.last_price_management_info = {}
+        self.price_sync_rows = {}
+        self.price_result_cards = {}
+        self.price_result_items = {}
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        self.unmatched_task_window = None
+        self.setWindowTitle("拼多多链接抓取")
+        if self.mode in ("code", "price"):
+            self.setWindowFlags(
+                Qt.Window
+                | Qt.WindowMinimizeButtonHint
+                | Qt.WindowMaximizeButtonHint
+                | Qt.WindowCloseButtonHint
+            )
+            self.setWindowModality(Qt.NonModal)
+        self.resize(1180, 680)
+        self.init_ui()
+        self.load_stores()
+        self.apply_mode_layout()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        self.top_widget = QWidget()
+        top_layout = QHBoxLayout(self.top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.chk_store_scope = QCheckBox("按所选店铺匹配")
+        self.chk_store_scope.setChecked(True)
+        self.chk_store_scope.setEnabled(False)
+        top_layout.addWidget(self.chk_store_scope)
+
+        self.combo_store = QComboBox()
+        self.combo_store.setMinimumWidth(220)
+        top_layout.addWidget(self.combo_store)
+
+        self.btn_open_browser = QPushButton("打开商家端")
+        self.btn_open_browser.clicked.connect(self.open_browser)
+        top_layout.addWidget(self.btn_open_browser)
+
+        self.btn_scan = QPushButton("抓取添加编码界面")
+        self.btn_scan.clicked.connect(self.scan_current_page)
+        self.btn_scan.setStyleSheet(
+            "QPushButton { background-color: #f39c12; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #d68910; }"
+            "QPushButton:disabled { background-color: #bdc3c7; }"
+        )
+        top_layout.addWidget(self.btn_scan)
+
+        self.btn_scan_price = QPushButton("抓取价格管理")
+        self.btn_scan_price.clicked.connect(self.scan_price_management)
+        self.btn_scan_price.setStyleSheet(
+            "QPushButton { background-color: #8e44ad; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #7d3c98; }"
+            "QPushButton:disabled { background-color: #bdc3c7; }"
+        )
+        top_layout.addWidget(self.btn_scan_price)
+        top_layout.addStretch()
+        layout.addWidget(self.top_widget)
+
+        self.lbl_summary = QLabel("先手动打开拼多多“添加/编辑商品编码”窗口，或进入价格管理页面，再点击对应抓取按钮。")
+        self.lbl_summary.setWordWrap(True)
+        self.lbl_summary.setStyleSheet("color: #555; font-size: 12px; padding: 6px 0;")
+        layout.addWidget(self.lbl_summary)
+
+        self.start_widget = QWidget()
+        start_layout = QHBoxLayout(self.start_widget)
+        start_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_start_scan = QPushButton("开始抓取")
+        self.btn_start_scan.clicked.connect(self.start_current_mode_scan)
+        self.btn_start_scan.setStyleSheet(
+            "QPushButton { background-color: #2e86de; color: white; border: none; padding: 7px 14px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #1b4f72; }"
+            "QPushButton:disabled { background-color: #bdc3c7; }"
+        )
+        start_layout.addWidget(self.btn_start_scan)
+        start_layout.addStretch()
+        self.start_widget.setVisible(False)
+        layout.addWidget(self.start_widget)
+
+        self.header_widget = QWidget()
+        header_layout = QGridLayout(self.header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        self.lbl_pdd_product_title = QLabel("标题: --")
+        self.lbl_software_product_title = QLabel("软件标题: --")
+        self.lbl_pdd_product_images = QLabel("主图")
+        self.product_images_widget = QWidget()
+        self.product_images_layout = QHBoxLayout(self.product_images_widget)
+        self.product_images_layout.setContentsMargins(4, 4, 4, 4)
+        self.product_images_layout.setSpacing(0)
+        self.product_images_layout.setAlignment(Qt.AlignCenter)
+        self.product_images_layout.addWidget(self.lbl_pdd_product_images)
+        self.lbl_pdd_product_title.setWordWrap(True)
+        self.lbl_software_product_title.setWordWrap(True)
+        self.lbl_pdd_product_images.setWordWrap(True)
+        for label in (self.lbl_pdd_product_title, self.lbl_software_product_title):
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumHeight(46)
+            label.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 6px;")
+        self.product_images_widget.setFixedSize(96, 96)
+        self.product_images_widget.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;")
+        header_layout.addWidget(self.product_images_widget, 0, 0, 2, 1, Qt.AlignCenter)
+        header_layout.addWidget(self.lbl_pdd_product_title, 0, 1)
+        header_layout.addWidget(self.lbl_software_product_title, 1, 1)
+        header_layout.setColumnStretch(1, 1)
+        layout.addWidget(self.header_widget)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["规格图", "规格信息", "规格编码", "价格", "商品匹配", "软件规格", "原始文本"])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 190)
+        self.table.setColumnWidth(1, 240)
+        self.table.setColumnWidth(2, 170)
+        self.table.setColumnWidth(3, 90)
+        self.table.setColumnWidth(4, 90)
+        self.table.setColumnWidth(5, 220)
+        layout.addWidget(self.table)
+
+        self.price_scroll_area = QScrollArea()
+        self.price_scroll_area.setWidgetResizable(True)
+        self.price_scroll_area.setVisible(False)
+        self.price_scroll_content = QWidget()
+        self.price_scroll_layout = QVBoxLayout(self.price_scroll_content)
+        self.price_scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.price_scroll_layout.setSpacing(10)
+        self.price_scroll_layout.addStretch()
+        self.price_scroll_area.setWidget(self.price_scroll_content)
+        layout.addWidget(self.price_scroll_area)
+
+        bottom = QWidget()
+        bottom_layout = QHBoxLayout(bottom)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_save_to_store = QPushButton("创建/覆盖到本店铺")
+        self.btn_save_to_store.clicked.connect(self.save_current_link_to_store)
+        self.btn_save_to_store.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #229954; }"
+        )
+        bottom_layout.addWidget(self.btn_save_to_store)
+        self.btn_overwrite_without_price = QPushButton("覆盖除价格之外的信息到软件")
+        self.btn_overwrite_without_price.clicked.connect(self.overwrite_current_link_without_price)
+        self.btn_overwrite_without_price.setStyleSheet(
+            "QPushButton { background-color: #16a085; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #138d75; }"
+        )
+        bottom_layout.addWidget(self.btn_overwrite_without_price)
+        self.btn_open_current_spec = QPushButton("打开当前链接规格与毛利管理")
+        self.btn_open_current_spec.clicked.connect(self.open_current_code_product_spec_dialog)
+        self.btn_open_current_spec.setEnabled(False)
+        bottom_layout.addWidget(self.btn_open_current_spec)
+        self.btn_copy_debug = QPushButton("复制调试JSON")
+        self.btn_copy_debug.clicked.connect(self.copy_debug_json)
+        bottom_layout.addWidget(self.btn_copy_debug)
+        self.btn_copy_unmatched_specs = QPushButton("一键生成未匹配窗口")
+        self.btn_copy_unmatched_specs.clicked.connect(self.show_unmatched_task_window)
+        self.btn_copy_unmatched_specs.setVisible(False)
+        self.btn_copy_unmatched_specs.setEnabled(False)
+        bottom_layout.addWidget(self.btn_copy_unmatched_specs)
+        bottom_layout.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        bottom_layout.addWidget(btn_close)
+        layout.addWidget(bottom)
+
+    def load_stores(self):
+        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
+        self.combo_store.clear()
+        for store_id, store_name in rows:
+            self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
+        if self.default_store_id is not None:
+            for i in range(self.combo_store.count()):
+                if self.combo_store.itemData(i) == self.default_store_id:
+                    self.combo_store.setCurrentIndex(i)
+                    break
+
+    def current_store_id(self):
+        if self.store_id_provider:
+            try:
+                store_id = self.store_id_provider()
+                if store_id:
+                    return store_id
+            except Exception:
+                pass
+        return self.combo_store.currentData()
+
+    def _activate_browser_store_context(self):
+        store_id = self.current_store_id()
+        if store_id and hasattr(self.monitor, "set_store_context"):
+            self.monitor.set_store_context(store_id)
+        return store_id
+
+    def apply_mode_layout(self):
+        if self.mode == "code":
+            self.setWindowTitle("抓取添加编码界面")
+            self.resize(1080, 640)
+            self.top_widget.hide()
+            self.start_widget.show()
+            self.btn_scan_price.hide()
+            self.btn_copy_unmatched_specs.hide()
+            self.btn_save_to_store.show()
+            self.btn_overwrite_without_price.show()
+            self.btn_open_current_spec.show()
+            self._set_code_table_mode()
+            self.lbl_summary.setText("已打开抓取添加编码界面窗口。请确认浏览器停在添加/编辑编码界面后，点击“开始抓取”。")
+        elif self.mode == "price":
+            self.setWindowTitle("抓取价格管理")
+            self.resize(1180, 720)
+            self.top_widget.hide()
+            self.start_widget.show()
+            self.btn_save_to_store.hide()
+            self.btn_overwrite_without_price.hide()
+            self.btn_open_current_spec.hide()
+            self._set_price_table_mode()
+            self.lbl_summary.setText("已打开抓取价格管理窗口。请确认浏览器停在价格管理页面后，点击“开始抓取”。")
+
+    def start_current_mode_scan(self):
+        if self.mode == "price":
+            self.scan_price_management()
+        else:
+            self.scan_current_page()
+
+    def _set_scan_controls_enabled(self, enabled):
+        for button_name in ("btn_scan", "btn_scan_price", "btn_start_scan"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def open_browser(self):
+        try:
+            store_id = self._activate_browser_store_context()
+            self.monitor.open_merchant_page(store_id)
+            self.lbl_summary.setText("已打开商家端。请手动进入“添加/编辑商品编码”窗口或价格管理页面，再点击对应抓取按钮。")
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"打开商家端失败：{e}")
+
+    def _local_products_for_store(self, store_id):
+        rows = self.db.safe_fetchall(
+            "SELECT id, name, title, image_data FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
+            (store_id,),
+        )
+        result = {}
+        for sys_id, product_id, title, image_data in rows:
+            product_id = str(product_id or "").strip()
+            if product_id:
+                result[product_id] = {"id": sys_id, "title": str(title or ""), "image_data": image_data}
+        return result
+
+    def _local_specs_for_product(self, product_sys_id):
+        if not product_sys_id:
+            return {}
+        rows = self.db.safe_fetchall(
+            "SELECT spec_code, spec_name FROM product_specs WHERE product_id=?",
+            (product_sys_id,),
+        )
+        result = {}
+        for spec_code, spec_name in rows:
+            raw_code = str(spec_code or "").strip()
+            normalized_code = self._normalize_spec_code(raw_code)
+            if raw_code:
+                result[raw_code] = str(spec_name or "").strip()
+            if normalized_code:
+                result[normalized_code] = str(spec_name or "").strip()
+        return result
+
+    def _normalize_spec_code(self, value):
+        return "".join(ch for ch in str(value or "").strip() if ch.isalnum())
+
+    def _local_specs_by_name_for_product(self, product_sys_id):
+        if not product_sys_id:
+            return {}
+        rows = self.db.safe_fetchall(
+            "SELECT id, spec_name, sale_price FROM product_specs WHERE product_id=?",
+            (product_sys_id,),
+        )
+        result = {}
+        for spec_id, spec_name, sale_price in rows:
+            name = str(spec_name or "").strip()
+            if name:
+                spec_payload = {
+                    "id": spec_id,
+                    "spec_name": name,
+                    "sale_price": float(sale_price or 0),
+                }
+                result[name] = spec_payload
+                normalized_name = self._normalize_spec_name_for_match(name)
+                if normalized_name:
+                    result.setdefault(normalized_name, spec_payload)
+                if self.db.get_setting(f"product_spec_two_level_{product_sys_id}", "0") == "1" and " " in name:
+                    first, second = name.rsplit(" ", 1)
+                    combined_name = f"{first.strip()}-{second.strip()}"
+                    result.setdefault(combined_name, spec_payload)
+                    result.setdefault(self._normalize_spec_name_for_match(combined_name), spec_payload)
+        return result
+
+    def _normalize_spec_name_for_match(self, value):
+        text = str(value or "").strip()
+        text = text.replace(" ", "").replace("\u3000", "")
+        text = text.replace("丨", "|")
+        return text
+
+    def _dedupe_specs(self, specs):
+        best_by_key = {}
+        order = []
+        draft_warning_pattern = re.compile(r"(草稿箱|正在编辑|确认修改当前商品编码|自动删除草稿|去查看草稿)")
+        def normalize_name(value):
+            text = str(value or "").strip()
+            for prefix in ("规格信息 ", "规格编码 ", "规格 ", "编码 "):
+                while text.startswith(prefix):
+                    text = text[len(prefix):].strip()
+            text = re.sub(r"\s*(?:当前价|价格|售价)[:：]?\s*[￥¥]?\s*\d+(?:\.\d{1,2})?.*$", "", text).strip()
+            return text
+
+        def score(item):
+            fields = [
+                normalize_name(item.get("spec_info", "")),
+                str(item.get("spec_code", "") or "").strip(),
+                str(item.get("price", "") or "").strip(),
+                str(item.get("image", "") or "").strip(),
+            ]
+            raw_text = str(item.get("raw_text", "") or "")
+            aggregate_penalty = 500 if raw_text.count("¥") > 1 or len(raw_text) > 160 else 0
+            concise_bonus = 80 if len(raw_text) <= 80 else 40 if len(raw_text) <= 120 else 0
+            return sum(1 for value in fields if value) * 1000 + concise_bonus - aggregate_penalty
+
+        for spec in specs:
+            spec_code = str(spec.get("spec_code", "") or "").strip()
+            spec_name = normalize_name(spec.get("spec_info", ""))
+            compact_name = spec_name.replace(" ", "").replace("\u3000", "")
+            compact_raw = str(spec.get("raw_text", "") or "").replace(" ", "").replace("\u3000", "")
+            compact_raw = compact_raw.replace("请输入", "").replace("已输入", "")
+            if draft_warning_pattern.search(spec_name) or draft_warning_pattern.search(str(spec.get("raw_text", "") or "")):
+                continue
+            if compact_name.startswith("商品编码") and spec_code and not str(spec.get("price", "") or "").strip():
+                continue
+            if re.fullmatch(r"商品编码[A-Za-z0-9_-]{3,}", compact_raw or ""):
+                continue
+            if spec_code and not spec_name and not str(spec.get("price", "") or "").strip() and not str(spec.get("image", "") or "").strip():
+                continue
+            if not spec_code and not spec_name:
+                continue
+            key = spec_name or spec_code
+            cleaned = dict(spec)
+            cleaned["spec_info"] = spec_name
+            cleaned["raw_text"] = str(cleaned.get("raw_text", "") or "").replace("请输入", "").replace("已输入", "").strip()
+            if key not in best_by_key:
+                best_by_key[key] = cleaned
+                order.append(key)
+            elif score(cleaned) > score(best_by_key[key]):
+                best_by_key[key] = cleaned
+        return [best_by_key[key] for key in order]
+
+    def _set_product_image_previews(self, image_urls):
+        while self.product_images_layout.count():
+            item = self.product_images_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        image_urls = [str(url or "").strip() for url in image_urls if str(url or "").strip()]
+        if not image_urls:
+            empty = QLabel("主图: --")
+            empty.setAlignment(Qt.AlignCenter)
+            self.product_images_layout.addWidget(empty, 0, Qt.AlignCenter)
+            return
+
+        for image_url in image_urls[:1]:
+            label = QLabel()
+            label.setAlignment(Qt.AlignCenter)
+            label.setFixedSize(88, 88)
+            label.setToolTip(image_url)
+            pixmap = QPixmap()
+            try:
+                import requests
+                response = requests.get(image_url, timeout=3)
+                if response.status_code == 200:
+                    pixmap.loadFromData(response.content)
+            except Exception:
+                pixmap = QPixmap()
+            if not pixmap.isNull():
+                label.setPixmap(pixmap.scaled(88, 88, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                label.setText("图")
+            self.product_images_layout.addWidget(label, 0, Qt.AlignCenter)
+
+    def _set_image_preview_cell(self, row, col, image_url):
+        image_url = str(image_url or "").strip()
+        if not image_url:
+            item = QTableWidgetItem("")
+            item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, col, item)
+            return
+
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedSize(78, 78)
+        label.setToolTip(image_url)
+        pixmap = QPixmap()
+        try:
+            import requests
+            response = requests.get(image_url, timeout=3)
+            if response.status_code == 200:
+                pixmap.loadFromData(response.content)
+        except Exception:
+            pixmap = QPixmap()
+
+        if not pixmap.isNull():
+            label.setPixmap(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.table.setCellWidget(row, col, label)
+            self.table.setRowHeight(row, 84)
+        else:
+            short_url = image_url[:80] + ("..." if len(image_url) > 80 else "")
+            item = QTableWidgetItem(short_url)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, col, item)
+
+    def _download_image_bytes(self, image_url):
+        image_url = str(image_url or "").strip()
+        if not image_url:
+            return None
+        try:
+            import requests
+            response = requests.get(image_url, timeout=5)
+            if response.status_code == 200 and response.content:
+                return response.content
+        except Exception:
+            return None
+        return None
+
+    def _parse_price_value(self, value):
+        text = str(value or "").strip().replace("￥", "").replace("¥", "").replace(",", "")
+        try:
+            return float(text) if text else None
+        except ValueError:
+            return None
+
+    def _money_equal(self, left, right):
+        if left is None or right is None:
+            return False
+        return abs(float(left) - float(right)) <= 0.01
+
+    def _fmt_money(self, value):
+        try:
+            return f"{float(value):.2f}"
+        except Exception:
+            return "--"
+
+    def _price_tag_flags(self, tag_type):
+        text = str(tag_type or "").strip()
+        return {
+            "is_limited_time": 1 if text == "限时限量购" else 0,
+            "is_marketing": 1 if text == "营销活动" else 0,
+        }
+
+    def _set_code_table_mode(self):
+        self.price_sync_rows = {}
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        self.btn_save_to_store.setEnabled(True)
+        if hasattr(self, "btn_open_current_spec"):
+            self.btn_open_current_spec.setVisible(self.mode != "price")
+            self.btn_open_current_spec.setEnabled(False)
+        if hasattr(self, "header_widget"):
+            self.header_widget.show()
+        self.lbl_pdd_product_title.show()
+        self.lbl_software_product_title.show()
+        self.product_images_widget.show()
+        if hasattr(self, "btn_copy_unmatched_specs"):
+            self.btn_copy_unmatched_specs.setVisible(False)
+            self.btn_copy_unmatched_specs.setEnabled(False)
+        self.price_scroll_area.setVisible(False)
+        self.table.setVisible(True)
+        self._clear_price_result_cards()
+        self.table.clear()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["规格图", "规格信息", "规格编码", "价格", "商品匹配", "软件规格", "原始文本"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        widths = [190, 240, 170, 90, 90, 220, 260]
+        for col, width in enumerate(widths):
+            self.table.setColumnWidth(col, width)
+
+    def _set_price_table_mode(self):
+        self.btn_save_to_store.setEnabled(False)
+        if hasattr(self, "btn_open_current_spec"):
+            self.btn_open_current_spec.setVisible(False)
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        if hasattr(self, "header_widget"):
+            self.header_widget.hide()
+        if hasattr(self, "btn_copy_unmatched_specs"):
+            self.btn_copy_unmatched_specs.setVisible(True)
+            self.btn_copy_unmatched_specs.setEnabled(False)
+        self.lbl_pdd_product_title.setText("价格管理: --")
+        self.lbl_software_product_title.setText("匹配结果: --")
+        self._set_product_image_previews([])
+        self.table.setVisible(False)
+        self.price_scroll_area.setVisible(True)
+        self._clear_price_result_cards()
+
+    def _clear_price_result_cards(self):
+        if not hasattr(self, "price_scroll_layout"):
+            return
+        self.price_result_cards = {}
+        self.price_result_items = {}
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        if hasattr(self, "btn_copy_unmatched_specs"):
+            self.btn_copy_unmatched_specs.setEnabled(False)
+        while self.price_scroll_layout.count():
+            item = self.price_scroll_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.price_scroll_layout.addStretch()
+
+    def _product_status_text(self, compare):
+        target_tag = compare.get("target_tag") or {}
+        if int(target_tag.get("is_limited_time") or 0):
+            return "限时限量购"
+        if int(target_tag.get("is_marketing") or 0):
+            return "营销活动"
+        return "裸价"
+
+    def _product_discount_text(self, compare):
+        target_discount = compare.get("target_discount") or {}
+        coupon = float(target_discount.get("coupon_amount") or 0)
+        new_customer = float(target_discount.get("new_customer_discount") or 0)
+        parts = []
+        if coupon > 0:
+            parts.append(f"优惠券 {coupon:.2f} 元")
+        if new_customer > 0:
+            parts.append(f"新客立减 {new_customer:.2f} 元")
+        return "；".join(parts) if parts else "无优惠券"
+
+    def _set_price_card_image(self, label, image_url, image_data):
+        pixmap = QPixmap()
+        image_url = str(image_url or "").strip()
+        if image_url:
+            try:
+                import requests
+                response = requests.get(image_url, timeout=3)
+                if response.status_code == 200 and response.content:
+                    pixmap.loadFromData(response.content)
+            except Exception:
+                pixmap = QPixmap()
+        if pixmap.isNull() and image_data:
+            try:
+                pixmap.loadFromData(image_data)
+            except Exception:
+                pixmap = QPixmap()
+        if pixmap.isNull():
+            label.setText("无图")
+            label.setAlignment(Qt.AlignCenter)
+            return
+        label.setPixmap(pixmap.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        label.setAlignment(Qt.AlignCenter)
+
+    def _copy_price_product_id(self, product_id):
+        product_id = str(product_id or "").strip()
+        QApplication.clipboard().setText(product_id)
+        self.lbl_summary.setText(f"商品ID {product_id} 已复制。")
+
+    def _add_price_result_card(self, item, local_product, compare, insert_at=None):
+        product_id = str(item.get("product_id") or "")
+        card = QWidget()
+        card.setStyleSheet(
+            "QWidget#priceCard { background-color: #ffffff; border: 1px solid #dfe6e9; border-radius: 6px; }"
+        )
+        card.setObjectName("priceCard")
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(10, 10, 10, 10)
+        card_layout.setSpacing(12)
+
+        image_label = QLabel()
+        image_label.setFixedSize(104, 104)
+        image_label.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dfe6e9; border-radius: 4px; color: #95a5a6;")
+        self._set_price_card_image(image_label, item.get("image"), local_product.get("image_data"))
+        card_layout.addWidget(image_label, 0, Qt.AlignTop)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+
+        top = QWidget()
+        top_layout = QHBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        id_btn = QPushButton(f"商品ID: {product_id}")
+        id_btn.setToolTip("单击复制商品ID")
+        id_btn.setStyleSheet(
+            "QPushButton { background-color: #ecf5ff; color: #21618c; border: 1px solid #aed6f1; padding: 4px 8px; border-radius: 4px; text-align: left; font-weight: bold; }"
+            "QPushButton:hover { background-color: #d6eaf8; }"
+        )
+        id_btn.clicked.connect(lambda _checked=False, pid=product_id: self._copy_price_product_id(pid))
+        top_layout.addWidget(id_btn, 0)
+
+        status_label = QLabel(self._product_status_text(compare))
+        status_label.setAlignment(Qt.AlignCenter)
+        status_color = "#c0392b" if self._product_status_text(compare) == "限时限量购" else "#7d3c98" if self._product_status_text(compare) == "营销活动" else "#1e8449"
+        status_label.setStyleSheet(f"color: {status_color}; background-color: #f8f9fa; border: 1px solid #dfe6e9; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        top_layout.addWidget(status_label, 0)
+
+        discount_label = QLabel(self._product_discount_text(compare))
+        discount_label.setStyleSheet("color: #7d6608; background-color: #fcf3cf; border: 1px solid #f7dc6f; border-radius: 4px; padding: 4px 8px;")
+        top_layout.addWidget(discount_label, 0)
+
+        top_layout.addStretch()
+
+        action_widget = QWidget()
+        action_layout = QVBoxLayout(action_widget)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(5)
+
+        sync_btn = QPushButton("同步价格和营销")
+        sync_btn.setEnabled(bool(compare.get("can_sync")))
+        sync_btn.setToolTip("规格名称一致且存在差异时可同步；已匹配或规格不一致时不可同步。")
+        sync_btn.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #229954; }"
+            "QPushButton:disabled { background-color: #bdc3c7; color: #666; }"
+        )
+        sync_btn.clicked.connect(lambda _checked=False, pid=product_id: self.sync_price_management_product(pid))
+        action_layout.addWidget(sync_btn)
+
+        edit_btn = QPushButton("手动编辑")
+        edit_btn.setToolTip("打开软件里的规格与毛利管理窗口，关闭后刷新当前匹配状态。")
+        edit_btn.setStyleSheet(
+            "QPushButton { background-color: #3498db; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #2e86c1; }"
+        )
+        edit_btn.clicked.connect(lambda _checked=False, pid=product_id: self.open_price_product_spec_dialog(pid))
+        action_layout.addWidget(edit_btn)
+        top_layout.addWidget(action_widget, 0)
+        right_layout.addWidget(top)
+
+        title_label = QLabel(item.get("title") or local_product.get("title") or "--")
+        title_label.setWordWrap(True)
+        title_label.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 2px 0;")
+        right_layout.addWidget(title_label)
+
+        spec_table = QTableWidget()
+        spec_table.setColumnCount(9)
+        spec_table.setHorizontalHeaderLabels(["规格名称", "软件价格", "券前价", "价格标签", "优惠券", "新客立减", "软件券后价", "单件预估实收", "匹配状态"])
+        spec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        spec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        spec_table.verticalHeader().setVisible(False)
+        spec_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        spec_table.horizontalHeader().setStretchLastSection(True)
+        widths = [360, 80, 80, 100, 80, 90, 95, 110, 220]
+        for col, width in enumerate(widths):
+            spec_table.setColumnWidth(col, width)
+        rows = compare.get("rows") or []
+        spec_table.setRowCount(len(rows))
+        spec_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        spec_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        for row_index, row_data in enumerate(rows):
+            values = [
+                row_data.get("spec_name", ""),
+                self._fmt_money(row_data.get("local_sale_price")),
+                self._fmt_money(row_data.get("before_price")),
+                row_data.get("price_tag") or row_data.get("price_tag_type") or "--",
+                self._fmt_money(row_data.get("coupon_amount")),
+                self._fmt_money(row_data.get("new_customer_discount")),
+                self._fmt_money(row_data.get("local_final_price")),
+                self._fmt_money(row_data.get("final_receipt")),
+                row_data.get("status", ""),
+            ]
+            for col, value in enumerate(values):
+                table_item = QTableWidgetItem(str(value))
+                table_item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col in (0, 8) else Qt.AlignCenter))
+                if col in (0, 8):
+                    table_item.setFlags(table_item.flags() | Qt.ItemIsEnabled)
+                    table_item.setToolTip(str(value))
+                if col == 8:
+                    table_item.setForeground(QColor("#27ae60" if value == "匹配" else "#e74c3c"))
+                spec_table.setItem(row_index, col, table_item)
+        spec_table.resizeRowsToContents()
+        header_height = spec_table.horizontalHeader().sizeHint().height()
+        rows_height = sum(spec_table.rowHeight(i) for i in range(spec_table.rowCount()))
+        spec_table.setFixedHeight(header_height + rows_height + 8)
+        right_layout.addWidget(spec_table)
+
+        card_layout.addWidget(right, 1)
+        if insert_at is None:
+            insert_at = max(0, self.price_scroll_layout.count() - 1)
+        self.price_scroll_layout.insertWidget(insert_at, card)
+        self.price_result_cards[product_id] = card
+        self.price_result_items[product_id] = {"item": item, "local_product": local_product}
+
+    def _product_discount_target(self, item):
+        coupon_values = []
+        new_customer_values = []
+        for spec in item.get("specs") or []:
+            coupon = self._parse_price_value(spec.get("coupon_amount"))
+            new_customer = self._parse_price_value(spec.get("new_customer_discount"))
+            if coupon is not None:
+                coupon_values.append(coupon)
+            if new_customer is not None:
+                new_customer_values.append(new_customer)
+        return {
+            "coupon_amount": max(coupon_values) if coupon_values else 0.0,
+            "new_customer_discount": max(new_customer_values) if new_customer_values else 0.0,
+        }
+
+    def _product_tag_target(self, item):
+        has_limited_time = False
+        has_marketing = False
+        for spec in item.get("specs") or []:
+            flags = self._price_tag_flags(spec.get("price_tag_type"))
+            has_limited_time = has_limited_time or bool(flags["is_limited_time"])
+            has_marketing = has_marketing or bool(flags["is_marketing"])
+        return {
+            "is_limited_time": 1 if has_limited_time else 0,
+            "is_marketing": 1 if has_marketing else 0,
+        }
+
+    def _build_price_compare_rows(self, item, local_product):
+        product_db_id = local_product.get("id")
+        product_rows = self.db.safe_fetchall(
+            "SELECT title, coupon_amount, new_customer_discount, is_limited_time, is_marketing FROM products WHERE id=?",
+            (product_db_id,),
+        )
+        product_state = product_rows[0] if product_rows else ("", 0, 0, 0, 0)
+        local_title, local_coupon, local_new_customer, local_limited, local_marketing = product_state
+        local_specs = self._local_specs_by_name_for_product(product_db_id)
+        target_discount = self._product_discount_target(item)
+        target_tag = self._product_tag_target(item)
+        rows = []
+        can_sync = True
+        all_matched = True
+        issues = []
+
+        for spec in item.get("specs") or []:
+            spec_name = str(spec.get("spec_name") or "").strip()
+            local_spec = local_specs.get(spec_name) or local_specs.get(self._normalize_spec_name_for_match(spec_name))
+            before_price = self._parse_price_value(spec.get("before_price"))
+            final_receipt = self._parse_price_value(spec.get("final_receipt"))
+            status_parts = []
+            row_can_sync = True
+            row_matched = True
+            local_sale_price = local_spec.get("sale_price") if local_spec else None
+            local_final_price = None
+            if local_sale_price is not None:
+                local_final_price = local_sale_price - max(float(local_coupon or 0), float(local_new_customer or 0))
+
+            if not local_spec:
+                status_parts.append("规格不匹配")
+                row_can_sync = False
+                row_matched = False
+            if before_price is None:
+                status_parts.append("缺少券前价")
+                row_can_sync = False
+                row_matched = False
+            elif local_sale_price is not None and not self._money_equal(local_sale_price, before_price):
+                status_parts.append("券前价不匹配")
+                row_matched = False
+            if final_receipt is None:
+                status_parts.append("缺少实收")
+                row_can_sync = False
+                row_matched = False
+            elif local_final_price is not None and not self._money_equal(local_final_price, final_receipt):
+                status_parts.append("券后价不匹配")
+                row_matched = False
+
+            if not self._money_equal(local_coupon or 0, target_discount["coupon_amount"]):
+                status_parts.append("优惠券不匹配")
+                row_matched = False
+            if not self._money_equal(local_new_customer or 0, target_discount["new_customer_discount"]):
+                status_parts.append("新客立减不匹配")
+                row_matched = False
+            if int(local_limited or 0) != target_tag["is_limited_time"]:
+                status_parts.append("限时限量购不匹配")
+                row_matched = False
+            if int(local_marketing or 0) != target_tag["is_marketing"]:
+                status_parts.append("营销活动不匹配")
+                row_matched = False
+
+            if not row_can_sync:
+                can_sync = False
+            if not row_matched:
+                all_matched = False
+                issues.extend(status_parts)
+
+            rows.append({
+                "product_db_id": product_db_id,
+                "product_id": item.get("product_id", ""),
+                "product_title": item.get("title") or local_title or local_product.get("title", ""),
+                "spec_name": spec_name,
+                "local_spec_id": local_spec.get("id") if local_spec else None,
+                "local_sale_price": local_sale_price,
+                "before_price": before_price,
+                "price_tag": spec.get("price_tag") or ("拼单价" if spec.get("price_tag_type") == "裸价" else ""),
+                "price_tag_type": spec.get("price_tag_type", ""),
+                "coupon_amount": target_discount["coupon_amount"],
+                "new_customer_discount": target_discount["new_customer_discount"],
+                "local_final_price": local_final_price,
+                "final_receipt": final_receipt,
+                "status": "匹配" if row_matched else "不匹配：" + "、".join(status_parts),
+                "row_can_sync": row_can_sync,
+                "raw_item": item,
+            })
+
+        return {
+            "rows": rows,
+            "can_sync": can_sync and not all_matched,
+            "all_matched": all_matched,
+            "issues": issues,
+            "target_discount": target_discount,
+            "target_tag": target_tag,
+        }
+
+    def _price_compare_categories(self, compare):
+        rows = compare.get("rows") or []
+        issues = []
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status and status != "匹配":
+                issues.append(status)
+        issue_text = "、".join(issues + [str(item) for item in (compare.get("issues") or [])])
+        return {
+            "spec": (not rows) or ("规格不匹配" in issue_text),
+            "price": any(keyword in issue_text for keyword in ("券前价不匹配", "券后价不匹配", "缺少券前价", "缺少实收")),
+            "marketing": any(keyword in issue_text for keyword in ("优惠券不匹配", "新客立减不匹配", "限时限量购不匹配", "营销活动不匹配")),
+        }
+
+    def _price_unmatched_reason_labels(self, categories, product_unmatched=False):
+        reasons = []
+        if product_unmatched:
+            reasons.append("商品ID未匹配")
+        if categories.get("spec"):
+            reasons.append("规格未匹配")
+        if categories.get("price"):
+            reasons.append("价格未匹配")
+        if categories.get("marketing"):
+            reasons.append("活动/营销工具未匹配")
+        return reasons or ["未匹配"]
+
+    def _sort_records_by_time(self, records):
+        def key(record):
+            text = str(record.get("time", "") if isinstance(record, dict) else "")
+            try:
+                hour, minute = text.split(":", 1)
+                return (int(hour), int(minute))
+            except Exception:
+                return (99, 99)
+        return sorted(records or [], key=key)
+
+    def _record_product_operation(self, product_db_id, text, metric, old="", new="", change_type="pdd_sync"):
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
+        rows = self.db.safe_fetchall(
+            "SELECT records_json FROM records WHERE product_id=? AND year=? AND month=? AND day=?",
+            (product_db_id, now.year, now.month, now.day),
+        )
+        records = []
+        if rows and rows[0][0]:
+            try:
+                records = json.loads(rows[0][0])
+            except Exception:
+                records = []
+        if not isinstance(records, list):
+            records = []
+        records.append({
+            "time": time_str,
+            "text": text,
+            "changes": [{
+                "time": time_str,
+                "metric": metric,
+                "old": "" if old is None else str(old),
+                "new": "" if new is None else str(new),
+                "text": text,
+                "type": change_type,
+            }],
+        })
+        records = self._sort_records_by_time(records)
+        self.db.safe_execute(
+            "INSERT OR REPLACE INTO records (product_id, year, month, day, records_json) VALUES (?, ?, ?, ?, ?)",
+            (product_db_id, now.year, now.month, now.day, json.dumps(records, ensure_ascii=False)),
+        )
+
+    def _record_store_link_change(self, store_id, action, product_id, product_title):
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
+        action_text = "链接上架" if action == "add" else "链接覆盖"
+        product_id = str(product_id or "").strip()
+        product_title = str(product_title or "").strip()
+        records = self.db.get_store_record(store_id, now.year, now.month, now.day)
+        if not isinstance(records, list):
+            records = []
+        records.append({
+            "time": time_str,
+            "text": f"【{action_text}】商品ID：{product_id}｜标题：{product_title}",
+            "type": "link_change",
+            "action": action,
+            "product_id": product_id,
+            "product_title": product_title,
+        })
+        self.db.save_store_record(store_id, now.year, now.month, now.day, records)
+
+    def _execute_required(self, query, params=()):
+        cursor = self.db.safe_execute(query, params)
+        if cursor is None:
+            raise RuntimeError(f"数据库写入失败：{query[:80]}")
+        return cursor
+
+    def _refresh_store_margin_after_link_write(self):
+        parent = self.owner or self.parent()
+        if not parent:
+            return
+        for method_name in (
+            "load_specs",
+            "load_products",
+            "update_compare_columns",
+            "update_product_avg_price",
+            "calculate_total_margin",
+            "delayed_refresh",
+        ):
+            method = getattr(parent, method_name, None)
+            if callable(method):
+                method()
+        main_app = getattr(parent, "main_app", None)
+        if main_app and hasattr(main_app, "load_data_safe"):
+            main_app.load_data_safe()
+
+    def save_current_link_to_store(self):
+        store_id = self.current_store_id()
+        if not store_id:
+            QMessageBox.warning(self, "提示", "请先选择要写入的软件店铺。")
+            return
+        product_id = str(self.last_product_id or "").strip()
+        title = str(self.last_title or "").strip()
+        specs = self._dedupe_specs(self.last_specs or [])
+        if not product_id or not title:
+            QMessageBox.warning(self, "提示", "当前抓取结果缺少商品ID或标题，请先重新抓取添加编码界面。")
+            return
+        if not specs:
+            QMessageBox.warning(self, "提示", "当前抓取结果没有规格信息，请先重新抓取添加编码界面。")
+            return
+
+        try:
+            rows = self.db.safe_fetchall(
+                "SELECT id, title FROM products WHERE store_id=? AND name=? AND COALESCE(is_archived, 0)=0",
+                (store_id, product_id),
+            )
+            existing = rows[0] if rows else None
+            is_update = bool(existing)
+            product_db_id = existing[0] if existing else None
+            old_title = existing[1] if existing else ""
+            product_image_data = self._download_image_bytes((self.last_product_images or [""])[0])
+
+            if is_update:
+                if product_image_data:
+                    self._execute_required(
+                        "UPDATE products SET title=?, image_data=? WHERE id=?",
+                        (title, product_image_data, product_db_id),
+                    )
+                else:
+                    self._execute_required(
+                        "UPDATE products SET title=? WHERE id=?",
+                        (title, product_db_id),
+                    )
+            else:
+                result = self.db.safe_fetchall("SELECT MAX(sort_order) FROM products WHERE store_id=?", (store_id,))
+                max_order = result[0][0] if result and result[0][0] is not None else 0
+                self._execute_required(
+                    "INSERT INTO products (store_id, name, title, image_data, sort_order) VALUES (?, ?, ?, ?, ?)",
+                    (store_id, product_id, title, product_image_data, max_order + 1),
+                )
+                product_db_id = self.db.safe_fetchall("SELECT last_insert_rowid()")[0][0]
+
+            valid_specs = [
+                spec for spec in specs
+                if str(spec.get("spec_info", "") or "").strip() or str(spec.get("spec_code", "") or "").strip()
+            ]
+            default_weight = (100.0 / len(valid_specs)) if valid_specs else 0.0
+            if is_update:
+                old_rows = self.db.safe_fetchall(
+                    "SELECT id, spec_code, spec_name, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                    (product_db_id,),
+                )
+                old_by_code = {}
+                old_by_name = {}
+                old_weight_total = 0.0
+                for row in old_rows:
+                    spec_id, spec_code, spec_name, sale_price, weight_percent = row
+                    payload = {
+                        "id": spec_id,
+                        "spec_code": str(spec_code or "").strip(),
+                        "spec_name": str(spec_name or "").strip(),
+                        "sale_price": float(sale_price or 0),
+                        "weight_percent": float(weight_percent or 0),
+                    }
+                    old_weight_total += payload["weight_percent"]
+                    code_key = self._normalize_spec_code(payload["spec_code"])
+                    name_key = self._normalize_spec_name_for_match(payload["spec_name"])
+                    if code_key:
+                        old_by_code.setdefault(code_key, payload)
+                    if name_key:
+                        old_by_name.setdefault(name_key, payload)
+
+                kept_ids = []
+                use_default_weight = old_weight_total <= 0 and bool(valid_specs)
+                for spec in valid_specs:
+                    spec_name = str(spec.get("spec_info", "") or "").strip()
+                    spec_code = str(spec.get("spec_code", "") or "").strip()
+                    sale_price = self._parse_price_value(spec.get("price", ""))
+                    old_spec = old_by_code.get(self._normalize_spec_code(spec_code)) or old_by_name.get(self._normalize_spec_name_for_match(spec_name))
+                    spec_image_data = self._download_image_bytes(spec.get("image", ""))
+                    if old_spec:
+                        kept_ids.append(old_spec["id"])
+                        weight_percent = default_weight if use_default_weight else old_spec["weight_percent"]
+                        if spec_image_data:
+                            self._execute_required(
+                                "UPDATE product_specs SET spec_name=?, spec_code=?, sale_price=?, weight_percent=?, spec_image_data=? WHERE id=?",
+                                (spec_name or spec_code, spec_code, sale_price, weight_percent, spec_image_data, old_spec["id"]),
+                            )
+                        else:
+                            self._execute_required(
+                                "UPDATE product_specs SET spec_name=?, spec_code=?, sale_price=?, weight_percent=? WHERE id=?",
+                                (spec_name or spec_code, spec_code, sale_price, weight_percent, old_spec["id"]),
+                            )
+                    else:
+                        self._execute_required(
+                            "INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, spec_image_data) VALUES (?, ?, ?, ?, ?, ?)",
+                            (product_db_id, spec_name or spec_code, spec_code, sale_price, 0, spec_image_data),
+                        )
+                        kept_ids.append(self.db.safe_fetchall("SELECT last_insert_rowid()")[0][0])
+                for spec_id, *_rest in old_rows:
+                    if spec_id not in kept_ids:
+                        self._execute_required("DELETE FROM product_specs WHERE id=?", (spec_id,))
+            else:
+                for spec in valid_specs:
+                    spec_name = str(spec.get("spec_info", "") or "").strip()
+                    spec_code = str(spec.get("spec_code", "") or "").strip()
+                    sale_price = self._parse_price_value(spec.get("price", ""))
+                    spec_image_data = self._download_image_bytes(spec.get("image", ""))
+                    self._execute_required(
+                        "INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, spec_image_data) VALUES (?, ?, ?, ?, ?, ?)",
+                        (product_db_id, spec_name or spec_code, spec_code, sale_price, default_weight, spec_image_data),
+                    )
+
+            action_text = "覆盖链接" if is_update else "新建链接"
+            self._record_product_operation(
+                product_db_id,
+                f"拼多多抓取{action_text}：商品ID {product_id}，标题：{title}，规格 {len(specs)} 个",
+                metric=action_text,
+                old=old_title if is_update else "",
+                new=title,
+                change_type="pdd_link_sync",
+            )
+            self._record_store_link_change(store_id, "update" if is_update else "add", product_id, title)
+
+            self._refresh_store_margin_after_link_write()
+            self.scan_current_page()
+            if hasattr(self, "btn_open_current_spec"):
+                self.btn_open_current_spec.setEnabled(True)
+            QMessageBox.information(self, "写入完成", f"已{'覆盖' if is_update else '创建'}本店铺链接：{product_id}\n规格：{len(specs)} 个")
+        except Exception as e:
+            QMessageBox.warning(self, "写入失败", f"创建/覆盖链接失败：{e}")
+
+    def overwrite_current_link_without_price(self):
+        store_id = self.current_store_id()
+        if not store_id:
+            QMessageBox.warning(self, "提示", "请先选择要写入的软件店铺。")
+            return
+        product_id = str(self.last_product_id or "").strip()
+        title = str(self.last_title or "").strip()
+        specs = self._dedupe_specs(self.last_specs or [])
+        if not product_id or not title:
+            QMessageBox.warning(self, "提示", "当前抓取结果缺少商品ID或标题，请先重新抓取添加编码界面。")
+            return
+        if not specs:
+            QMessageBox.warning(self, "提示", "当前抓取结果没有规格信息，请先重新抓取添加编码界面。")
+            return
+
+        rows = self.db.safe_fetchall(
+            "SELECT id, title FROM products WHERE store_id=? AND name=? AND COALESCE(is_archived, 0)=0",
+            (store_id, product_id),
+        )
+        if not rows:
+            QMessageBox.information(self, "未匹配本店铺", "软件里还没有这个商品，请先使用“创建/覆盖到本店铺”。")
+            return
+
+        product_db_id, old_title = rows[0]
+        try:
+            product_image_data = self._download_image_bytes((self.last_product_images or [""])[0])
+            if product_image_data:
+                self.db.safe_execute(
+                    "UPDATE products SET title=?, image_data=? WHERE id=?",
+                    (title, product_image_data, product_db_id),
+                )
+            else:
+                self.db.safe_execute("UPDATE products SET title=? WHERE id=?", (title, product_db_id))
+
+            old_rows = self.db.safe_fetchall(
+                "SELECT id, spec_code, spec_name, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                (product_db_id,),
+            )
+            old_by_code = {}
+            old_by_name = {}
+            for row in old_rows:
+                spec_id, spec_code, spec_name, sale_price, weight_percent = row
+                payload = {
+                    "id": spec_id,
+                    "spec_code": str(spec_code or "").strip(),
+                    "spec_name": str(spec_name or "").strip(),
+                    "sale_price": float(sale_price or 0),
+                    "weight_percent": float(weight_percent or 0),
+                }
+                code_key = self._normalize_spec_code(payload["spec_code"])
+                name_key = self._normalize_spec_name_for_match(payload["spec_name"])
+                if code_key:
+                    old_by_code.setdefault(code_key, payload)
+                if name_key:
+                    old_by_name.setdefault(name_key, payload)
+
+            kept_ids = []
+            for spec in specs:
+                spec_name = str(spec.get("spec_info", "") or "").strip()
+                spec_code = str(spec.get("spec_code", "") or "").strip()
+                if not spec_name and not spec_code:
+                    continue
+                old_spec = old_by_code.get(self._normalize_spec_code(spec_code)) or old_by_name.get(self._normalize_spec_name_for_match(spec_name))
+                spec_image_data = self._download_image_bytes(spec.get("image", ""))
+                if old_spec:
+                    kept_ids.append(old_spec["id"])
+                    if spec_image_data:
+                        self.db.safe_execute(
+                            "UPDATE product_specs SET spec_name=?, spec_code=?, spec_image_data=? WHERE id=?",
+                            (spec_name or spec_code, spec_code, spec_image_data, old_spec["id"]),
+                        )
+                    else:
+                        self.db.safe_execute(
+                            "UPDATE product_specs SET spec_name=?, spec_code=? WHERE id=?",
+                            (spec_name or spec_code, spec_code, old_spec["id"]),
+                        )
+                else:
+                    self.db.safe_execute(
+                        "INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, spec_image_data) VALUES (?, ?, ?, ?, ?, ?)",
+                        (product_db_id, spec_name or spec_code, spec_code, 0, 0, spec_image_data),
+                    )
+                    kept_ids.append(self.db.safe_fetchall("SELECT last_insert_rowid()")[0][0])
+
+            old_ids = [row[0] for row in old_rows]
+            for spec_id in old_ids:
+                if spec_id not in kept_ids:
+                    self.db.safe_execute("DELETE FROM product_specs WHERE id=?", (spec_id,))
+
+            self._record_product_operation(
+                product_db_id,
+                f"拼多多覆盖非价格信息：商品ID {product_id}，标题：{title}，规格 {len(kept_ids)} 个，价格保持不变",
+                metric="覆盖非价格信息",
+                old=old_title,
+                new=title,
+                change_type="pdd_link_non_price_sync",
+            )
+            parent = self.owner or self.parent()
+            if parent and hasattr(parent, "load_products"):
+                parent.load_products()
+            self.scan_current_page()
+            QMessageBox.information(self, "覆盖完成", f"已覆盖商品 {product_id} 的非价格信息。\n规格：{len(kept_ids)} 个\n已有规格价格保持不变；新增规格价格为 0。")
+        except Exception as e:
+            QMessageBox.warning(self, "覆盖失败", f"覆盖除价格之外的信息失败：{e}")
+
+    def open_current_code_product_spec_dialog(self):
+        store_id = self.current_store_id()
+        product_id = str(self.last_product_id or "").strip()
+        if not store_id or not product_id:
+            QMessageBox.information(self, "提示", "请先抓取并匹配当前链接。")
+            return
+        local_product = self._local_products_for_store(store_id).get(product_id)
+        if not local_product:
+            QMessageBox.information(self, "提示", "当前链接还未匹配到本店铺商品，请先创建/覆盖到本店铺。")
+            return
+        parent = self.owner or self.parent()
+        try:
+            if parent and hasattr(parent, "open_spec_dialog"):
+                parent.open_spec_dialog(local_product.get("id"), product_id, local_product.get("title", "") or self.last_title)
+            elif parent and hasattr(parent, "main_app") and hasattr(parent.main_app, "open_product_spec_dialog"):
+                parent.main_app.open_product_spec_dialog(self.db, local_product.get("id"), product_id, local_product.get("title", "") or self.last_title, parent)
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"打开规格与毛利管理失败：{e}")
+
+    def scan_current_page(self):
+        store_id = self._activate_browser_store_context()
+        if not store_id:
+            QMessageBox.warning(self, "提示", "请先选择要匹配的软件店铺。")
+            return
+
+        self._set_code_table_mode()
+        self._set_scan_controls_enabled(False)
+        QApplication.processEvents()
+        try:
+            info = self.monitor.inspect()
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"读取浏览器页面失败：{e}")
+            return
+        finally:
+            self._set_scan_controls_enabled(True)
+
+        self.last_debug_info = info
+        detail = info.get("current_code_detail") or {}
+        product_id = str(detail.get("product_id") or "").strip()
+        title = str(detail.get("title") or "").strip()
+        product_images = [str(x).strip() for x in (detail.get("product_images") or []) if str(x).strip()]
+        specs = self._dedupe_specs(detail.get("specs") or [])
+        self.last_product_id = product_id
+        self.last_title = title
+        self.last_product_images = product_images
+        self.last_specs = specs
+
+        local_products = self._local_products_for_store(store_id)
+        product_match = local_products.get(product_id) if product_id else None
+        matched = bool(product_match)
+        self.missing_ids = [] if matched or not product_id else [product_id]
+        software_title = product_match.get("title", "") if product_match else ""
+        local_specs = self._local_specs_for_product(product_match.get("id")) if product_match else {}
+
+        self.lbl_pdd_product_title.setText(f"标题: {title or '--'}")
+        self.lbl_software_product_title.setText(f"软件标题: {software_title or '--'}")
+        self._set_product_image_previews(product_images)
+        self.product_images_widget.setToolTip("\n".join(product_images))
+
+        self.table.setRowCount(len(specs))
+        for row, spec in enumerate(specs):
+            spec_code = str(spec.get("spec_code", "") or "").strip()
+            normalized_spec_code = self._normalize_spec_code(spec_code)
+            local_spec_name = local_specs.get(spec_code, "") or local_specs.get(normalized_spec_code, "") if spec_code else ""
+            spec_matched = bool(spec_code and (spec_code in local_specs or normalized_spec_code in local_specs))
+            local_spec_display = local_spec_name or ("已匹配规格" if spec_matched else ("未匹配规格" if matched and spec_code else ""))
+            values = [
+                spec.get("image", ""),
+                spec.get("spec_info", ""),
+                spec_code,
+                spec.get("price", ""),
+                "已匹配" if matched else "未匹配",
+                local_spec_display,
+                spec.get("raw_text", ""),
+            ]
+            for col, value in enumerate(values):
+                if col == 0:
+                    self._set_image_preview_cell(row, col, value)
+                    continue
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter)
+                if col == 4:
+                    item.setForeground(QColor("#27ae60" if matched else "#e74c3c"))
+                if col == 5:
+                    item.setForeground(QColor("#27ae60" if spec_matched else "#e67e22"))
+                self.table.setItem(row, col, item)
+
+        matched_specs = sum(1 for spec in specs if str(spec.get("spec_code", "") or "").strip() in local_specs)
+        self.lbl_summary.setText(
+            f"当前编码窗口：商品ID {product_id or '未识别'}，规格 {len(specs)} 条，"
+            f"图片 {len(product_images)} 张，{'已匹配本店商品' if matched else '未匹配本店商品'}，"
+            f"规格匹配 {matched_specs}/{len(specs)}。"
+        )
+        self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+        if hasattr(self, "btn_open_current_spec"):
+            self.btn_open_current_spec.setEnabled(bool(product_match))
+
+        if not product_id and not specs:
+            QMessageBox.information(
+                self,
+                "未识别到添加编码界面信息",
+                "当前页面没有读取到商品ID或规格信息。请确认已经手动打开“添加/编辑商品编码”窗口；如果仍为空，请提供该窗口里标题、商品ID、规格行外层容器的 class/id 名称。",
+            )
+
+    def scan_price_management(self):
+        store_id = self._activate_browser_store_context()
+        if not store_id:
+            QMessageBox.warning(self, "提示", "请先选择要匹配的软件店铺。")
+            return
+
+        self._set_price_table_mode()
+        self._set_scan_controls_enabled(False)
+        self.lbl_summary.setText("正在滚动并抓取当前价格管理页面，请稍候...")
+        QApplication.processEvents()
+        try:
+            info = self.monitor.inspect_price_management()
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"读取价格管理页面失败：{e}")
+            return
+        finally:
+            self._set_scan_controls_enabled(True)
+
+        self.last_debug_info = info
+        self.last_price_management_info = info
+        self.price_sync_rows = {}
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        if not info.get("is_price_management"):
+            self.lbl_summary.setText(info.get("status") or "当前页面不是价格管理界面。")
+            self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+            QMessageBox.information(self, "不是价格管理界面", "当前页面未识别到价格管理、券前价、商家出资优惠或单件预估实收。请先进入拼多多价格管理页面。")
+            return
+
+        local_products = self._local_products_for_store(store_id)
+        items = info.get("items") or []
+        matched_items = []
+        product_unmatched_count = 0
+        full_matched_count = 0
+        total_unmatched_count = 0
+        spec_unmatched_count = 0
+        price_unmatched_count = 0
+        marketing_unmatched_count = 0
+        total_specs = 0
+        matched_specs = 0
+        blocked_specs = 0
+        for item in items:
+            product_id = str(item.get("product_id") or "").strip()
+            local_product = local_products.get(product_id)
+            if not local_product:
+                product_unmatched_count += 1
+                total_unmatched_count += 1
+                if product_id:
+                    self.price_unmatched_records[product_id] = {
+                        "product_id": product_id,
+                        "title": item.get("title", ""),
+                        "reasons": self._price_unmatched_reason_labels({}, product_unmatched=True),
+                    }
+                continue
+            compare = self._build_price_compare_rows(item, local_product)
+            if not compare["rows"]:
+                self.price_unmatched_spec_product_ids.append(product_id)
+                total_unmatched_count += 1
+                spec_unmatched_count += 1
+                self.price_unmatched_records[product_id] = {
+                    "product_id": product_id,
+                    "title": item.get("title") or local_product.get("title", ""),
+                    "reasons": self._price_unmatched_reason_labels({"spec": True}),
+                }
+                continue
+            if any(not row.get("local_spec_id") for row in compare["rows"]):
+                self.price_unmatched_spec_product_ids.append(product_id)
+            categories = self._price_compare_categories(compare)
+            if compare.get("all_matched"):
+                full_matched_count += 1
+                self.price_current_page_matched_product_ids.append(product_id)
+            else:
+                total_unmatched_count += 1
+                if categories["spec"]:
+                    spec_unmatched_count += 1
+                if categories["price"]:
+                    price_unmatched_count += 1
+                if categories["marketing"]:
+                    marketing_unmatched_count += 1
+                self.price_unmatched_records[product_id] = {
+                    "product_id": product_id,
+                    "title": item.get("title") or local_product.get("title", ""),
+                    "reasons": self._price_unmatched_reason_labels(categories),
+                }
+            matched_items.append((item, local_product, compare))
+            total_specs += len(item.get("specs") or [])
+            matched_specs += len(compare["rows"])
+            blocked_specs += sum(1 for row in compare["rows"] if not row.get("row_can_sync"))
+
+        display_rows = []
+        for item, local_product, compare in matched_items:
+            product_id = str(item.get("product_id") or "")
+            self.price_sync_rows[product_id] = compare
+            self.price_result_items[product_id] = {"item": item, "local_product": local_product}
+            for row in compare["rows"]:
+                display_rows.append(row)
+            self._add_price_result_card(item, local_product, compare)
+
+        self.price_unmatched_spec_product_ids = sorted(set(self.price_unmatched_spec_product_ids), key=self.price_unmatched_spec_product_ids.index)
+        if hasattr(self, "btn_copy_unmatched_specs"):
+            self.btn_copy_unmatched_specs.setEnabled(True)
+        self.lbl_summary.setText(
+            f"价格管理抓取完成：当前抓取链接 {len(items)} 个，商品ID匹配 {len(matched_items)} 个，完全匹配 {full_matched_count} 个，"
+            f"总未匹配 {total_unmatched_count} 个；未匹配规格 {spec_unmatched_count} 个，未匹配价格 {price_unmatched_count} 个，"
+            f"未匹配活动/营销工具 {marketing_unmatched_count} 个，商品ID未匹配 {product_unmatched_count} 个。"
+        )
+        self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+
+        if not display_rows:
+            QMessageBox.information(self, "没有可展示的匹配链接", "已抓到价格管理页面，但没有商品ID能匹配当前软件店铺，或没有识别到规格价格。")
+
+    def sync_price_management_product(self, product_id):
+        product_id = str(product_id or "").strip()
+        compare = self.price_sync_rows.get(product_id)
+        if not compare:
+            QMessageBox.warning(self, "提示", "当前链接没有可同步的价格管理抓取结果。")
+            return
+        if not compare.get("can_sync"):
+            QMessageBox.information(self, "无需同步", "该链接已匹配，或存在规格名称不一致/缺少关键价格字段，不能同步。")
+            return
+
+        rows = compare.get("rows") or []
+        product_db_id = rows[0].get("product_db_id") if rows else None
+        if not product_db_id:
+            QMessageBox.warning(self, "提示", "没有找到软件商品，不能同步。")
+            return
+
+        try:
+            old_product_rows = self.db.safe_fetchall(
+                "SELECT coupon_amount, new_customer_discount, is_limited_time, is_marketing FROM products WHERE id=?",
+                (product_db_id,),
+            )
+            old_coupon, old_new_customer, old_limited, old_marketing = old_product_rows[0] if old_product_rows else (0, 0, 0, 0)
+            changes = []
+            for row in rows:
+                if not row.get("row_can_sync"):
+                    continue
+                spec_id = row.get("local_spec_id")
+                new_price = row.get("before_price")
+                if not spec_id or new_price is None:
+                    continue
+                old_price = row.get("local_sale_price")
+                if not self._money_equal(old_price, new_price):
+                    changes.append(f"{row.get('spec_name')} 价格 {self._fmt_money(old_price)}→{self._fmt_money(new_price)}")
+                self.db.safe_execute(
+                    "UPDATE product_specs SET sale_price=? WHERE id=?",
+                    (float(new_price), spec_id),
+                )
+
+            target_discount = compare.get("target_discount") or {}
+            target_tag = compare.get("target_tag") or {}
+            coupon_amount = float(target_discount.get("coupon_amount") or 0)
+            new_customer_discount = float(target_discount.get("new_customer_discount") or 0)
+            is_limited_time = int(target_tag.get("is_limited_time") or 0)
+            is_marketing = int(target_tag.get("is_marketing") or 0)
+            if not self._money_equal(old_coupon or 0, coupon_amount):
+                changes.append(f"优惠券 {self._fmt_money(old_coupon)}→{self._fmt_money(coupon_amount)}")
+            if not self._money_equal(old_new_customer or 0, new_customer_discount):
+                changes.append(f"新客立减 {self._fmt_money(old_new_customer)}→{self._fmt_money(new_customer_discount)}")
+            if int(old_limited or 0) != is_limited_time:
+                changes.append(f"限时限量购 {'已报名' if old_limited else '未报名'}→{'已报名' if is_limited_time else '未报名'}")
+            if int(old_marketing or 0) != is_marketing:
+                changes.append(f"营销活动 {'已报名' if old_marketing else '未报名'}→{'已报名' if is_marketing else '未报名'}")
+
+            self.db.safe_execute(
+                "UPDATE products SET coupon_amount=?, new_customer_discount=?, is_limited_time=?, is_marketing=? WHERE id=?",
+                (coupon_amount, new_customer_discount, is_limited_time, is_marketing, product_db_id),
+            )
+            self._record_product_operation(
+                product_db_id,
+                f"拼多多价格管理同步：商品ID {product_id}；" + ("；".join(changes) if changes else "无变化"),
+                metric="价格营销同步",
+                old="",
+                new="；".join(changes),
+                change_type="pdd_price_marketing_sync",
+            )
+
+            parent = self.owner or self.parent()
+            if parent:
+                if hasattr(parent, "load_products"):
+                    parent.load_products()
+                if hasattr(parent, "calculate_total_margin"):
+                    parent.calculate_total_margin()
+            self.refresh_price_management_product(product_id)
+            QMessageBox.information(self, "同步完成", f"已同步商品 {product_id} 的价格和营销信息。")
+        except Exception as e:
+            QMessageBox.warning(self, "同步失败", f"同步价格和营销失败：{e}")
+
+    def open_price_product_spec_dialog(self, product_id):
+        product_id = str(product_id or "").strip()
+        compare = self.price_sync_rows.get(product_id) or {}
+        rows = compare.get("rows") or []
+        product_db_id = rows[0].get("product_db_id") if rows else None
+        product_title = rows[0].get("product_title") if rows else ""
+        if not product_db_id:
+            QMessageBox.warning(self, "提示", "没有找到软件商品，不能打开规格与毛利管理。")
+            return
+
+        parent = self.owner or self.parent()
+        dialog = None
+        try:
+            if parent and hasattr(parent, "open_spec_dialog"):
+                dialog = parent.open_spec_dialog(product_db_id, product_id, product_title)
+            elif parent and hasattr(parent, "main_app") and hasattr(parent.main_app, "open_product_spec_dialog"):
+                dialog = parent.main_app.open_product_spec_dialog(self.db, product_db_id, product_id, product_title, parent)
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"打开规格与毛利管理失败：{e}")
+            return
+
+        if dialog is not None and hasattr(dialog, "finished"):
+            dialog.finished.connect(lambda result=0, pid=product_id: self._refresh_price_product_after_edit(pid, result))
+        elif dialog is not None and hasattr(dialog, "destroyed"):
+            dialog.destroyed.connect(lambda _=None: None)
+        self.lbl_summary.setText(f"已打开商品ID {product_id} 的规格与毛利管理窗口。保存后会刷新该链接匹配状态，取消不刷新。")
+
+    def _refresh_price_product_after_edit(self, product_id, result):
+        if result != QDialog.Accepted:
+            return
+        QTimer.singleShot(120, lambda pid=product_id: self.refresh_price_management_product(pid))
+
+    def refresh_price_management_product(self, product_id):
+        product_id = str(product_id or "").strip()
+        cached = self.price_result_items.get(product_id) or {}
+        item = cached.get("item")
+        if not item:
+            self.lbl_summary.setText(f"商品ID {product_id} 没有缓存的价格管理结果，无法单独刷新。")
+            return
+        local_product = self._local_products_for_store(self.current_store_id()).get(product_id)
+        if not local_product:
+            self.lbl_summary.setText(f"商品ID {product_id} 当前不在本店铺，无法刷新匹配状态。")
+            return
+        old_card = self.price_result_cards.get(product_id)
+        insert_at = max(0, self.price_scroll_layout.count() - 1)
+        if old_card is not None:
+            index = self.price_scroll_layout.indexOf(old_card)
+            if index >= 0:
+                insert_at = index
+                removed = self.price_scroll_layout.takeAt(index)
+                widget = removed.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        compare = self._build_price_compare_rows(item, local_product)
+        self.price_sync_rows[product_id] = compare
+        self.price_unmatched_spec_product_ids = [
+            pid for pid in (self.price_unmatched_spec_product_ids or []) if str(pid) != product_id
+        ]
+        if not compare.get("rows") or any(not row.get("local_spec_id") for row in compare.get("rows") or []):
+            self.price_unmatched_spec_product_ids.append(product_id)
+        if compare.get("all_matched"):
+            self.price_unmatched_records.pop(product_id, None)
+            self.price_current_page_matched_product_ids.append(product_id)
+        else:
+            categories = self._price_compare_categories(compare)
+            self.price_unmatched_records[product_id] = {
+                "product_id": product_id,
+                "title": item.get("title") or local_product.get("title", ""),
+                "reasons": self._price_unmatched_reason_labels(categories),
+            }
+        self.price_unmatched_spec_product_ids = sorted(set(self.price_unmatched_spec_product_ids), key=self.price_unmatched_spec_product_ids.index)
+        self.price_current_page_matched_product_ids = sorted(set(self.price_current_page_matched_product_ids), key=self.price_current_page_matched_product_ids.index)
+        if hasattr(self, "btn_copy_unmatched_specs"):
+            self.btn_copy_unmatched_specs.setEnabled(True)
+        if self.unmatched_task_window is not None:
+            if compare.get("all_matched"):
+                self.unmatched_task_window.remove_product_ids([product_id])
+            else:
+                self.unmatched_task_window.upsert_records([self.price_unmatched_records[product_id]])
+        self._add_price_result_card(item, local_product, compare, insert_at=insert_at)
+        self.lbl_summary.setText(f"商品ID {product_id} 已根据保存后的软件规格刷新匹配状态。")
+
+    def copy_missing_ids(self):
+        QApplication.clipboard().setText("\n".join(self.missing_ids))
+        self.lbl_summary.setText(f"已复制 {len(self.missing_ids)} 个未匹配商品ID。")
+
+    def show_unmatched_task_window(self):
+        if self.unmatched_task_window is None:
+            self.unmatched_task_window = PddUnmatchedTaskWindow()
+            self.unmatched_task_window.destroyed.connect(lambda _=None: setattr(self, "unmatched_task_window", None))
+        self.unmatched_task_window.remove_product_ids(self.price_current_page_matched_product_ids)
+        self.unmatched_task_window.upsert_records(list((self.price_unmatched_records or {}).values()))
+        if self.unmatched_task_window.isMinimized():
+            self.unmatched_task_window.showNormal()
+        else:
+            self.unmatched_task_window.show()
+        self.unmatched_task_window.raise_()
+        self.unmatched_task_window.activateWindow()
+        self.lbl_summary.setText(
+            f"已生成未匹配置顶窗口：本次新增/更新 {len(self.price_unmatched_records or {})} 个未匹配链接。"
+        )
+
+    def copy_unmatched_spec_product_ids(self):
+        ids = [str(product_id).strip() for product_id in (self.price_unmatched_spec_product_ids or []) if str(product_id).strip()]
+        ids = sorted(set(ids), key=ids.index)
+        if not ids:
+            self.lbl_summary.setText("当前没有未匹配规格的链接ID。")
+            return
+        QApplication.clipboard().setText("\n".join(ids))
+        self.lbl_summary.setText(f"已复制 {len(ids)} 个未匹配规格的链接ID。")
+
+    def copy_debug_json(self):
+        QApplication.clipboard().setText(json.dumps(self.last_debug_info or {}, ensure_ascii=False, indent=2))
+        self.lbl_summary.setText("已复制当前页面调试JSON。")
+
+
+class PddLinkControlDialog(QDialog):
+    """拼多多链接抓取主控小窗口。"""
+
+    def __init__(self, db, monitor, default_store_id=None, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.monitor = monitor
+        self.default_store_id = default_store_id
+        self.code_dialog = None
+        self.price_dialog = None
+        self.setWindowTitle("拼多多链接抓取")
+        self.resize(460, 260)
+        self.init_ui()
+        self.load_stores()
+        QTimer.singleShot(250, self.refresh_browser_display)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        store_row = QHBoxLayout()
+        store_row.addWidget(QLabel("店铺"))
+        self.combo_store = QComboBox()
+        self.combo_store.setMinimumWidth(260)
+        store_row.addWidget(self.combo_store, 1)
+        layout.addLayout(store_row)
+
+        self.lbl_browser_display = QLabel("浏览器状态读取中...")
+        self.lbl_browser_display.setWordWrap(True)
+        self.lbl_browser_display.setMinimumHeight(86)
+        self.lbl_browser_display.setStyleSheet(
+            "background-color: #111827; color: #d1fae5; border-radius: 6px; padding: 10px; font-size: 12px;"
+        )
+        layout.addWidget(self.lbl_browser_display)
+
+        button_row = QHBoxLayout()
+        self.btn_open_browser = QPushButton("打开商家端")
+        self.btn_open_browser.clicked.connect(self.open_browser)
+        button_row.addWidget(self.btn_open_browser)
+
+        self.btn_open_code = QPushButton("抓取添加编码界面")
+        self.btn_open_code.clicked.connect(self.open_code_dialog)
+        button_row.addWidget(self.btn_open_code)
+
+        self.btn_open_price = QPushButton("抓取价格管理")
+        self.btn_open_price.clicked.connect(self.open_price_dialog)
+        button_row.addWidget(self.btn_open_price)
+        layout.addLayout(button_row)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+        close_row.addWidget(btn_close)
+        layout.addLayout(close_row)
+
+    def load_stores(self):
+        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
+        self.combo_store.clear()
+        for store_id, store_name in rows:
+            self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
+        if self.default_store_id is not None:
+            for i in range(self.combo_store.count()):
+                if self.combo_store.itemData(i) == self.default_store_id:
+                    self.combo_store.setCurrentIndex(i)
+                    break
+
+    def current_store_id(self):
+        return self.combo_store.currentData()
+
+    def _activate_browser_store_context(self):
+        store_id = self.current_store_id()
+        if store_id and hasattr(self.monitor, "set_store_context"):
+            self.monitor.set_store_context(store_id)
+        return store_id
+
+    def open_browser(self):
+        try:
+            store_id = self._activate_browser_store_context()
+            self.monitor.open_merchant_page(store_id)
+            self.refresh_browser_display()
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"打开商家端失败：{e}")
+
+    def _window_parent(self):
+        return self.parent() or self
+
+    def _show_result_dialog(self, dialog):
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_code_dialog(self):
+        self._activate_browser_store_context()
+        self.refresh_browser_display()
+        if self.code_dialog is None:
+            self.code_dialog = PddProductMatchDialog(
+                self.db,
+                self.monitor,
+                default_store_id=self.current_store_id(),
+                parent=None,
+                mode="code",
+                store_id_provider=self.current_store_id,
+                owner=self._window_parent(),
+            )
+            self.code_dialog.destroyed.connect(lambda _=None: setattr(self, "code_dialog", None))
+        self._show_result_dialog(self.code_dialog)
+
+    def open_price_dialog(self):
+        self._activate_browser_store_context()
+        self.refresh_browser_display()
+        if self.price_dialog is None:
+            self.price_dialog = PddProductMatchDialog(
+                self.db,
+                self.monitor,
+                default_store_id=self.current_store_id(),
+                parent=None,
+                mode="price",
+                store_id_provider=self.current_store_id,
+                owner=self._window_parent(),
+            )
+            self.price_dialog.destroyed.connect(lambda _=None: setattr(self, "price_dialog", None))
+        self._show_result_dialog(self.price_dialog)
+
+    def refresh_browser_display(self):
+        try:
+            self._activate_browser_store_context()
+            info = self.monitor.inspect()
+        except Exception as e:
+            self.lbl_browser_display.setText(f"浏览器状态：检测失败\n{e}")
+            return
+        title = info.get("title") or "--"
+        url = info.get("url") or "--"
+        status = info.get("status") or "未知状态"
+        detail = info.get("current_code_detail") or {}
+        page_type = "价格管理" if "价格管理" in title or "goods-price-management" in url else "添加编码界面" if detail.get("product_id") or detail.get("specs") else "商家端"
+        code_text = f"添加编码：{detail.get('product_id') or '未识别'} / 规格 {len(detail.get('specs') or [])} 条"
+        self.lbl_browser_display.setText(
+            f"浏览器状态：{status}\n页面类型：{page_type}\n标题：{title}\n{code_text}\nURL：{url[:90]}"
+        )
+        self.lbl_browser_display.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
 
 
 class ScalableTableWidget(QTableWidget):
@@ -1399,6 +3262,9 @@ class StoreMarginDialog(QDialog):
         self.ai_report_debug_dialog = None
         self.ai_report_thread = None
         self.ai_report_worker = None
+        self.pdd_browser_monitor = None
+        self.pdd_product_match_dialog = None
+        self.pdd_link_control_dialog = None
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
         self.resize(1700, 800)
@@ -1473,6 +3339,30 @@ class StoreMarginDialog(QDialog):
     def fade_out_toast(self):
         """淡出气泡提示"""
         self.toast_fade_out_animation.start()
+
+    def get_pdd_browser_monitor(self):
+        if self.pdd_browser_monitor is None:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
+        return self.pdd_browser_monitor
+
+    def open_pdd_merchant_test(self):
+        """打开拼多多链接抓取主控窗口。"""
+        try:
+            monitor = self.get_pdd_browser_monitor()
+            if self.pdd_link_control_dialog is None:
+                self.pdd_link_control_dialog = PddLinkControlDialog(
+                    self.db,
+                    monitor,
+                    default_store_id=self.store_id,
+                    parent=self,
+                )
+                self.pdd_link_control_dialog.destroyed.connect(lambda _=None: setattr(self, "pdd_link_control_dialog", None))
+            self.pdd_link_control_dialog.show()
+            self.pdd_link_control_dialog.raise_()
+            self.pdd_link_control_dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"打开抓取窗口失败：{e}")
 
     def get_sys_id_by_user_id(self, user_id):
         """根据用户ID获取系统ID"""
@@ -2303,6 +4193,27 @@ class StoreMarginDialog(QDialog):
         self.btn_link_changes.clicked.connect(self.open_link_changes_dialog)
 
         self.btn_display_settings = QPushButton("设置")
+        self.btn_pdd_merchant_test = QPushButton("抓取链接")
+        self.btn_pdd_merchant_test.setToolTip("打开拼多多链接抓取窗口，可抓取添加编码界面和价格管理")
+        self.btn_pdd_merchant_test.setStyleSheet("""
+            QPushButton {
+                background-color: #f39c12;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #d68910;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+            }
+        """)
+        self.btn_pdd_merchant_test.clicked.connect(self.open_pdd_merchant_test)
+
         self.btn_display_settings.setStyleSheet("""
             QPushButton {
                 background-color: #7f8c8d;
@@ -2392,6 +4303,7 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_ai_report)
         btn_layout.addWidget(self.btn_promotion_data)
         btn_layout.addWidget(self.btn_link_changes)
+        btn_layout.addWidget(self.btn_pdd_merchant_test)
         btn_layout.addWidget(self.btn_display_settings)
         btn_layout.addSpacing(10)
         btn_layout.addWidget(self.lbl_total_margin)
@@ -2408,6 +4320,9 @@ class StoreMarginDialog(QDialog):
         """窗口大小改变时同步两表列宽"""
         super().resizeEvent(event)
         self.sync_table_widths()
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
 
     def _is_link_change_record(self, record):
         if not isinstance(record, dict):
@@ -2615,7 +4530,7 @@ class StoreMarginDialog(QDialog):
         products_raw = self.db.safe_fetchall(
             """SELECT id, name, title, image_data, sort_order, product_category_label,
                       store_weight, store_weight_locked
-               FROM products WHERE store_id=?""",
+               FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0""",
             (self.store_id,),
         )
         if hasattr(self.main_app, "_sort_products_for_display"):
@@ -3015,6 +4930,63 @@ class StoreMarginDialog(QDialog):
             f"¥{daily_profit:.2f}",
         ]
 
+    def _manual_record_numeric_values_for_export(self, record):
+        days = 1
+        if record[0] and record[1]:
+            try:
+                start_dt = datetime.strptime(record[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(record[1], "%Y-%m-%d")
+                days = max(1, (end_dt - start_dt).days + 1)
+            except Exception:
+                days = 1
+        net_profit = float(record[17] or 0)
+        return [
+            None,
+            float(record[2] or 0),
+            float(record[3] or 0),
+            float(record[4] or 0),
+            float(record[11] or 0),
+            float(record[5] or 0),
+            float(record[12] or 0),
+            float(record[6] or 0),
+            float(record[13] or 0),
+            float(record[14] or 0),
+            float(record[7] or 0),
+            float(record[15] or 0),
+            float(record[16] or 0),
+            float(record[8] or 0),
+            float(record[9] or 0),
+            float(record[10] or 0),
+            net_profit,
+            float(record[18] or 0),
+            float(record[19] or 0),
+            net_profit / days if days else 0,
+        ]
+
+    def _manual_compare_export_row(self, current, previous):
+        current_values = self._manual_record_numeric_values_for_export(current)
+        previous_values = self._manual_record_numeric_values_for_export(previous)
+        rate_cols = {4, 6, 8, 11, 17}
+        values = ["较上期"]
+        directions = ["flat"]
+        for col in range(1, 20):
+            curr = current_values[col] or 0
+            prev = previous_values[col] or 0
+            diff = curr - prev
+            if abs(diff) < 0.000001:
+                values.append("→ 0.0%")
+                directions.append("flat")
+                continue
+            icon = "↑" if diff > 0 else "↓"
+            directions.append("up" if diff > 0 else "down")
+            if col in rate_cols:
+                values.append(f"{icon} {abs(diff):.1f}%")
+            elif abs(prev) > 0.000001:
+                values.append(f"{icon} {abs(diff / abs(prev) * 100):.1f}%")
+            else:
+                values.append(f"{icon} 新增")
+        return values, directions
+
     def _style_excel_sheet(self, ws, widths=None):
         header_fill = PatternFill("solid", fgColor="D9EAF7")
         header_font = Font(bold=True, color="1F2933")
@@ -3031,18 +5003,89 @@ class StoreMarginDialog(QDialog):
             for col_idx, width in widths.items():
                 ws.column_dimensions[get_column_letter(col_idx)].width = width
 
+    def _style_historical_export_sheet(self, ws, row_types, compare_directions, widths=None):
+        header_fill = PatternFill("solid", fgColor="EAF4FF")
+        header_font = Font(bold=True, color="1F2933", size=11)
+        manual_font = Font(bold=True, color="1B8F3A", size=11)
+        calculated_font = Font(bold=True, color="1D4ED8", size=11)
+        neutral_font = Font(bold=True, color="374151", size=11)
+        compare_up_font = Font(bold=True, color="16A34A", size=11)
+        compare_down_font = Font(bold=True, color="DC2626", size=11)
+        compare_flat_font = Font(bold=True, color="6B7280", size=11)
+        white_fill = PatternFill("solid", fgColor="FFFFFF")
+        compare_fill = PatternFill("solid", fgColor="F7F8FA")
+        thin = Side(style="thin", color="CAD5E2")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        manual_cols = {2, 3, 4, 6, 8, 11, 14, 15, 16}
+
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = border
+                if cell.row == 1:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                else:
+                    row_type = row_types.get(cell.row, "data")
+                    if row_type == "compare":
+                        cell.fill = compare_fill
+                        direction = compare_directions.get((cell.row, cell.column), "flat")
+                        if cell.column == 1:
+                            cell.font = neutral_font
+                        elif direction == "up":
+                            cell.font = compare_up_font
+                        elif direction == "down":
+                            cell.font = compare_down_font
+                        else:
+                            cell.font = compare_flat_font
+                    else:
+                        cell.fill = white_fill
+                        if cell.column == 1:
+                            cell.font = neutral_font
+                        elif cell.column in manual_cols:
+                            cell.font = manual_font
+                        else:
+                            cell.font = calculated_font
+        if widths:
+            for col_idx, width in widths.items():
+                ws.column_dimensions[get_column_letter(col_idx)].width = width
+
     def _write_historical_export_sheet(self, wb):
         ws = wb.active
         ws.title = "过往数据分析"
         ws.append(self._excel_headers(self.margin_data_table))
-        for record in self.load_manual_data():
+        row_types = {}
+        compare_directions = {}
+        records = self.load_manual_data()
+        for index, record in enumerate(records):
             ws.append(self._format_manual_record_for_export(record))
-        self._style_excel_sheet(ws, {1: 18, 2: 12, 3: 14, 4: 14, 5: 12, 6: 14, 7: 12, 8: 12, 9: 12, 10: 12})
+            data_row = ws.max_row
+            row_types[data_row] = "data"
+            ws.row_dimensions[data_row].height = 34
+            if index > 0:
+                compare_values, directions = self._manual_compare_export_row(record, records[index - 1])
+                ws.append(compare_values)
+                compare_row = ws.max_row
+                row_types[compare_row] = "compare"
+                ws.row_dimensions[compare_row].height = 24
+                for col_idx, direction in enumerate(directions, start=1):
+                    compare_directions[(compare_row, col_idx)] = direction
+        self._style_historical_export_sheet(
+            ws,
+            row_types,
+            compare_directions,
+            {
+                1: 20, 2: 12, 3: 14, 4: 14, 5: 12,
+                6: 14, 7: 12, 8: 12, 9: 12, 10: 12,
+                11: 12, 12: 12, 13: 14, 14: 12, 15: 14,
+                16: 12, 17: 14, 18: 12, 19: 14, 20: 14,
+            }
+        )
         ws.freeze_panes = "A2"
 
     def _product_image_map_for_export(self):
         rows = self.db.safe_fetchall(
-            "SELECT name, image_data FROM products WHERE store_id=?",
+            "SELECT name, image_data FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
             (self.store_id,)
         )
         return {str(name): image_data for name, image_data in rows if name is not None and image_data}
@@ -3469,7 +5512,7 @@ class StoreMarginDialog(QDialog):
             return {"available": False, "range": range_text, "items": [], "note": "无有效日期范围，未读取商品操作记录"}
 
         products = self.db.safe_fetchall(
-            "SELECT id, name, title FROM products WHERE store_id=? ORDER BY sort_order",
+            "SELECT id, name, title FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0 ORDER BY sort_order",
             (self.store_id,)
         )
         if not products:
@@ -4269,7 +6312,7 @@ class StoreMarginDialog(QDialog):
                 return
 
             products = self.db.safe_fetchall(
-                "SELECT id, name, title, image_data FROM products WHERE store_id=?",
+            "SELECT id, name, title, image_data FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                 (self.store_id,)
             )
             product_code_to_id = {str(name).strip(): prod_id for prod_id, name, _title, _image_data in products if name is not None}
@@ -5359,7 +7402,7 @@ class StoreMarginDialog(QDialog):
 
     def open_spec_dialog(self, sys_id, prod_id, prod_title):
         """通过 main_app 打开规格对话框，避免 dialogs 依赖主模块中的 ProductSpecDialog"""
-        self.main_app.open_product_spec_dialog(self.db, sys_id, prod_id, prod_title, self)
+        return self.main_app.open_product_spec_dialog(self.db, sys_id, prod_id, prod_title, self)
 
     def import_orders(self):
         """导入订单功能"""
@@ -5390,7 +7433,7 @@ class StoreMarginDialog(QDialog):
             status_col = col_mapping.get("order_status")
             actual_amount_col = col_mapping.get("actual_amount")
             products_in_store = self.db.safe_fetchall(
-                "SELECT id, name FROM products WHERE store_id=? ORDER BY sort_order", (self.store_id,)
+                "SELECT id, name FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0 ORDER BY sort_order", (self.store_id,)
             )
             if not products_in_store:
                 QMessageBox.information(self, "提示", "当前店铺没有任何商品，请先添加商品")

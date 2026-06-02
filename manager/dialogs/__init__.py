@@ -4,6 +4,7 @@ from .records import OperationRecordDialog, DailyRecordDialog
 from .store_margin import StoreMarginDialog
 from .cost_import import CostImportDialog
 from .cost_library import CostLibraryDialog
+from .material_library import MaterialLibraryDialog
 from .api_config import ApiConfigDialog
 from .profit import ProfitAnalysisDialog, ProfitCalculatorDialog, ProfitHistoryDialog
 from .daily_task import DailyTaskDialog, TaskReminderPopupDialog
@@ -15,6 +16,7 @@ __all__ = [
     "StoreMarginDialog",
     "CostImportDialog",
     "CostLibraryDialog",
+    "MaterialLibraryDialog",
     "ApiConfigDialog",
     "ProfitAnalysisDialog",
     "ProfitCalculatorDialog",

@@ -263,7 +263,7 @@ class DailyTaskDialog(QDialog):
 
         self.main_task_list.addItem("🔴 亏损链接优化 - 检查所有亏损商品")
 
-        total_products = self.db.safe_fetchall("SELECT COUNT(*) FROM products")
+        total_products = self.db.safe_fetchall("SELECT COUNT(*) FROM products WHERE COALESCE(is_archived, 0)=0")
         total = total_products[0][0] if total_products and total_products[0][0] else 0
 
         self.task_data = {
@@ -371,6 +371,7 @@ class DailyTaskDialog(QDialog):
                    (SELECT COUNT(*) FROM product_specs WHERE product_id = p.id) as spec_count
             FROM products p
             LEFT JOIN stores s ON p.store_id = s.id
+            WHERE COALESCE(p.is_archived, 0)=0
             ORDER BY s.name, p.name
         """)
 

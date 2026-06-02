@@ -31,6 +31,8 @@ PROMOTION_COLUMNS = [
     ("net_transaction_amount", "净交易额(元)"),
     ("net_roi", "净实际投产比"),
     ("net_orders", "净成交笔数"),
+    ("net_profit", "净利润"),
+    ("net_margin_rate", "净利率"),
     ("cost_per_net_order", "每笔净成交花费(元)"),
     ("cpc", "单次点击成本(CPC)"),
     ("impressions", "曝光量"),
@@ -58,6 +60,8 @@ PROMOTION_COLUMN_WIDTHS = {
     "net_transaction_amount": 98,
     "net_roi": 88,
     "net_orders": 78,
+    "net_profit": 86,
+    "net_margin_rate": 78,
     "cost_per_net_order": 112,
     "net_amount_per_order": 112,
     "cpc": 96,
@@ -78,6 +82,8 @@ PROMOTION_COLUMN_LIMITS = {
     "net_transaction_amount": (48, 96),
     "net_roi": (34, 72),
     "net_orders": (34, 70),
+    "net_profit": (42, 88),
+    "net_margin_rate": (38, 78),
     "cost_per_net_order": (48, 98),
     "net_amount_per_order": (48, 98),
     "cpc": (46, 86),
@@ -89,7 +95,10 @@ PROMOTION_COLUMN_LIMITS = {
     "click_conversion_rate": (42, 82),
 }
 
-DIRECT_COLUMNS = [key for key, _label in PROMOTION_COLUMNS if key not in ("cpc", "promotion_impression_share")]
+DIRECT_COLUMNS = [
+    key for key, _label in PROMOTION_COLUMNS
+    if key not in ("cpc", "promotion_impression_share", "net_profit", "net_margin_rate")
+]
 NUMERIC_COLUMNS = [key for key, _label in PROMOTION_COLUMNS if key not in ("product_id", "product_title", "bid_method")]
 HISTORY_NUMERIC_COLUMNS = set(NUMERIC_COLUMNS) | {"net_amount_per_order"}
 CORE_COMPARE_COLUMNS = [
@@ -465,9 +474,15 @@ class PromotionDataDialog(QDialog):
         except Exception:
             order = []
         valid = [key for key in order if key in DEFAULT_PROMOTION_COLUMN_ORDER]
-        for key in DEFAULT_PROMOTION_COLUMN_ORDER:
-            if key not in valid:
-                valid.append(key)
+        for index, key in enumerate(DEFAULT_PROMOTION_COLUMN_ORDER):
+            if key in valid:
+                continue
+            insert_at = len(valid)
+            for previous_key in reversed(DEFAULT_PROMOTION_COLUMN_ORDER[:index]):
+                if previous_key in valid:
+                    insert_at = valid.index(previous_key) + 1
+                    break
+            valid.insert(insert_at, key)
         return valid
 
     def _save_column_order(self, order):
@@ -547,6 +562,8 @@ class PromotionDataDialog(QDialog):
             "net_transaction_amount": "净交易额\n(元)",
             "transaction_amount": "交易额\n(元)",
             "net_roi": "净实际\n投产比",
+            "net_profit": "净利润",
+            "net_margin_rate": "净利率",
         }
         return breaks.get(key, label)
 
@@ -750,6 +767,57 @@ class PromotionDataDialog(QDialog):
         rows = self.db.safe_fetchall("SELECT id, name, title FROM products WHERE store_id=?", (self.store_id,))
         return {str(name or "").strip(): {"sys_id": sys_id, "title": title or ""} for sys_id, name, title in rows}
 
+    def _calculate_product_margin_decimal_snapshot(self, product_sys_id):
+        specs = self.db.safe_fetchall(
+            "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+            (product_sys_id,),
+        )
+        if not specs:
+            return None
+        product_rows = self.db.safe_fetchall(
+            "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?",
+            (product_sys_id,),
+        )
+        coupon = float((product_rows[0][0] if product_rows else 0) or 0)
+        new_customer = float((product_rows[0][1] if product_rows else 0) or 0)
+        max_discount = max(coupon, new_customer)
+        margins = []
+        weighted_margin = 0.0
+        total_weight = 0.0
+        for spec_code, sale_price, weight in specs:
+            if sale_price is None or float(sale_price or 0) <= 0:
+                continue
+            cost_rows = self.db.safe_fetchall(
+                "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                (spec_code,),
+            )
+            cost = float((cost_rows[0][0] if cost_rows else 0) or 0)
+            final_price = float(sale_price or 0) - max_discount
+            if final_price <= 0 or cost <= 0:
+                continue
+            margin = (final_price - cost) / final_price
+            margins.append(margin)
+            weight_value = float(weight or 0)
+            if weight_value > 0:
+                weighted_margin += margin * weight_value
+                total_weight += weight_value
+        if total_weight > 0:
+            return weighted_margin / total_weight
+        if margins:
+            return sum(margins) / len(margins)
+        return None
+
+    def _calculate_promotion_profit_snapshot(self, product_sys_id, net_amount, cost):
+        net_amount = float(net_amount or 0)
+        cost = float(cost or 0)
+        if net_amount <= 0:
+            return -cost, (-100.0 if cost > 0 else 0.0)
+        margin_decimal = self._calculate_product_margin_decimal_snapshot(product_sys_id)
+        if margin_decimal is None:
+            return None, None
+        net_profit = net_amount * margin_decimal - cost - net_amount * 0.006
+        return net_profit, (net_profit / net_amount * 100)
+
     def _auto_detect_columns(self, headers):
         patterns = {
             "product_id": ["商品id", "商品id链接id", "链接id", "productid", "goodsid", "商品编号"],
@@ -866,6 +934,14 @@ class PromotionDataDialog(QDialog):
                 promo_impressions = item.get("promotion_impressions", 0.0)
                 item["cpc"] = cost / clicks if clicks else 0.0
                 item["promotion_impression_share"] = promo_impressions / impressions if impressions else 0.0
+                product_sys_id = product_map.get(product_id, {}).get("sys_id")
+                net_profit, net_margin_rate = self._calculate_promotion_profit_snapshot(
+                    product_sys_id,
+                    item.get("net_transaction_amount", 0),
+                    item.get("cost", 0),
+                )
+                item["net_profit"] = net_profit
+                item["net_margin_rate"] = net_margin_rate
                 rows_to_insert.append(item)
 
             self.db.safe_execute(
@@ -876,13 +952,14 @@ class PromotionDataDialog(QDialog):
                 self.db.safe_execute("""
                     INSERT OR REPLACE INTO promotion_daily_data
                     (store_id, record_date, product_id, product_title, bid_method, cost, transaction_amount, roi,
-                     net_transaction_amount, net_roi, net_orders, cost_per_net_order, cpc, impressions,
+                     net_transaction_amount, net_roi, net_orders, net_profit, net_margin_rate, cost_per_net_order, cpc, impressions,
                      clicks, promotion_impressions, promotion_impression_share, ctr, click_conversion_rate, imported_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     item["store_id"], item["record_date"], item["product_id"], item.get("product_title", ""), item["bid_method"],
                     item.get("cost", 0), item.get("transaction_amount", 0), item.get("roi", 0),
                     item.get("net_transaction_amount", 0), item.get("net_roi", 0), item.get("net_orders", 0),
+                    item.get("net_profit"), item.get("net_margin_rate"),
                     item.get("cost_per_net_order", 0), item.get("cpc", 0), item.get("impressions", 0),
                     item.get("clicks", 0), item.get("promotion_impressions", 0),
                     item.get("promotion_impression_share", 0), item.get("ctr", 0),
@@ -901,7 +978,8 @@ class PromotionDataDialog(QDialog):
                    pdd.bid_method, pdd.cost, pdd.transaction_amount, pdd.roi,
                    pdd.net_transaction_amount, pdd.net_roi, pdd.net_orders, pdd.cost_per_net_order,
                    pdd.cpc, pdd.impressions, pdd.clicks, pdd.promotion_impressions,
-                   pdd.promotion_impression_share, pdd.ctr, pdd.click_conversion_rate
+                   pdd.promotion_impression_share, pdd.ctr, pdd.click_conversion_rate,
+                   pdd.net_profit, pdd.net_margin_rate
             FROM promotion_daily_data pdd
             LEFT JOIN products p ON p.store_id=pdd.store_id AND p.name=pdd.product_id
             WHERE pdd.store_id=? AND pdd.record_date=?
@@ -962,13 +1040,18 @@ class PromotionDataDialog(QDialog):
                 "cpc": row[11], "impressions": row[12], "clicks": row[13],
                 "promotion_impressions": row[14], "promotion_impression_share": row[15],
                 "ctr": row[16], "click_conversion_rate": row[17],
+                "net_profit": row[18], "net_margin_rate": row[19],
             }
             title = row[1] or ""
             self._set_image_cell(row_idx, row[2])
             for col_idx, key in enumerate(self.column_order):
                 value = data.get(key, "")
-                if key in ("cost", "transaction_amount", "net_transaction_amount", "cost_per_net_order", "cpc"):
+                if key in ("net_profit", "net_margin_rate") and value is None:
+                    text = "--"
+                elif key in ("cost", "transaction_amount", "net_transaction_amount", "cost_per_net_order", "cpc", "net_profit"):
                     text = _fmt_money(value)
+                elif key == "net_margin_rate":
+                    text = f"{float(value or 0):.2f}%"
                 elif key in ("promotion_impression_share", "ctr", "click_conversion_rate"):
                     text = _fmt_ratio(value)
                 elif key in ("roi", "net_roi"):
@@ -977,9 +1060,11 @@ class PromotionDataDialog(QDialog):
                     text = _fmt_number(value, 0)
                 else:
                     text = str(value or "")
-                sort_value = value if key in NUMERIC_COLUMNS or key in ("cpc", "promotion_impression_share") else None
+                sort_value = value if value is not None and (key in NUMERIC_COLUMNS or key in ("cpc", "promotion_impression_share")) else None
                 item = NumericTableWidgetItem(text, sort_value)
                 item.setTextAlignment(Qt.AlignCenter)
+                if key in ("net_profit", "net_margin_rate") and value is not None:
+                    item.setForeground(QColor("#1b8f3a" if float(value or 0) >= 0 else "#c0392b"))
                 if key == "product_id":
                     font = item.font()
                     font.setPointSize(max(8, font.pointSize() - 10))
@@ -1037,9 +1122,9 @@ class PromotionImportHistoryDialog(QDialog):
 
         self.table = QTableWidget()
         self._headers = [
-            "导入日期", "周几", "链接数", "成交花费", "交易额", "净交易额", "净成交笔数", "导入时间", "操作"
+            "导入日期", "周几", "链接数", "成交花费", "交易额", "净交易额", "净成交笔数", "净利润", "净利率", "导入时间", "操作"
         ]
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(len(self._headers))
         self.table.setHorizontalHeaderLabels(self._headers)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1062,7 +1147,7 @@ class PromotionImportHistoryDialog(QDialog):
             SELECT record_date, COUNT(*) AS product_count,
                    COALESCE(SUM(cost), 0), COALESCE(SUM(transaction_amount), 0),
                    COALESCE(SUM(net_transaction_amount), 0), COALESCE(SUM(net_orders), 0),
-                   MAX(imported_at)
+                   SUM(net_profit), COUNT(net_profit), MAX(imported_at)
             FROM promotion_daily_data
             WHERE store_id=?
             GROUP BY record_date
@@ -1074,7 +1159,9 @@ class PromotionImportHistoryDialog(QDialog):
         rows = self._query_summary()
         self.table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
-            record_date, product_count, cost, transaction_amount, net_amount, net_orders, imported_at = row
+            record_date, product_count, cost, transaction_amount, net_amount, net_orders, net_profit, profit_count, imported_at = row
+            complete_profit = int(profit_count or 0) == int(product_count or 0)
+            net_margin_rate = (float(net_profit or 0) / float(net_amount or 0) * 100) if complete_profit and net_amount else None
             weekday = ""
             try:
                 dt = datetime.strptime(str(record_date), "%Y-%m-%d")
@@ -1089,21 +1176,33 @@ class PromotionImportHistoryDialog(QDialog):
                 _fmt_money(transaction_amount),
                 _fmt_money(net_amount),
                 _fmt_number(net_orders, 0),
+                "--" if not complete_profit else _fmt_money(net_profit),
+                "--" if net_margin_rate is None else f"{net_margin_rate:.2f}%",
                 imported_at or "",
             ]
-            sort_values = [record_date, None, product_count or 0, cost or 0, transaction_amount or 0, net_amount or 0, net_orders or 0, imported_at or ""]
+            sort_values = [
+                record_date, None, product_count or 0, cost or 0, transaction_amount or 0,
+                net_amount or 0, net_orders or 0,
+                None if not complete_profit else net_profit or 0,
+                net_margin_rate,
+                imported_at or "",
+            ]
             for col, value in enumerate(values):
                 item = NumericTableWidgetItem(str(value), sort_values[col])
                 item.setTextAlignment(Qt.AlignCenter)
+                if col in (7, 8) and complete_profit:
+                    compare_value = net_profit if col == 7 else net_margin_rate
+                    if compare_value is not None:
+                        item.setForeground(QColor("#1b8f3a" if float(compare_value or 0) >= 0 else "#c0392b"))
                 self.table.setItem(row_idx, col, item)
             btn_delete = QPushButton("删除")
             btn_delete.setStyleSheet("QPushButton { color: #c0392b; font-weight: bold; }")
             btn_delete.clicked.connect(lambda _=False, date=record_date: self.delete_date(date))
-            self.table.setCellWidget(row_idx, 8, btn_delete)
+            self.table.setCellWidget(row_idx, len(self._headers) - 1, btn_delete)
             self.table.setRowHeight(row_idx, 42)
         _resize_table_columns_by_values(
             self.table,
-            fixed_widths={8: 48},
+            fixed_widths={len(self._headers) - 1: 48},
             default_min=34,
             default_max=120,
             fill_viewport=True,
@@ -1117,7 +1216,7 @@ class PromotionImportHistoryDialog(QDialog):
             return
         _resize_table_columns_by_values(
             self.table,
-            fixed_widths={8: 48},
+            fixed_widths={len(self._headers) - 1: 48},
             default_min=34,
             default_max=120,
             fill_viewport=True,
@@ -1251,7 +1350,7 @@ class ProductPromotionHistoryDialog(QDialog):
         params = [self.store_id, self.product_id]
         sql = """
             SELECT record_date, bid_method, cost, transaction_amount, roi, net_transaction_amount,
-                   net_roi, net_orders, cost_per_net_order, cpc, impressions, clicks,
+                   net_roi, net_orders, net_profit, net_margin_rate, cost_per_net_order, cpc, impressions, clicks,
                    promotion_impressions, promotion_impression_share, ctr, click_conversion_rate
             FROM promotion_daily_data
             WHERE store_id=? AND product_id=?
@@ -1264,6 +1363,8 @@ class ProductPromotionHistoryDialog(QDialog):
 
     def _compare_text(self, key, current, previous):
         if previous is None:
+            return ""
+        if key in ("net_profit", "net_margin_rate") and current is None:
             return ""
         try:
             current = float(current or 0)
@@ -1285,8 +1386,12 @@ class ProductPromotionHistoryDialog(QDialog):
         return f"{base}\n{compare}" if compare else base
 
     def _format_history_cell_parts(self, key, value, previous):
-        if key in ("cost", "transaction_amount", "net_transaction_amount", "cost_per_net_order", "net_amount_per_order", "cpc"):
+        if key in ("net_profit", "net_margin_rate") and value is None:
+            base = "--"
+        elif key in ("cost", "transaction_amount", "net_transaction_amount", "cost_per_net_order", "net_amount_per_order", "cpc", "net_profit"):
             base = _fmt_money(value)
+        elif key == "net_margin_rate":
+            base = f"{float(value or 0):.2f}%"
         elif key in ("promotion_impression_share", "ctr", "click_conversion_rate"):
             base = _fmt_ratio(value)
         elif key in ("roi", "net_roi"):
@@ -1300,6 +1405,8 @@ class ProductPromotionHistoryDialog(QDialog):
 
     def _compare_color(self, key, current, previous):
         if key not in CORE_COMPARE_COLUMNS or previous is None:
+            return None
+        if key in ("net_profit", "net_margin_rate") and current is None:
             return None
         try:
             current = float(current or 0)
@@ -1324,6 +1431,9 @@ class ProductPromotionHistoryDialog(QDialog):
         amount = sum(float(row.get("transaction_amount") or 0) for row in row_maps)
         net_amount = sum(float(row.get("net_transaction_amount") or 0) for row in row_maps)
         net_orders = sum(float(row.get("net_orders") or 0) for row in row_maps)
+        profit_values = [float(row.get("net_profit") or 0) for row in row_maps if row.get("net_profit") is not None]
+        net_profit = sum(profit_values) if len(profit_values) == len(row_maps) else None
+        net_margin_rate = (net_profit / net_amount * 100) if net_profit is not None and net_amount else None
         impressions = sum(float(row.get("impressions") or 0) for row in row_maps)
         clicks = sum(float(row.get("clicks") or 0) for row in row_maps)
         promo_impressions = sum(float(row.get("promotion_impressions") or 0) for row in row_maps)
@@ -1345,6 +1455,8 @@ class ProductPromotionHistoryDialog(QDialog):
             f"净交易额 {_fmt_money(net_amount)}",
             f"净实际投产比 {net_roi:.2f}",
             f"净成交笔数 {_fmt_number(net_orders, 0)}",
+            f"净利润 {('--' if net_profit is None else _fmt_money(net_profit))}",
+            f"净利率 {('--' if net_margin_rate is None else f'{net_margin_rate:.2f}%')}",
             f"每笔净成交花费 {_fmt_money(cost_per_net_order)}",
             f"每笔净成交金额 {_fmt_money(net_amount_per_order)}",
             f"曝光量 {_fmt_number(impressions, 0)}",
@@ -1382,8 +1494,12 @@ class ProductPromotionHistoryDialog(QDialog):
                     text = f"{base_text}\n{compare_text}" if compare_text else base_text
                     compare_color = self._compare_color(key, row_map.get(key), previous_by_key.get(key))
                 sort_value = row_map.get(key) if key != "record_date" else row_map.get(key)
+                if key in ("net_profit", "net_margin_rate") and row_map.get(key) is None:
+                    sort_value = None
                 item = NumericTableWidgetItem(str(text), sort_value if key == "record_date" or key in HISTORY_NUMERIC_COLUMNS or key in ("cpc", "promotion_impression_share") else None)
                 item.setTextAlignment(Qt.AlignCenter)
+                if key in ("net_profit", "net_margin_rate") and row_map.get(key) is not None:
+                    item.setForeground(QColor("#1b8f3a" if float(row_map.get(key) or 0) >= 0 else "#c0392b"))
                 if compare_text:
                     item.setData(COMPARE_BASE_ROLE, base_text)
                     item.setData(COMPARE_TEXT_ROLE, compare_text)

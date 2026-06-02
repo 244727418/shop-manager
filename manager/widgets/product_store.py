@@ -4,7 +4,7 @@
 """
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QApplication, QScrollArea, QTextEdit,
@@ -60,7 +60,7 @@ class ProductWidget(QWidget):
         self.category_label = QLabel()
         self.category_label.setAlignment(Qt.AlignCenter)
         self.category_label.setWordWrap(True)
-        self.category_label.setMinimumHeight(16)
+        self.category_label.setMinimumHeight(56)
         self.category_label.setMaximumHeight(16777215)
         self.category_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.category_label.installEventFilter(self)
@@ -81,6 +81,13 @@ class ProductWidget(QWidget):
         self.code_label.setCursor(Qt.PointingHandCursor)
         self.code_label.installEventFilter(self)
         self.code_label.setToolTip("单击复制 ID，双击复制同款")
+        self.code_label.setFixedWidth(118)
+        self.code_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        self.real_date_label = QLabel("")
+        self.real_date_label.setStyleSheet("font-weight: bold; color: #8e44ad; font-size: 11px;")
+        self.real_date_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.real_date_label.hide()
 
         tag_layout = QHBoxLayout()
         tag_layout.setSpacing(2)
@@ -124,7 +131,8 @@ class ProductWidget(QWidget):
         tag_layout.addStretch()
 
         top_layout.addWidget(self.code_label)
-        top_layout.addLayout(tag_layout)
+        top_layout.addWidget(self.real_date_label)
+        top_layout.addLayout(tag_layout, 1)
 
         self.title_label = QLabel(prod_title)
         self.title_label.setWordWrap(True)
@@ -151,6 +159,8 @@ class ProductWidget(QWidget):
 
         self.margin_label = QLabel("毛利: -")
         self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 12px;")
+        self.margin_label.setTextFormat(Qt.RichText)
+        self.margin_label.setWordWrap(True)
         self.margin_label.installEventFilter(self)
 
         self.link_order_label = QLabel("单量：0单")
@@ -167,11 +177,14 @@ class ProductWidget(QWidget):
 
         self.net_profit_label = QLabel("净利: -")
         self.net_profit_label.setStyleSheet("color: #28a745; font-weight: bold; font-size: 13px;")
+        self.net_profit_label.setTextFormat(Qt.RichText)
+        self.net_profit_label.setWordWrap(True)
         self.net_profit_label.installEventFilter(self)
 
         self.roi_label = QLabel("")
         self.roi_label.setStyleSheet("font-family: Microsoft YaHei; color: blue; font-size: 13px;")
         self.roi_label.setTextFormat(Qt.RichText)
+        self.roi_label.setWordWrap(True)
         self.roi_label.installEventFilter(self)
 
         self.margin_left_layout.addWidget(self.net_profit_label)
@@ -235,30 +248,38 @@ class ProductWidget(QWidget):
 
     def update_product_category_display(self):
         try:
-            rows = self.db.safe_fetchall("SELECT product_category_label FROM products WHERE id=?", (self.prod_id,))
+            rows = self.db.safe_fetchall(
+                "SELECT product_category_label, link_type FROM products WHERE id=?",
+                (self.prod_id,)
+            )
             category = rows[0][0] if rows and rows[0][0] else ""
+            link_type = rows[0][1] if rows and len(rows[0]) > 1 and rows[0][1] else ""
         except Exception as e:
-            print(f"读取链接商品类型失败: {e}")
+            print(f"读取链接类型信息失败: {e}")
             category = ""
+            link_type = ""
 
-        if category:
-            text = str(category).strip()
-            display_text = text[:16] + "..." if len(text) > 16 else text
-            self.category_label.setText(display_text)
-            self.category_label.setToolTip(f"商品类型：{text}")
+        category = str(category or "").strip()
+        link_type = str(link_type or "").strip()
+        category_text = category if category else "无"
+        link_type_text = link_type if link_type else "无"
+        self.category_label.setText(f"商品类型：\n{category_text}\n链接类型：\n{link_type_text}")
+        tooltip_parts = [
+            f"商品类型：{category or '无'}",
+            f"链接类型：{link_type or '无'}",
+        ]
+        self.category_label.setToolTip("\n".join(tooltip_parts))
+        if category or link_type:
             self.category_label.setStyleSheet(
                 "color: #245269; background-color: #e8f4fb; border: 1px solid #b8dff2; "
                 "border-radius: 4px; padding: 0px; font-size: 12px; font-weight: bold;"
             )
-            self.category_label.adjustSize()
         else:
-            self.category_label.setText("未识别")
-            self.category_label.setToolTip("成本库未识别到商品类型")
             self.category_label.setStyleSheet(
                 "color: #777; background-color: #f5f5f5; border: 1px dashed #d0d0d0; "
                 "border-radius: 4px; padding: 0px; font-size: 12px;"
             )
-            self.category_label.adjustSize()
+        self.category_label.adjustSize()
 
     def update_product_memo_display(self):
         try:
@@ -411,6 +432,24 @@ class ProductWidget(QWidget):
 
     def update_margin_display(self):
         try:
+            real_promotion_mode = (
+                hasattr(self.main_app, "is_real_promotion_data_mode")
+                and self.main_app.is_real_promotion_data_mode()
+            )
+            if hasattr(self, "title_label"):
+                self.title_label.setVisible(not real_promotion_mode)
+            if hasattr(self, "memo_label"):
+                self.memo_label.setVisible(not real_promotion_mode)
+            if hasattr(self, "real_date_label"):
+                self.real_date_label.hide()
+            if hasattr(self, "link_order_label"):
+                self.link_order_label.setVisible(not real_promotion_mode)
+            if not real_promotion_mode:
+                self.margin_label.setWordWrap(True)
+                self.margin_label.setMinimumHeight(0)
+                self.margin_label.setMaximumHeight(16777215)
+                self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 12px;")
+
             rows = self.main_app.db.safe_fetchall(
                 "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
                 (self.prod_id,)
@@ -426,7 +465,7 @@ class ProductWidget(QWidget):
                     self.main_app.update_product_row_height(self.prod_id)
                 return
             product_rows = self.main_app.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi, is_natural_flow, is_sitewide_managed, store_id, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, net_break_even_roi, is_natural_flow, is_sitewide_managed, store_id, COALESCE(roi_input_mode, 'roi'), COALESCE(transaction_bid, 0) FROM products WHERE id=?",
                 (self.prod_id,)
             )
             max_discount = 0
@@ -438,6 +477,7 @@ class ProductWidget(QWidget):
             sitewide_roi = 0
             store_id = None
             roi_input_mode = "roi"
+            transaction_bid = 0
             if product_rows:
                 coupon = product_rows[0][0] if product_rows[0][0] else 0
                 new_customer = product_rows[0][1] if product_rows[0][1] else 0
@@ -449,6 +489,7 @@ class ProductWidget(QWidget):
                 is_sitewide_managed = product_rows[0][6] if product_rows[0][6] else 0
                 store_id = product_rows[0][7] if product_rows[0][7] else None
                 roi_input_mode = product_rows[0][8] if len(product_rows[0]) > 8 and product_rows[0][8] in ("roi", "bid") else "roi"
+                transaction_bid = product_rows[0][9] if len(product_rows[0]) > 9 and product_rows[0][9] else 0
                 if store_id:
                     store_rows = self.main_app.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (store_id,))
                     sitewide_roi = store_rows[0][0] if store_rows and store_rows[0][0] else 0
@@ -456,6 +497,7 @@ class ProductWidget(QWidget):
             total_weighted_price = 0.0
             total_weighted_gross_profit = 0.0
             total_weight = 0.0
+            equal_weight_fallback_specs = []
             for r in rows:
                 spec_code, sale_price, weight = r[0], r[1], r[2]
                 if sale_price is None or weight is None:
@@ -467,10 +509,16 @@ class ProductWidget(QWidget):
                 final_price = sale_price - max_discount
                 if final_price > 0 and cost > 0:
                     margin = (final_price - cost) / final_price
+                    equal_weight_fallback_specs.append((margin, final_price, final_price - cost))
                     total_weighted_margin += margin * weight
                     total_weighted_price += final_price * weight
                     total_weighted_gross_profit += (final_price - cost) * weight
                     total_weight += weight
+            if total_weight <= 0 and equal_weight_fallback_specs:
+                total_weight = float(len(equal_weight_fallback_specs))
+                total_weighted_margin = sum(item[0] for item in equal_weight_fallback_specs)
+                total_weighted_price = sum(item[1] for item in equal_weight_fallback_specs)
+                total_weighted_gross_profit = sum(item[2] for item in equal_weight_fallback_specs)
             if total_weight > 0:
                 final_margin_pct = (total_weighted_margin / total_weight) * 100
                 avg_price = total_weighted_price / total_weight
@@ -482,9 +530,7 @@ class ProductWidget(QWidget):
                 margin_rate_decimal = final_margin_pct / 100
                 effective_roi = sitewide_roi if is_sitewide_managed and not is_natural_flow else current_roi
                 if (
-                    hasattr(self.main_app, "is_real_promotion_data_mode")
-                    and self.main_app.is_real_promotion_data_mode()
-                    and not is_natural_flow
+                    real_promotion_mode
                 ):
                     self._apply_real_promotion_display(store_id, margin_rate_decimal, net_break_even_roi)
                     if hasattr(self.main_app, "update_product_row_height"):
@@ -496,6 +542,7 @@ class ProductWidget(QWidget):
                         avg_gross_profit,
                         margin_rate_decimal,
                         current_roi,
+                        transaction_bid,
                         return_rate,
                         net_break_even_roi,
                     )
@@ -544,6 +591,12 @@ class ProductWidget(QWidget):
                 self.main_app.update_product_row_height(self.prod_id)
         except Exception as e:
             print(f"更新毛利显示失败：{e}")
+            if hasattr(self, "title_label"):
+                self.title_label.show()
+            if hasattr(self, "memo_label"):
+                self.memo_label.show()
+            if hasattr(self, "real_date_label"):
+                self.real_date_label.hide()
             self.margin_label.setText("毛利: 错误")
             self.margin_label.show()
             self.net_profit_label.setText("净利: 错误")
@@ -574,19 +627,20 @@ class ProductWidget(QWidget):
             print(f"读取链接单量失败: {e}")
             return 0.0
 
-    def _apply_bid_mode_display(self, avg_price, avg_gross_profit, margin_rate_decimal, current_roi, return_rate, net_break_even_roi):
+    def _apply_bid_mode_display(self, avg_price, avg_gross_profit, margin_rate_decimal, current_roi, transaction_bid, return_rate, net_break_even_roi):
         order_count = self._get_current_display_order_count()
         gross_profit_total = avg_gross_profit * order_count
         self.margin_label.setText(f"毛利润:¥{gross_profit_total:.2f} 均毛利:¥{avg_gross_profit:.2f}")
         self.margin_label.show()
 
         return_factor = max(0.0, 1 - float(return_rate or 0) / 100)
-        if avg_price > 0 and current_roi and current_roi > 0 and return_factor > 0:
-            bid = avg_price / (current_roi * return_factor)
-            net_margin_decimal = margin_rate_decimal * return_factor - 0.006 - (1 / current_roi)
-            avg_net_profit = avg_price * net_margin_decimal
+        bid = float(transaction_bid or 0)
+        if bid <= 0 and avg_price > 0 and current_roi and current_roi > 0:
+            bid = avg_price / current_roi
+        if avg_price > 0 and bid > 0 and return_factor > 0:
+            avg_net_profit = avg_gross_profit * return_factor - (avg_price * 0.006) - bid
             net_profit_total = avg_net_profit * order_count
-            net_margin_pct = net_margin_decimal * 100
+            net_margin_pct = (avg_net_profit / avg_price) * 100
             status = self._get_net_profit_status(net_margin_pct)
             self.net_profit_label.setText(f"净利润:¥{net_profit_total:.2f} {status}")
 
@@ -599,7 +653,7 @@ class ProductWidget(QWidget):
             self.net_profit_label.show()
 
             if net_break_even_roi and net_break_even_roi > 0:
-                break_even_bid = avg_price / (net_break_even_roi * return_factor)
+                break_even_bid = avg_price / net_break_even_roi
                 bid_multiple = break_even_bid / bid if bid > 0 else None
                 multiple_text = f"{bid_multiple:.2f}倍" if bid_multiple is not None else "--"
             else:
@@ -630,17 +684,8 @@ class ProductWidget(QWidget):
                 and self.main_app.is_real_promotion_data_mode()
                 and hasattr(self.main_app, "get_latest_promotion_data")
             ):
-                product_rows = self.main_app.db.safe_fetchall(
-                    "SELECT store_id, is_natural_flow FROM products WHERE id=?",
-                    (self.prod_id,)
-                )
-                store_id = product_rows[0][0] if product_rows else None
-                is_natural_flow = product_rows[0][1] if product_rows else 0
-                if store_id and not is_natural_flow:
-                    data = self.main_app.get_latest_promotion_data(store_id, self.prod_code)
-                    net_orders = float(data.get("net_orders") or 0) if data else 0
-                    self.link_order_label.setText(f"净成交：{net_orders:.0f}单")
-                    return
+                self.link_order_label.hide()
+                return
 
             spec_counts = self.main_app.db.safe_fetchall(
                 "SELECT spec_code, order_count, refund_count FROM imported_orders WHERE product_id=?",
@@ -671,13 +716,18 @@ class ProductWidget(QWidget):
         if hasattr(self.main_app, "get_latest_promotion_data"):
             data = self.main_app.get_latest_promotion_data(store_id, self.prod_code)
         if not data:
+            if hasattr(self, "real_date_label"):
+                self.real_date_label.hide()
+            self.margin_label.setWordWrap(False)
+            self.margin_label.setFixedHeight(18)
+            self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 13px;")
             self.margin_label.setText("真实推广: 无数据")
             self.margin_label.show()
             self.net_profit_label.setText("净利: 无真实推广数据")
             self.net_profit_label.setStyleSheet("color: #999; font-weight: bold; font-size: 13px;")
             self.net_profit_label.show()
             self.roi_label.setText("")
-            self.link_order_label.setText("净成交：0单")
+            self.link_order_label.hide()
             return True
 
         cost = float(data.get("cost") or 0)
@@ -686,35 +736,80 @@ class ProductWidget(QWidget):
         net_roi = float(data.get("net_roi") or 0)
         net_orders = float(data.get("net_orders") or 0)
         promotion_share = float(data.get("promotion_impression_share") or 0)
-        tech_fee = net_amount * 0.006
-        if net_amount > 0:
+        cost_per_net_order = float(data.get("cost_per_net_order") or 0)
+        ctr = float(data.get("ctr") or 0)
+        click_conversion_rate = float(data.get("click_conversion_rate") or 0)
+        amount_per_net_order = net_amount / net_orders if net_orders > 0 else 0
+        if cost_per_net_order <= 0 and net_orders > 0:
+            cost_per_net_order = cost / net_orders
+        snapshot_net_profit = data.get("net_profit")
+        snapshot_net_margin = data.get("net_margin_rate")
+        if snapshot_net_profit is not None and snapshot_net_margin is not None:
+            net_profit = float(snapshot_net_profit)
+            net_margin_pct = float(snapshot_net_margin)
+            net_margin_text = f"{net_margin_pct:.1f}%"
+            status = self._get_net_profit_status(net_margin_pct)
+        elif net_amount > 0:
+            tech_fee = net_amount * 0.006
             net_profit = net_amount * margin_rate_decimal - cost - tech_fee
             net_margin_pct = net_profit / net_amount * 100
             net_margin_text = f"{net_margin_pct:.1f}%"
             status = self._get_net_profit_status(net_margin_pct)
         else:
             net_profit = -cost
+            net_margin_pct = None
             net_margin_text = "无成交"
             status = "亏损" if net_profit < 0 else "保本"
         roi_multiple = net_roi / net_break_even_roi if net_break_even_roi and net_break_even_roi > 0 else None
-        date_text = str(data.get("record_date") or "")[-5:]
-        self.margin_label.setText(f"真实:{date_text} 交易¥{transaction_amount:.0f} 花费¥{cost:.0f}")
+        date_text = str(data.get("record_date") or "")
+        if hasattr(self, "real_date_label"):
+            self.real_date_label.setText(date_text[-5:] if len(date_text) >= 5 else date_text)
+            self.real_date_label.show()
+
+        def metric(label, value, color="#333"):
+            return (
+                '<span style="white-space: nowrap;">'
+                f'<span style="color:#666;font-weight:bold;">{label}</span>'
+                f'<span style="color:{color};font-weight:bold;">{value}</span>'
+                '</span>'
+            )
+
+        def money(value):
+            text = f"{float(value or 0):.10f}".rstrip("0").rstrip(".")
+            return f"¥{text or '0'}"
+
+        self.margin_label.setWordWrap(False)
+        self.margin_label.setFixedHeight(18)
+        self.margin_label.setStyleSheet("color: #d9534f; font-weight: bold; font-size: 13px;")
+        self.margin_label.setText(
+            f'{metric("花费:", money(cost), "#e67e22")} '
+            f'{metric("交易额:", money(transaction_amount), "#2c7be5")}'
+        )
         self.margin_label.show()
-        self.net_profit_label.setText(f"净利润:¥{net_profit:.2f} 净利:{net_margin_text} {status}")
         if net_profit > 0:
             self.net_profit_label.setStyleSheet("color: #006400; font-weight: bold; font-size: 13px;")
         elif abs(net_profit) < 0.000001:
             self.net_profit_label.setStyleSheet("color: #daa520; font-weight: bold; font-size: 13px;")
         else:
             self.net_profit_label.setStyleSheet("color: #dc143c; font-weight: bold; font-size: 13px;")
+        self.net_profit_label.setText(
+            f'{metric("净成交:", f"{net_orders:.0f}单", "#8b4513")} '
+            f'{metric("净投产比:", f"{net_roi:.2f}", "#e74c3c")}<br>'
+            f'{metric("净利润:", f"¥{net_profit:.2f}", "#dc143c" if net_profit < 0 else "#006400")} '
+            f'{metric("净利率:", net_margin_text, "#dc143c" if net_profit < 0 else "#006400")} '
+            f'{metric("", status, "#dc143c" if net_profit < 0 else "#006400")}'
+        )
         self.net_profit_label.show()
         multiple_text = f"{roi_multiple:.2f}倍" if roi_multiple is not None else "--"
         self.roi_label.setText(
-            f'<span style="color:#666;font-weight:bold;">净投产:</span><span style="color:#e74c3c;font-weight:bold;">{net_roi:.2f}</span> '
-            f'<span style="color:#666;font-weight:bold;">倍数:</span><span style="color:#3498db;font-weight:bold;">{multiple_text}</span> '
-            f'<span style="color:#666;font-weight:bold;">曝占:</span><span style="color:#8e44ad;font-weight:bold;">{promotion_share * 100:.1f}%</span>'
+            f'{metric("投产倍数:", multiple_text, "#3498db")} '
+            f'{metric("曝光占比:", f"{promotion_share * 100:.1f}%", "#8e44ad")}<br>'
+            f'{metric("每笔成交金额:", f"¥{amount_per_net_order:.2f}", "#2c7be5")} '
+            f'{metric("每笔花费:", f"¥{cost_per_net_order:.2f}", "#e67e22")}<br>'
+            f'{metric("点击率:", f"{ctr * 100:.1f}%", "#16a085")} '
+            f'{metric("点击转化率:", f"{click_conversion_rate * 100:.1f}%", "#16a085")}'
         )
-        self.link_order_label.setText(f"净成交：{net_orders:.0f}单")
+        self.link_order_label.hide()
         return True
 
     def eventFilter(self, obj, event):
@@ -758,13 +853,22 @@ class ProductWidget(QWidget):
 
     def show_product_context_menu(self, global_pos):
         menu = QMenu(self)
+        material_action = QAction("打开链接素材库", self)
         promotion_action = QAction("查看推广数据", self)
+        archive_action = QAction("下架链接", self)
         delete_action = QAction("删除链接", self)
         menu.addAction(promotion_action)
+        menu.addAction(material_action)
+        menu.addAction(archive_action)
         menu.addAction(delete_action)
         selected = menu.exec_(global_pos)
         if selected == promotion_action:
             self.open_promotion_history()
+        elif selected == material_action:
+            if hasattr(self.main_app, "open_link_material_library"):
+                self.main_app.open_link_material_library(self.prod_id)
+        elif selected == archive_action:
+            self.archive_product()
         elif selected == delete_action:
             self.delete_product()
 
@@ -1374,6 +1478,32 @@ class ProductWidget(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"删除商品失败: {e}")
 
+    def archive_product(self):
+        reply = QMessageBox.question(
+            self,
+            "确认下架",
+            "确定下架该链接吗？\n下架后主界面不再显示，也不参与计算，可在底部“已下架”窗口找回。"
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                product_rows = self.main_app.db.safe_fetchall(
+                    "SELECT store_id, name, title FROM products WHERE id=?",
+                    (self.prod_id,)
+                )
+                store_id = product_rows[0][0] if product_rows else None
+                product_id = product_rows[0][1] if product_rows else self.prod_code
+                product_title = product_rows[0][2] if product_rows else self.prod_title
+                archived_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.main_app.db.safe_execute(
+                    "UPDATE products SET is_archived=1, archived_at=? WHERE id=?",
+                    (archived_at, self.prod_id)
+                )
+                if store_id and hasattr(self.main_app, "record_store_link_change"):
+                    self.main_app.record_store_link_change(store_id, "archive", product_id, product_title)
+                self.main_app.load_data_safe()
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"下架链接失败: {e}")
+
     def _on_code_click(self, event):
         self.copy_product_id()
 
@@ -1455,15 +1585,17 @@ class StoreWidget(QWidget):
             if real_metrics:
                 net_profit = real_metrics["net_profit"]
                 net_margin = real_metrics["net_margin_pct"]
+                record_date = real_metrics.get("record_date") or ""
+                net_orders = float(real_metrics.get("net_orders") or 0)
                 profit_color = "#006400" if net_profit > 0 else ("#daa520" if abs(net_profit) < 0.000001 else "#dc143c")
-                self.net_margin_label = QLabel(f"推广盈亏: ¥{net_profit:.0f} 净利:{net_margin:.1f}%")
+                self.net_margin_label = QLabel(f"{record_date} 推广盈亏: ¥{net_profit:.0f} 净利:{net_margin:.1f}%")
                 self.net_margin_label.setStyleSheet(f"background-color: #e8f4f8; padding: 3px 8px; font-size: 12px; color: {profit_color}; font-weight: bold;")
                 avg_price = real_metrics.get("avg_price")
                 if avg_price is not None:
-                    self.avg_price_label = QLabel(f"真实客单: ¥{avg_price:.1f}")
+                    self.avg_price_label = QLabel(f"净成交: {net_orders:.0f}单 真实客单: ¥{avg_price:.1f}")
                     self.avg_price_label.setStyleSheet("background-color: #e8f8f5; padding: 3px 8px; font-size: 12px; color: #27ae60; font-weight: bold;")
                 else:
-                    self.avg_price_label = QLabel("真实客单: --")
+                    self.avg_price_label = QLabel(f"净成交: {net_orders:.0f}单 真实客单: --")
                     self.avg_price_label.setStyleSheet("background-color: #f5f5f5; padding: 3px 8px; font-size: 12px; color: #999;")
             else:
                 self.net_margin_label = QLabel("推广盈亏: --")
@@ -1520,7 +1652,7 @@ class StoreWidget(QWidget):
 
     def calculate_store_margin(self):
         try:
-            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,))
+            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0", (self.store_id,))
             if not products:
                 return None
             total_weight = 0
@@ -1572,7 +1704,7 @@ class StoreWidget(QWidget):
             and hasattr(self.main_app, "get_latest_promotion_data")
         )
 
-    def _calculate_product_margin_decimal(self, prod_id):
+    def _calculate_product_margin_decimal(self, prod_id, product_code=None, order_date=None):
         specs = self.db.safe_fetchall(
             "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
             (prod_id,)
@@ -1586,25 +1718,63 @@ class StoreWidget(QWidget):
         coupon = (product_rows[0][0] or 0) if product_rows else 0
         new_customer = (product_rows[0][1] or 0) if product_rows else 0
         max_discount = max(coupon, new_customer)
-        total_spec_weight = 0
-        total_weighted_margin = 0
+
+        def fetch_order_weights(target_date):
+            if not product_code or not target_date:
+                return {}
+            rows = self.db.safe_fetchall(
+                """
+                SELECT spec_code, COALESCE(SUM(order_count), 0)
+                FROM imported_orders
+                WHERE store_id=? AND product_id=? AND order_date=?
+                GROUP BY spec_code
+                """,
+                (self.store_id, product_code, target_date),
+            )
+            return {
+                spec_code: float(order_count or 0)
+                for spec_code, order_count in rows
+                if float(order_count or 0) > 0
+            }
+
+        order_weights = fetch_order_weights(order_date)
+
+        margin_by_spec = {}
+        manual_weights = {}
         for spec_code, sale_price, weight in specs:
-            if sale_price is None or weight is None or sale_price <= 0:
+            if sale_price is None or sale_price <= 0:
                 continue
             cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
             cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
             final_price = sale_price - max_discount
             if final_price > 0 and cost > 0:
-                total_weighted_margin += ((final_price - cost) / final_price) * weight
-                total_spec_weight += weight
-        if total_spec_weight <= 0:
-            return None
-        return total_weighted_margin / total_spec_weight
+                margin_by_spec[spec_code] = (final_price - cost) / final_price
+                if weight and weight > 0:
+                    manual_weights[spec_code] = float(weight)
+
+        def weighted_margin(weights):
+            total_weight = 0.0
+            total_margin = 0.0
+            for spec_code, weight in weights.items():
+                margin = margin_by_spec.get(spec_code)
+                if margin is None or weight <= 0:
+                    continue
+                total_margin += margin * weight
+                total_weight += weight
+            if total_weight <= 0:
+                return None
+            return total_margin / total_weight
+
+        return (
+            weighted_margin(order_weights)
+            or weighted_margin(manual_weights)
+            or (sum(margin_by_spec.values()) / len(margin_by_spec) if margin_by_spec else None)
+        )
 
     def calculate_store_real_promotion_metrics(self):
         try:
             products = self.db.safe_fetchall(
-                "SELECT id, name, is_natural_flow FROM products WHERE store_id=?",
+                "SELECT id, name, is_natural_flow FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                 (self.store_id,)
             )
             if not products:
@@ -1614,20 +1784,25 @@ class StoreWidget(QWidget):
             total_net_orders = 0.0
             total_net_profit = 0.0
             matched_count = 0
+            target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             for prod_id, product_code, is_natural_flow in products:
-                if is_natural_flow:
-                    continue
-                margin_decimal = self._calculate_product_margin_decimal(prod_id)
-                if margin_decimal is None:
-                    continue
                 data = self.main_app.get_latest_promotion_data(self.store_id, product_code)
                 if not data:
                     continue
+                record_date = data.get("record_date")
+                if str(record_date or "") != target_date:
+                    continue
+                margin_decimal = self._calculate_product_margin_decimal(prod_id, product_code, record_date)
+                if margin_decimal is None:
+                    margin_decimal = 0.0
                 net_amount = float(data.get("net_transaction_amount") or 0)
                 cost = float(data.get("cost") or 0)
                 net_orders = float(data.get("net_orders") or 0)
-                tech_fee = net_amount * 0.006
-                net_profit = net_amount * margin_decimal - cost - tech_fee
+                if data.get("net_profit") is not None:
+                    net_profit = float(data.get("net_profit"))
+                else:
+                    tech_fee = net_amount * 0.006
+                    net_profit = net_amount * margin_decimal - cost - tech_fee
                 total_net_amount += net_amount
                 total_cost += cost
                 total_net_orders += net_orders
@@ -1647,6 +1822,7 @@ class StoreWidget(QWidget):
                 "net_orders": total_net_orders,
                 "net_amount": total_net_amount,
                 "cost": total_cost,
+                "record_date": target_date,
             }
         except Exception as e:
             print(f"计算店铺真实推广指标失败: {e}")
@@ -1654,7 +1830,7 @@ class StoreWidget(QWidget):
 
     def calculate_store_net_margin(self):
         try:
-            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,))
+            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0", (self.store_id,))
             if not products:
                 return None
             total_weight = 0
@@ -1707,7 +1883,7 @@ class StoreWidget(QWidget):
 
     def calculate_store_avg_price(self):
         try:
-            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=?", (self.store_id,))
+            products = self.db.safe_fetchall("SELECT id, store_weight FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0", (self.store_id,))
             if not products:
                 return None
             total_weight = 0

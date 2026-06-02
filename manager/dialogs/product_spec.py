@@ -399,6 +399,8 @@ class ProductSpecDialog(QDialog):
         self._undo_ready = False
         self._restoring_undo_snapshot = False
         self._undo_last_snapshot = None
+        self.pdd_browser_monitor = None
+        self.pdd_code_dialog = None
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -1036,6 +1038,37 @@ class ProductSpecDialog(QDialog):
         """)
         self.btn_basic_info_summary.clicked.connect(self.open_basic_info_summary_dialog)
 
+        self.btn_promotion_history = QPushButton("📊 查看推广数据")
+        self.btn_promotion_history.setStyleSheet("""
+            QPushButton {
+                background-color: #f39c12;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d68910;
+            }
+        """)
+        self.btn_promotion_history.clicked.connect(self.open_promotion_history)
+
+        self.btn_pdd_code_fetch = QPushButton("🛒 抓取添加编码")
+        self.btn_pdd_code_fetch.setToolTip("打开拼多多商家端，并进入抓取添加编码界面")
+        self.btn_pdd_code_fetch.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #ca6f1e;
+            }
+        """)
+        self.btn_pdd_code_fetch.clicked.connect(self.open_pdd_code_fetch_dialog)
+
         btn_save = QPushButton("💾 保存数据")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px 20px;")
         btn_save.clicked.connect(self.save_data)
@@ -1047,6 +1080,8 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(btn_avg)
         btn_layout.addWidget(self.btn_profit_calc)
         btn_layout.addWidget(self.btn_basic_info_summary)
+        btn_layout.addWidget(self.btn_promotion_history)
+        btn_layout.addWidget(self.btn_pdd_code_fetch)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
@@ -2761,26 +2796,36 @@ class ProductSpecDialog(QDialog):
     def load_specs(self):
         """从数据库加载规格数据到表格，并初始化删除功能"""
         try:
+            self._ensure_transaction_bid_column()
             self._restore_latest_import_history_if_needed()
             # 0. 加载优惠券和新客立减金额
+            saved_roi = 0.0
+            saved_transaction_bid = 0.0
+            saved_roi_input_mode = "roi"
             discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, COALESCE(transaction_bid, 0), return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
                 (self.product_id,)
             )
             if discount_rows:
                 coupon_amount = discount_rows[0][0] if discount_rows[0][0] else 0
                 new_customer_discount = discount_rows[0][1] if discount_rows[0][1] else 0
                 saved_roi = discount_rows[0][2] if discount_rows[0][2] else 0
-                saved_return_rate = discount_rows[0][3] if discount_rows[0][3] else 0
-                is_limited_time = discount_rows[0][4] if discount_rows[0][4] else 0
-                is_marketing = discount_rows[0][5] if discount_rows[0][5] else 0
-                is_natural_flow = discount_rows[0][6] if discount_rows[0][6] else 0
-                is_sitewide_managed = discount_rows[0][7] if discount_rows[0][7] else 0
-                saved_roi_input_mode = discount_rows[0][8] if len(discount_rows[0]) > 8 and discount_rows[0][8] in ("roi", "bid") else "roi"
+                saved_transaction_bid = discount_rows[0][3] if discount_rows[0][3] else 0
+                saved_return_rate = discount_rows[0][4] if discount_rows[0][4] else 0
+                is_limited_time = discount_rows[0][5] if discount_rows[0][5] else 0
+                is_marketing = discount_rows[0][6] if discount_rows[0][6] else 0
+                is_natural_flow = discount_rows[0][7] if discount_rows[0][7] else 0
+                is_sitewide_managed = discount_rows[0][8] if discount_rows[0][8] else 0
+                saved_roi_input_mode = discount_rows[0][9] if len(discount_rows[0]) > 9 and discount_rows[0][9] in ("roi", "bid") else "roi"
                 
                 self.coupon_input.setText(str(int(round(coupon_amount))) if coupon_amount > 0 else "")
                 self.new_customer_input.setText(str(int(round(new_customer_discount))) if new_customer_discount > 0 else "")
-                self.current_roi_input.setText(str(saved_roi) if saved_roi > 0 else "")
+                self._roi_bid_syncing = True
+                try:
+                    self.current_roi_input.setText(str(saved_roi) if saved_roi > 0 else "")
+                    self.transaction_bid_input.setText(f"{saved_transaction_bid:.2f}" if saved_transaction_bid > 0 else "")
+                finally:
+                    self._roi_bid_syncing = False
                 self.return_rate_input.setText(str(saved_return_rate) if saved_return_rate > 0 else "")
                 self.update_max_discount_label()
                 
@@ -3030,11 +3075,14 @@ class ProductSpecDialog(QDialog):
             # 5. 加载完成后，计算一次综合毛利
             self.calculate_total_margin()
             if getattr(self, "roi_input_mode", "roi") == "bid":
-                try:
-                    saved_roi = float(self.current_roi_input.text()) if self.current_roi_input.text().strip() else 0.0
-                except ValueError:
-                    saved_roi = 0.0
-                if saved_roi > 0:
+                if saved_transaction_bid > 0:
+                    self._roi_bid_syncing = True
+                    try:
+                        self.transaction_bid_input.setText(f"{saved_transaction_bid:.2f}")
+                    finally:
+                        self._roi_bid_syncing = False
+                    self._sync_roi_from_bid()
+                elif saved_roi > 0:
                     saved_bid = self._calc_bid_from_roi(saved_roi)
                     self._roi_bid_syncing = True
                     try:
@@ -3245,7 +3293,7 @@ class ProductSpecDialog(QDialog):
         gross_break_even = 1 / margin_rate if margin_rate > 0 else 0
         
         # 净保本投产 = 1 / [毛利率 × (1 - 退货率) - 技术服务费率]
-        net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.0006
+        net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.006
         net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0
         
         # 最佳投产 = 净保本投产 × 1.4
@@ -3291,6 +3339,13 @@ class ProductSpecDialog(QDialog):
 
     def on_transaction_bid_changed(self):
         """成交出价输入变化时，反算当前投产。"""
+        if not self._roi_bid_syncing and self.transaction_bid_input.hasFocus() and getattr(self, "roi_input_mode", "roi") != "bid":
+            old_mode = getattr(self, "roi_input_mode", "roi")
+            self._mark_roi_bid_manual_source("transaction_bid")
+            if old_mode != "bid":
+                self._roi_bid_mode_switches.append((old_mode, "bid"))
+            self.roi_input_mode = "bid"
+            self._apply_roi_bid_input_mode()
         if not self._roi_bid_syncing and getattr(self, "roi_input_mode", "roi") == "bid":
             if self.transaction_bid_input.hasFocus():
                 self._mark_roi_bid_manual_source("transaction_bid")
@@ -3758,6 +3813,86 @@ class ProductSpecDialog(QDialog):
         
         dialog = ProfitCalculatorDialog(margin_rate, avg_price, self.product_id, self.product_name, "product", self, self.db)
         dialog.show()
+
+    def open_promotion_history(self):
+        """打开当前链接的推广历史数据窗口。"""
+        try:
+            store_rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+            store_id = store_rows[0][0] if store_rows else None
+            store_name = ""
+            if store_id:
+                name_rows = self.db.safe_fetchall("SELECT name FROM stores WHERE id=?", (store_id,))
+                store_name = name_rows[0][0] if name_rows and name_rows[0][0] else ""
+
+            try:
+                from manager.dialogs.promotion_data import ProductPromotionHistoryDialog
+            except ImportError:
+                from dialogs.promotion_data import ProductPromotionHistoryDialog
+
+            dialog = ProductPromotionHistoryDialog(
+                store_id,
+                store_name,
+                self.product_code,
+                self.product_name,
+                self.db,
+                self
+            )
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"打开推广数据失败: {e}")
+
+    def _current_product_store_id(self):
+        rows = self.db.safe_fetchall("SELECT store_id FROM products WHERE id=?", (self.product_id,))
+        return rows[0][0] if rows and rows[0][0] else None
+
+    def _get_pdd_browser_monitor(self):
+        if self.pdd_browser_monitor is None:
+            try:
+                from manager.pdd_browser_monitor import PddBrowserMonitor
+            except ImportError:
+                from pdd_browser_monitor import PddBrowserMonitor
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
+        return self.pdd_browser_monitor
+
+    def _show_external_dialog(self, dialog):
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_pdd_code_fetch_dialog(self):
+        """打开拼多多商家端，并直接进入抓取添加编码界面。"""
+        try:
+            monitor = self._get_pdd_browser_monitor()
+            store_id = self._current_product_store_id()
+            if store_id and hasattr(monitor, "set_store_context"):
+                monitor.set_store_context(store_id)
+            if not monitor.is_devtools_alive():
+                monitor.open_merchant_page(store_id)
+
+            try:
+                from manager.dialogs.store_margin import PddProductMatchDialog
+            except ImportError:
+                from dialogs.store_margin import PddProductMatchDialog
+
+            if self.pdd_code_dialog is None:
+                self.pdd_code_dialog = PddProductMatchDialog(
+                    self.db,
+                    monitor,
+                    default_store_id=self._current_product_store_id(),
+                    parent=None,
+                    mode="code",
+                    store_id_provider=self._current_product_store_id,
+                    owner=self,
+                )
+                self.pdd_code_dialog.destroyed.connect(lambda _=None: setattr(self, "pdd_code_dialog", None))
+            self._show_external_dialog(self.pdd_code_dialog)
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"打开抓取添加编码界面失败：{e}")
 
     def open_basic_info_summary_dialog(self):
         """生成当前链接规格基础信息，方便复制给外部分析。"""
@@ -6210,7 +6345,21 @@ SKU名称尽量接近35字，最多不超过40字。
 
     def _get_avg_price_for_bid(self):
         try:
-            return float(self.calculate_weighted_avg_price())
+            avg_price = float(self.calculate_weighted_avg_price())
+            if avg_price > 0:
+                return avg_price
+            prices = []
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, self.COL_FINAL_PRICE)
+                if item is None:
+                    item = self.table.item(row, self.COL_SALE_PRICE)
+                try:
+                    price = float(item.text()) if item and item.text() else 0
+                except ValueError:
+                    price = 0
+                if price > 0:
+                    prices.append(price)
+            return sum(prices) / len(prices) if prices else 0.0
         except Exception:
             return 0.0
 
@@ -6220,17 +6369,50 @@ SKU名称尽量接近35字，最多不超过40字。
 
     def _calc_bid_from_roi(self, roi):
         avg_price = self._get_avg_price_for_bid()
-        return_factor = self._get_return_factor_for_bid()
-        if avg_price <= 0 or roi <= 0 or return_factor <= 0:
+        if avg_price <= 0 or roi <= 0:
             return None
-        return avg_price / (roi * return_factor)
+        return avg_price / roi
 
     def _calc_roi_from_bid(self, bid):
         avg_price = self._get_avg_price_for_bid()
-        return_factor = self._get_return_factor_for_bid()
-        if avg_price <= 0 or bid <= 0 or return_factor <= 0:
+        if avg_price <= 0 or bid <= 0:
             return None
-        return avg_price / (bid * return_factor)
+        return avg_price / bid
+
+    def _get_weighted_price_and_profit_for_bid(self):
+        total_weight = 0.0
+        weighted_price = 0.0
+        weighted_profit = 0.0
+        fallback_rows = []
+
+        for row in range(self.table.rowCount()):
+            price_item = self.table.item(row, self.COL_FINAL_PRICE) or self.table.item(row, self.COL_SALE_PRICE)
+            profit_item = self.table.item(row, self.COL_GROSS_PROFIT)
+            weight_item = self.table.item(row, self.COL_WEIGHT)
+            try:
+                price = float(price_item.text()) if price_item and price_item.text() else 0.0
+                profit = float(profit_item.text()) if profit_item and profit_item.text() else 0.0
+                weight_text = weight_item.text().replace("🔒", "").replace("%", "").replace("％", "").strip() if weight_item else ""
+                weight = float(weight_text) if weight_text else 0.0
+            except ValueError:
+                continue
+
+            if price <= 0:
+                continue
+            fallback_rows.append((price, profit))
+            if weight > 0:
+                weighted_price += price * weight
+                weighted_profit += profit * weight
+                total_weight += weight
+
+        if total_weight > 0:
+            return weighted_price / total_weight, weighted_profit / total_weight
+        if fallback_rows:
+            return (
+                sum(price for price, _ in fallback_rows) / len(fallback_rows),
+                sum(profit for _, profit in fallback_rows) / len(fallback_rows),
+            )
+        return 0.0, 0.0
 
     def _sync_bid_from_roi(self):
         if not hasattr(self, "transaction_bid_input"):
@@ -6324,11 +6506,28 @@ SKU名称尽量接近35字，最多不超过40字。
                 self.lbl_promotion_ratio.setText("--")
                 return
 
-            net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.0006
+            net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.006
             net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0
 
-            net_profit_rate = margin_rate * (1 - return_rate / 100) - 0.006 - (1 / current_roi)
-            net_profit_rate = net_profit_rate * 100
+            if getattr(self, "roi_input_mode", "roi") == "bid" and not getattr(self, "is_sitewide_managed", False):
+                try:
+                    bid = float(self.transaction_bid_input.text().strip()) if self.transaction_bid_input.text().strip() else 0.0
+                except ValueError:
+                    bid = 0.0
+                avg_price, avg_profit = self._get_weighted_price_and_profit_for_bid()
+                if avg_price <= 0 or bid <= 0:
+                    self.lbl_net_profit_rate.setText("0.00%")
+                    self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #999; background-color: #f0f0f0; padding: 5px 10px; border-radius: 3px;")
+                    self.lbl_roi_multiple.setText("--")
+                    self.lbl_scale_roi.setText("--")
+                    self.lbl_promotion_ratio.setText("--")
+                    return
+                net_profit_amount = avg_profit * (1 - return_rate / 100) - (avg_price * 0.006) - bid
+                net_profit_rate = net_profit_amount / avg_price * 100
+                promotion_ratio = bid / avg_price * 100
+            else:
+                net_profit_rate = (margin_rate * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+                promotion_ratio = (1 / current_roi) * 100
 
             if net_profit_rate > 0:
                 self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
@@ -6348,7 +6547,6 @@ SKU名称尽量接近35字，最多不超过40字。
                 self.lbl_roi_multiple.setText("--")
                 self.lbl_scale_roi.setText("--")
 
-            promotion_ratio = (1 / current_roi) * 100
             self.lbl_promotion_ratio.setText(f"{promotion_ratio:.2f}%")
 
         except ValueError:
@@ -6590,12 +6788,20 @@ SKU名称尽量接近35字，最多不超过40字。
         try:
             roi = float(roi or 0)
             avg_price = float(avg_price or 0)
-            return_factor = max(0.0, 1 - float(return_rate or 0) / 100)
-            if avg_price <= 0 or roi <= 0 or return_factor <= 0:
+            if avg_price <= 0 or roi <= 0:
                 return 0.0
-            return avg_price / (roi * return_factor)
+            return avg_price / roi
         except Exception:
             return 0.0
+
+    def _ensure_transaction_bid_column(self):
+        try:
+            columns = self.db.safe_fetchall("PRAGMA table_info(products)")
+            column_names = {str(col[1]) for col in columns}
+            if "transaction_bid" not in column_names:
+                self.db.safe_execute("ALTER TABLE products ADD COLUMN transaction_bid REAL DEFAULT 0")
+        except Exception:
+            pass
 
     def save_data(self):
         """
@@ -6612,6 +6818,7 @@ SKU名称尽量接近35字，最多不超过40字。
             self._saved_current_row = current_row
         try:
             main_view_refreshed = False
+            self._ensure_transaction_bid_column()
             # 1. 获取旧数据（用于对比价格和检测删除）
             old_rows = self.db.safe_fetchall(
                 "SELECT spec_name, spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", 
@@ -6631,20 +6838,21 @@ SKU名称尽量接近35字，最多不超过40字。
             ]
 
             old_discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, return_rate, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, COALESCE(transaction_bid, 0), return_rate, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
                 (self.product_id,)
             )
             old_coupon = old_discount_rows[0][0] if old_discount_rows and old_discount_rows[0][0] else 0
             old_new_customer = old_discount_rows[0][1] if old_discount_rows and old_discount_rows[0][1] else 0
             old_roi = old_discount_rows[0][2] if old_discount_rows and old_discount_rows[0][2] else 0
-            old_return_rate = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
-            old_natural_flow = old_discount_rows[0][4] if old_discount_rows and old_discount_rows[0][4] else 0
-            old_sitewide_managed = old_discount_rows[0][5] if old_discount_rows and old_discount_rows[0][5] else 0
-            old_roi_input_mode = old_discount_rows[0][6] if old_discount_rows and len(old_discount_rows[0]) > 6 and old_discount_rows[0][6] in ("roi", "bid") else "roi"
+            old_saved_transaction_bid = old_discount_rows[0][3] if old_discount_rows and old_discount_rows[0][3] else 0
+            old_return_rate = old_discount_rows[0][4] if old_discount_rows and old_discount_rows[0][4] else 0
+            old_natural_flow = old_discount_rows[0][5] if old_discount_rows and old_discount_rows[0][5] else 0
+            old_sitewide_managed = old_discount_rows[0][6] if old_discount_rows and old_discount_rows[0][6] else 0
+            old_roi_input_mode = old_discount_rows[0][7] if old_discount_rows and len(old_discount_rows[0]) > 7 and old_discount_rows[0][7] in ("roi", "bid") else "roi"
             old_discount_amount = max(old_coupon, old_new_customer)
             old_margin_pct = self._calculate_weighted_margin_from_specs(old_specs_for_margin, old_discount_amount)
             old_avg_price = self._calculate_weighted_avg_price_from_specs(old_specs_for_margin)
-            old_transaction_bid = self._calc_bid_for_record(old_avg_price, old_roi, old_return_rate)
+            old_transaction_bid = old_saved_transaction_bid or self._calc_bid_for_record(old_avg_price, old_roi, old_return_rate)
             roi_bid_manual_source = getattr(self, "_roi_bid_manual_source", None)
             roi_bid_mode_switches = list(getattr(self, "_roi_bid_mode_switches", []))
             
@@ -6729,6 +6937,7 @@ SKU名称尽量接近35字，最多不超过40字。
             coupon_amount = old_coupon
             new_customer_discount = old_new_customer
             current_roi = old_roi
+            transaction_bid = old_saved_transaction_bid
             return_rate = old_return_rate
             is_limited_time = 0
             is_marketing = 0
@@ -6745,7 +6954,33 @@ SKU名称尽量接近35字，最多不超过40字。
             try:
                 coupon_amount = float(self.coupon_input.text()) if self.coupon_input.text() else 0
                 new_customer_discount = float(self.new_customer_input.text()) if self.new_customer_input.text() else 0
+                roi_input_mode = getattr(self, "roi_input_mode", "roi")
+                if roi_input_mode not in ("roi", "bid"):
+                    roi_input_mode = "roi"
+                if roi_bid_manual_source == "transaction_bid":
+                    roi_input_mode = "bid"
+                    self.roi_input_mode = "bid"
+                product_promotion_active = not is_natural_flow and not is_sitewide_managed
                 current_roi = float(self.current_roi_input.text()) if self.current_roi_input.text() else 0
+                transaction_bid = 0.0
+                try:
+                    transaction_bid = float(self.transaction_bid_input.text()) if self.transaction_bid_input.text().strip() else 0.0
+                except ValueError:
+                    transaction_bid = 0.0
+                if product_promotion_active and roi_input_mode == "bid":
+                    calculated_roi = self._calc_roi_from_bid(transaction_bid) if transaction_bid > 0 else None
+                    if calculated_roi is not None and calculated_roi > 0:
+                        current_roi = calculated_roi
+                        self._roi_bid_syncing = True
+                        try:
+                            self.current_roi_input.setText(f"{current_roi:.2f}")
+                        finally:
+                            self._roi_bid_syncing = False
+                    elif current_roi <= 0 and old_roi > 0:
+                        current_roi = old_roi
+                if transaction_bid <= 0 and current_roi > 0:
+                    calculated_bid = self._calc_bid_from_roi(current_roi)
+                    transaction_bid = calculated_bid if calculated_bid is not None and calculated_bid > 0 else 0.0
                 return_rate = float(self.return_rate_input.text()) if self.return_rate_input.text() else 0
                 
                 # 检查优惠券变化
@@ -6769,7 +7004,6 @@ SKU名称尽量接近35字，最多不超过40字。
                         param_change_details.append(f"新客立减: {old_new_customer}→{new_customer_discount}")
                 
                 # 检查投产/成交出价模式变化。成交出价模式会反算投产并保存，但日志只记录本次人工来源。
-                product_promotion_active = not is_natural_flow and not is_sitewide_managed
                 if product_promotion_active and current_roi != old_roi and roi_bid_manual_source in ("roi", "transaction_bid"):
                     param_changed = True
                     if roi_bid_manual_source == "roi":
@@ -6827,13 +7061,30 @@ SKU名称尽量接近35字，最多不超过40字。
                 
                 margin_rate = self.get_current_margin_rate()
                 return_rate_val = self.get_return_rate()
-                net_margin_formula = margin_rate * (1 - return_rate_val / 100) - 0.0006
+                net_margin_formula = margin_rate * (1 - return_rate_val / 100) - 0.006
                 net_break_even_roi = 1 / net_margin_formula if net_margin_formula > 0 else 0
                 
-                self.db.safe_execute(
-                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, return_rate=?, is_limited_time=?, is_marketing=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=?, roi_input_mode=? WHERE id=?",
-                    (coupon_amount, new_customer_discount, current_roi, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, net_break_even_roi, roi_input_mode, self.product_id)
+                update_result = self.db.safe_execute(
+                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, transaction_bid=?, return_rate=?, is_limited_time=?, is_marketing=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=?, roi_input_mode=? WHERE id=?",
+                    (coupon_amount, new_customer_discount, current_roi, transaction_bid, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, net_break_even_roi, roi_input_mode, self.product_id)
                 )
+                if update_result is None:
+                    raise RuntimeError("保存投产比/成交出价失败")
+                saved_check = self.db.safe_fetchall(
+                    "SELECT current_roi, COALESCE(transaction_bid, 0), COALESCE(roi_input_mode, 'roi') FROM products WHERE id=?",
+                    (self.product_id,)
+                )
+                if not saved_check:
+                    raise RuntimeError("保存投产比/成交出价失败：未找到当前链接")
+                saved_roi_check = float(saved_check[0][0] or 0)
+                saved_bid_check = float(saved_check[0][1] or 0)
+                saved_mode_check = saved_check[0][2] if saved_check[0][2] in ("roi", "bid") else "roi"
+                if saved_mode_check != roi_input_mode:
+                    raise RuntimeError("保存投产比/成交出价失败：输入模式未写入")
+                if roi_input_mode == "bid" and transaction_bid > 0 and abs(saved_bid_check - transaction_bid) >= 0.001:
+                    raise RuntimeError("保存成交出价失败：数据库回读不一致")
+                if current_roi > 0 and abs(saved_roi_check - current_roi) >= 0.001:
+                    raise RuntimeError("保存投产比失败：数据库回读不一致")
             except ValueError:
                 pass
             
@@ -6863,7 +7114,7 @@ SKU名称尽量接近35字，最多不超过40字。
                 ]
                 current_margin_pct = self._calculate_weighted_margin_from_specs(new_specs_for_margin, discount_amount)
                 current_avg_price = self._calculate_weighted_avg_price_from_specs(new_specs_for_margin)
-                current_transaction_bid = self._calc_bid_for_record(current_avg_price, current_roi, return_rate)
+                current_transaction_bid = transaction_bid or self._calc_bid_for_record(current_avg_price, current_roi, return_rate)
                 
                 # 获取当前日期
                 now = datetime.now()

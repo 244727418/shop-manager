@@ -33,6 +33,7 @@ manager/**/cloud_backup_before_upload/
 manager/**/local_backup_before_download/
 manager/**/local_backup_before_upload/
 manager/**/local_current/
+manager/browser_profiles/
 archive/private/
 *.log
 *.tmp

@@ -126,6 +126,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加current_roi字段到products表")
                 except Exception as e:
                     print(f"添加current_roi字段失败: {e}")
+            if 'transaction_bid' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN transaction_bid REAL DEFAULT 0")
+                    print("✅ 已添加transaction_bid字段到products表")
+                except Exception as e:
+                    print(f"添加transaction_bid字段失败: {e}")
 
             if 'return_rate' not in columns:
                 try:
@@ -214,6 +220,18 @@ class SafeDatabaseManager:
                     print("已添加roi_input_mode字段到products表")
                 except Exception as e:
                     print(f"添加roi_input_mode字段失败: {e}")
+            if 'is_archived' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
+                    print("已添加is_archived字段到products表")
+                except Exception as e:
+                    print(f"添加is_archived字段失败: {e}")
+            if 'archived_at' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN archived_at TEXT")
+                    print("已添加archived_at字段到products表")
+                except Exception as e:
+                    print(f"添加archived_at字段失败: {e}")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
                                 (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL, test_price REAL,
@@ -667,6 +685,8 @@ class SafeDatabaseManager:
                 net_transaction_amount REAL DEFAULT 0,
                 net_roi REAL DEFAULT 0,
                 net_orders REAL DEFAULT 0,
+                net_profit REAL,
+                net_margin_rate REAL,
                 cost_per_net_order REAL DEFAULT 0,
                 cpc REAL DEFAULT 0,
                 impressions REAL DEFAULT 0,
@@ -686,6 +706,18 @@ class SafeDatabaseManager:
                     print("✅ 已添加product_title字段到promotion_daily_data表")
                 except Exception as e:
                     print(f"添加product_title字段失败: {e}")
+            if 'net_profit' not in promo_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE promotion_daily_data ADD COLUMN net_profit REAL")
+                    print("✅ 已添加net_profit字段到promotion_daily_data表")
+                except Exception as e:
+                    print(f"添加net_profit字段失败: {e}")
+            if 'net_margin_rate' not in promo_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE promotion_daily_data ADD COLUMN net_margin_rate REAL")
+                    print("✅ 已添加net_margin_rate字段到promotion_daily_data表")
+                except Exception as e:
+                    print(f"添加net_margin_rate字段失败: {e}")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_promotion_daily_store_date ON promotion_daily_data(store_id, record_date)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_promotion_daily_product ON promotion_daily_data(store_id, product_id, record_date)")
             print("✅ 推广日报数据表已创建")
@@ -1139,6 +1171,31 @@ class SafeDatabaseManager:
             print(f"更新商品类型颜色失败: {e}")
             return False
 
+    def rename_cost_category(self, old_label, new_label):
+        old_label = str(old_label or "").strip()
+        new_label = str(new_label or "").strip()
+        if not old_label or not new_label or old_label == new_label:
+            return False
+        if self.safe_fetchall("SELECT 1 FROM cost_categories WHERE label=?", (new_label,)):
+            raise ValueError("商品类型名称已存在。")
+        try:
+            color_rows = self.safe_fetchall("SELECT color FROM cost_categories WHERE label=?", (old_label,))
+            color = color_rows[0][0] if color_rows and color_rows[0][0] else self.category_color_for_label(new_label)
+            self.cursor.execute("UPDATE cost_categories SET label=?, color=? WHERE label=?", (new_label, color, old_label))
+            self.cursor.execute(
+                "UPDATE cost_library SET category_label=?, category_color=? WHERE category_label=?",
+                (new_label, color, old_label),
+            )
+            self.cursor.execute(
+                "UPDATE products SET product_category_label=? WHERE product_category_label=?",
+                (new_label, old_label),
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def update_cost_spec_category(self, spec_code, label):
         spec_code = str(spec_code or "").strip()
         label = str(label or "").strip()
@@ -1213,14 +1270,17 @@ class SafeDatabaseManager:
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def get_link_combinations_with_counts(self):
+    def get_link_combinations_with_counts(self, store_id=None):
         try:
+            store_clause = " AND p.store_id = ?" if store_id is not None else ""
+            params = (store_id,) if store_id is not None else ()
             return self.safe_fetchall(
-                """SELECT lc.id, lc.name, COALESCE(lc.sort_order, 0), COUNT(p.id) AS link_count
+                f"""SELECT lc.id, lc.name, COALESCE(lc.sort_order, 0), COUNT(p.id) AS link_count
                    FROM link_combinations lc
-                   LEFT JOIN products p ON p.link_combo_id = lc.id
+                   LEFT JOIN products p ON p.link_combo_id = lc.id{store_clause}
                    GROUP BY lc.id, lc.name, lc.sort_order
-                   ORDER BY COALESCE(lc.sort_order, 0), lc.name"""
+                   ORDER BY COALESCE(lc.sort_order, 0), lc.name""",
+                params,
             )
         except Exception as e:
             print(f"读取链接组合失败: {e}")
@@ -1246,6 +1306,29 @@ class SafeDatabaseManager:
         except Exception as e:
             print(f"移动链接组合失败: {e}")
             return False
+
+    def delete_link_combinations(self, combo_ids):
+        ids = []
+        for combo_id in combo_ids or []:
+            try:
+                value = int(combo_id)
+            except (TypeError, ValueError):
+                continue
+            if value not in ids:
+                ids.append(value)
+        if not ids:
+            return 0
+        placeholders = ",".join(["?"] * len(ids))
+        try:
+            self.cursor.execute(f"UPDATE products SET link_combo_id=NULL WHERE link_combo_id IN ({placeholders})", tuple(ids))
+            self.cursor.execute(f"DELETE FROM link_combinations WHERE id IN ({placeholders})", tuple(ids))
+            deleted = self.cursor.rowcount
+            self.conn.commit()
+            return deleted
+        except Exception as e:
+            self.conn.rollback()
+            print(f"删除链接组合失败: {e}")
+            raise
 
     def update_product_link_type(self, product_id, link_type):
         try:
@@ -1313,9 +1396,9 @@ class SafeDatabaseManager:
     def update_all_product_category_labels(self, store_id=None):
         try:
             products = (
-                self.safe_fetchall("SELECT id FROM products WHERE store_id=?", (store_id,))
+                self.safe_fetchall("SELECT id FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0", (store_id,))
                 if store_id
-                else self.safe_fetchall("SELECT id FROM products")
+                else self.safe_fetchall("SELECT id FROM products WHERE COALESCE(is_archived, 0)=0")
             )
             count = 0
             for (product_id,) in products:
@@ -1942,6 +2025,7 @@ class SafeDatabaseManager:
                 return []
             conditions = []
             params = []
+            conditions.append("COALESCE(is_archived, 0)=0")
             if store_id:
                 conditions.append("store_id = ?")
                 params.append(store_id)

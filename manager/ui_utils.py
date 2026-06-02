@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""UI 工具函数：Markdown 转 HTML 等，供利润分析、历史记录等对话框复用。"""
+"""UI utility functions shared by dialogs."""
 import re
 
 
 def convert_markdown_to_html(text):
-    """将简单 Markdown 文本转为 HTML，用于 QTextBrowser 等展示。"""
+    """Convert simple Markdown text into HTML for QTextBrowser-style widgets."""
     if not text:
         return ""
 
