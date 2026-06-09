@@ -1,5 +1,5 @@
 ﻿# ================= 版本信息 =================
-VERSION = "3.15.1"
+VERSION = "3.18"
 
 # ================= 系统标准库 =================
 import sys
@@ -12,6 +12,7 @@ import requests
 import subprocess
 import ctypes
 import shutil
+import socket
 from datetime import datetime, timedelta
 
 # Windows下隐藏控制台窗口的常量（防止黑框闪烁）
@@ -80,6 +81,11 @@ except ImportError:
     from widgets import ProductWidget, StoreWidget, RecordRow, InPlaceEditor
 
 try:
+    from manager.pdd_browser_monitor import PddBrowserMonitor
+except ImportError:
+    from pdd_browser_monitor import PddBrowserMonitor
+
+try:
     from manager.dialogs import (
         OperationRecordDialog, DailyRecordDialog, StoreMarginDialog, CostImportDialog,
         CostLibraryDialog, MaterialLibraryDialog, ApiConfigDialog,
@@ -111,10 +117,38 @@ try:
 except ImportError:
     from ui_utils import convert_markdown_to_html
 
+try:
+    from manager.update_manager import (
+        UpdateAdminDialog,
+        UpdateBroadcastListener,
+        UpdateDownloadWorker,
+        UpdatePublishService,
+        app_dir,
+        fetch_manifest,
+        is_newer_version,
+        load_global_update_settings,
+        normalize_server_url,
+        save_global_update_setting,
+    )
+except ImportError:
+    from update_manager import (
+        UpdateAdminDialog,
+        UpdateBroadcastListener,
+        UpdateDownloadWorker,
+        UpdatePublishService,
+        app_dir,
+        fetch_manifest,
+        is_newer_version,
+        load_global_update_settings,
+        normalize_server_url,
+        save_global_update_setting,
+    )
+
 
 SINGLE_INSTANCE_KEY = "shop_manager_v3_7_single_instance"
 SINGLE_INSTANCE_MUTEX_NAME = "shop_manager_v3_7_single_instance_mutex"
 MAIN_WINDOW_TITLE = f"电商店铺操作记录管理工具 v{VERSION}"
+UPDATE_ADMIN_PASSWORD = "244"
 ERROR_ALREADY_EXISTS = 183
 SW_SHOW = 5
 SW_RESTORE = 9
@@ -509,6 +543,20 @@ class SettingsDialog(QDialog):
         self.auto_start_checkbox.setToolTip("勾选后，程序将在Windows启动时自动运行")
         layout.addWidget(self.auto_start_checkbox)
 
+        self.update_admin_checkbox = QCheckBox("管理员更新模式")
+        self.update_admin_checkbox.setStyleSheet("""
+            QCheckBox {
+                spacing: 10px;
+                font-size: 14px;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+            }
+        """)
+        self.update_admin_checkbox.setToolTip("仅主电脑勾选。勾选后可以开启局域网更新服务并推送更新。")
+        layout.addWidget(self.update_admin_checkbox)
+
         layout.addSpacing(10)
         layout.addWidget(QLabel("<hr>"))
 
@@ -602,6 +650,8 @@ class SettingsDialog(QDialog):
     def load_settings(self):
         is_enabled = self._is_auto_start_enabled()
         self.auto_start_checkbox.setChecked(is_enabled)
+        settings = load_global_update_settings()
+        self.update_admin_checkbox.setChecked(str(settings.get("update_admin_mode", "0")) == "1")
 
     def _is_auto_start_enabled(self):
         try:
@@ -650,6 +700,25 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         auto_start_enabled = self.auto_start_checkbox.isChecked()
+        if self.parent() and hasattr(self.parent(), "db"):
+            settings = load_global_update_settings()
+            was_admin = str(settings.get("update_admin_mode", "0")) == "1"
+            admin_verified = str(settings.get("update_admin_verified", "0")) == "1"
+            if self.update_admin_checkbox.isChecked() and not was_admin and not admin_verified:
+                password, ok = QInputDialog.getText(
+                    self,
+                    "管理员验证",
+                    "请输入开发者密码：",
+                    QLineEdit.Password,
+                )
+                if not ok:
+                    return
+                if password != UPDATE_ADMIN_PASSWORD:
+                    QMessageBox.warning(self, "密码错误", "开发者密码不正确。")
+                    self.update_admin_checkbox.setChecked(False)
+                    return
+                save_global_update_setting("update_admin_verified", "1")
+            save_global_update_setting("update_admin_mode", "1" if self.update_admin_checkbox.isChecked() else "0")
         
         if self._set_auto_start(auto_start_enabled):
             QMessageBox.information(self, "成功", "设置已保存！")
@@ -832,11 +901,22 @@ class ShopManagerApp(QMainWindow):
         self.current_store_filter = set()  # 店铺筛选状态
         self.daily_task_dialog = None
         self.store_margin_dialogs = {}
+        self.product_spec_dialog = None
         self._active_reminder_ids = set()
         self._task_reminder_popup_active = False
         self._record_tooltip_cell = None
         self._record_tooltip_text = ""
         self._record_tooltip_pos = QPoint()
+        self.current_version = VERSION
+        self.update_publish_service = UpdatePublishService()
+        self.update_listener = UpdateBroadcastListener(self)
+        self.update_listener.updateReceived.connect(self.on_update_broadcast_received)
+        self.update_download_worker = None
+        self.update_progress_dialog = None
+        self.pending_update_manifest = None
+        self.pending_test_message = ""
+        self.update_notification_queue = []
+        self.update_notification_active = False
 
         # 初始化云同步管理器
         self.cloud_manager = None
@@ -858,6 +938,7 @@ class ShopManagerApp(QMainWindow):
         # 初始化快捷键
         self.init_shortcuts()
         self.start_global_reminder_check()
+        self.start_update_features()
         
         
 
@@ -1025,6 +1106,7 @@ class ShopManagerApp(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        QTimer.singleShot(100, self.show_pending_update_notification)
     
     def open_knowledge_base(self):
         """打开知识库（已禁用）"""
@@ -1032,15 +1114,305 @@ class ShopManagerApp(QMainWindow):
 
     def open_pinduoduo(self):
         """打开拼多多商家后台"""
-        import webbrowser
-        url = "https://mms.pinduoduo.com/login/?redirectUrl=https%3A%2F%2Fmms.pinduoduo.com%2F"
-        webbrowser.open(url)
-        self.statusBar().showMessage(f"已打开拼多多商家后台: {url}", 3000)
+        store_id = self.store_combo.currentData() if hasattr(self, "store_combo") else None
+        if not store_id:
+            QMessageBox.information(self, "请选择店铺", "请先在主界面店铺筛选中选择具体店铺，再打开拼多多商家后台。")
+            return
+        try:
+            if not hasattr(self, "pdd_browser_monitor") or self.pdd_browser_monitor is None:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
+            state = self.pdd_browser_monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            self.statusBar().showMessage(
+                f"已按店铺 {store_id} 打开拼多多商家后台，端口 {state.get('port')}",
+                3000,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"打开拼多多商家后台失败：{e}")
+
+    def open_pdd_code_fetch_for_store(self, store_id):
+        """按店铺打开拼多多商家端，并打开抓取添加编码窗口。"""
+        if not store_id:
+            QMessageBox.information(self, "请选择店铺", "请先选择要添加链接的店铺。")
+            return
+        try:
+            if not hasattr(self, "pdd_browser_monitor") or self.pdd_browser_monitor is None:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
+            self.pdd_browser_monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+
+            try:
+                from manager.dialogs.store_margin import PddProductMatchDialog
+            except ImportError:
+                from dialogs.store_margin import PddProductMatchDialog
+
+            if not hasattr(self, "pdd_code_fetch_dialogs") or self.pdd_code_fetch_dialogs is None:
+                self.pdd_code_fetch_dialogs = {}
+            dialog = self.pdd_code_fetch_dialogs.get(store_id)
+            if dialog is None:
+                dialog = PddProductMatchDialog(
+                    self.db,
+                    self.pdd_browser_monitor,
+                    default_store_id=store_id,
+                    parent=None,
+                    mode="code",
+                    store_id_provider=lambda sid=store_id: sid,
+                    owner=self,
+                )
+                dialog.destroyed.connect(lambda _=None, sid=store_id: self.pdd_code_fetch_dialogs.pop(sid, None))
+                self.pdd_code_fetch_dialogs[store_id] = dialog
+
+            if dialog.isMinimized():
+                dialog.showNormal()
+            else:
+                dialog.show()
+            dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+            dialog.raise_()
+            dialog.activateWindow()
+            self.statusBar().showMessage(f"已打开店铺 {store_id} 的拼多多抓取添加编码窗口", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多链接抓取", f"打开抓取添加编码窗口失败：{e}")
 
     def show_settings_dialog(self):
         """打开设置对话框"""
         dialog = SettingsDialog(self)
         dialog.exec_()
+
+    def start_update_features(self):
+        """启动局域网更新监听，并在打开软件时检查一次。"""
+        try:
+            self.update_listener.start()
+        except Exception as e:
+            print(f"启动更新广播监听失败: {e}")
+        QTimer.singleShot(1500, self.check_update_on_startup)
+
+    def verify_developer_password(self):
+        settings = load_global_update_settings()
+        if str(settings.get("update_admin_verified", "0")) == "1":
+            return True
+        password, ok = QInputDialog.getText(
+            self,
+            "开发者模式",
+            "请输入开发者密码：",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return False
+        if password != UPDATE_ADMIN_PASSWORD:
+            QMessageBox.warning(self, "密码错误", "开发者密码不正确。")
+            return False
+        save_global_update_setting("update_admin_verified", "1")
+        return True
+
+    def show_update_center(self):
+        """打开开发者更新发布中心。"""
+        if not self.verify_developer_password():
+            return
+        save_global_update_setting("update_admin_mode", "1")
+        dialog = UpdateAdminDialog(self, self.update_publish_service, self)
+        dialog.exec_()
+
+    def check_update_on_startup(self, show_no_update=False):
+        """启动时只检查一次保存的更新地址。"""
+        settings = load_global_update_settings()
+        server_url = normalize_server_url(settings.get("update_server_url", "") or "")
+        if not server_url:
+            if show_no_update:
+                QMessageBox.information(self, "更新", "还没有设置更新地址。")
+            return
+        try:
+            manifest = fetch_manifest(server_url, timeout=3)
+        except Exception as e:
+            if show_no_update:
+                QMessageBox.warning(self, "检查失败", f"检查更新失败：{e}")
+            return
+        if self.is_local_update_broadcast(manifest):
+            if show_no_update:
+                QMessageBox.information(self, "更新", "这是本机发布的更新地址，已跳过本机提示。")
+            return
+        self.handle_update_manifest(manifest, show_no_update=show_no_update)
+
+    def check_saved_or_server_update(self):
+        """手动检查更新：优先使用最近一次广播收到的下载地址。"""
+        settings = load_global_update_settings()
+        saved_manifest = settings.get("last_update_manifest")
+        if isinstance(saved_manifest, dict):
+            saved_version = str(saved_manifest.get("version", "")).strip()
+            saved_url = str(saved_manifest.get("url", "")).strip()
+            if (
+                saved_version
+                and saved_url
+                and not self.is_local_update_broadcast(saved_manifest)
+                and is_newer_version(saved_version, self.current_version)
+            ):
+                self.handle_update_manifest(saved_manifest, show_no_update=True)
+                return
+        self.check_update_on_startup(show_no_update=True)
+
+    def remember_update_manifest(self, manifest):
+        """保存最近一次收到的更新包地址，便于稍后手动检查和下载。"""
+        if not isinstance(manifest, dict):
+            return
+        update_url = str(manifest.get("url", "") or "").strip()
+        if not update_url.startswith(("http://", "https://")):
+            return
+        stored_manifest = {k: v for k, v in manifest.items() if not str(k).startswith("_")}
+        save_global_update_setting("last_update_manifest", stored_manifest)
+        save_global_update_setting("last_update_url", update_url)
+        save_global_update_setting("last_update_version", str(manifest.get("version", "") or "").strip())
+        save_global_update_setting("last_update_filename", manifest.get("filename", "") or os.path.basename(update_url))
+        server_url = "/".join(update_url.split("/")[:3])
+        save_global_update_setting("update_server_url", normalize_server_url(server_url))
+
+    def get_local_update_ips(self):
+        ips = {"127.0.0.1", "::1", "localhost"}
+        try:
+            ips.add(socket.gethostbyname(socket.gethostname()))
+        except Exception:
+            pass
+        try:
+            for item in socket.getaddrinfo(socket.gethostname(), None):
+                ip = item[4][0]
+                if ip:
+                    ips.add(ip)
+        except Exception:
+            pass
+        probe = None
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("8.8.8.8", 80))
+            ips.add(probe.getsockname()[0])
+        except Exception:
+            pass
+        finally:
+            if probe:
+                probe.close()
+        return {ip for ip in ips if ip}
+
+    def is_local_update_broadcast(self, manifest):
+        local_ips = self.get_local_update_ips()
+        sender_ip = str(manifest.get("_sender_ip", "") or "").strip()
+        if sender_ip in local_ips:
+            return True
+        update_url = str(manifest.get("url", "") or "").strip()
+        if "://" in update_url:
+            try:
+                host = update_url.split("://", 1)[1].split("/", 1)[0].split("@")[-1].split(":", 1)[0]
+            except Exception:
+                host = ""
+            if host in local_ips:
+                return True
+        return False
+
+    def enqueue_update_notification(self, item):
+        if not isinstance(item, dict):
+            return
+        self.update_notification_queue.append(item)
+        self.schedule_update_notification()
+
+    def schedule_update_notification(self):
+        if self.isVisible() and not self.isMinimized():
+            self.raise_()
+            self.activateWindow()
+            QTimer.singleShot(0, self.show_pending_update_notification)
+
+    def on_update_broadcast_received(self, manifest):
+        """收到主电脑推送后逐条提示，不合并连续推送。"""
+        if self.is_local_update_broadcast(manifest):
+            return
+        if manifest.get("message_kind") == "test":
+            self.enqueue_update_notification({
+                "type": "test",
+                "message": manifest.get("message", "局域网测试消息"),
+            })
+            return
+        self.remember_update_manifest(manifest)
+        if is_newer_version(str(manifest.get("version", "")).strip(), self.current_version):
+            self.enqueue_update_notification({
+                "type": "update",
+                "manifest": manifest,
+            })
+
+    def show_pending_update_notification(self):
+        if self.update_notification_active:
+            return
+        if self.update_notification_queue:
+            item = self.update_notification_queue.pop(0)
+            self.update_notification_active = True
+            try:
+                if item.get("type") == "test":
+                    QMessageBox.information(self, "收到局域网测试", item.get("message") or "局域网测试消息")
+                elif item.get("type") == "update":
+                    self.handle_update_manifest(item.get("manifest") or {}, show_no_update=False)
+            finally:
+                self.update_notification_active = False
+                if self.update_notification_queue:
+                    QTimer.singleShot(0, self.show_pending_update_notification)
+            return
+        if self.pending_test_message:
+            message = self.pending_test_message
+            self.pending_test_message = ""
+            QMessageBox.information(self, "收到局域网测试", message)
+            return
+        if self.pending_update_manifest:
+            manifest = self.pending_update_manifest
+            self.pending_update_manifest = None
+            self.handle_update_manifest(manifest, show_no_update=False)
+
+    def handle_update_manifest(self, manifest, show_no_update=False):
+        self.remember_update_manifest(manifest)
+        remote_version = str(manifest.get("version", "")).strip()
+        if not remote_version:
+            return
+        if not is_newer_version(remote_version, self.current_version):
+            if show_no_update:
+                QMessageBox.information(self, "更新", f"当前已经是最新版本：v{self.current_version}")
+            return
+        filename = manifest.get("filename") or os.path.basename(manifest.get("url", ""))
+        message = (
+            f"发现新版本 v{remote_version}\n\n"
+            f"文件：{filename}\n"
+            f"下载位置：{app_dir()}\n\n"
+            "下载完成后，关闭当前软件，再打开下载好的新版本即可。"
+        )
+        reply = QMessageBox.question(
+            self,
+            "发现更新",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self.download_update_package(manifest)
+
+    def download_update_package(self, manifest):
+        self.update_progress_dialog = QProgressDialog("正在下载更新...", "取消", 0, 100, self)
+        self.update_progress_dialog.setWindowTitle("下载更新")
+        self.update_progress_dialog.setWindowModality(Qt.WindowModal)
+        self.update_progress_dialog.setMinimumDuration(0)
+        self.update_progress_dialog.setValue(0)
+
+        self.update_download_worker = UpdateDownloadWorker(manifest, app_dir(), self)
+        self.update_download_worker.progressChanged.connect(self.update_progress_dialog.setValue)
+        self.update_download_worker.finishedOk.connect(self.on_update_download_finished)
+        self.update_download_worker.failed.connect(self.on_update_download_failed)
+        self.update_progress_dialog.canceled.connect(self.update_download_worker.terminate)
+        self.update_download_worker.start()
+
+    def on_update_download_finished(self, target_path):
+        if self.update_progress_dialog:
+            self.update_progress_dialog.setValue(100)
+            self.update_progress_dialog.close()
+        QMessageBox.information(
+            self,
+            "下载完成",
+            f"新版本已下载到：\n{target_path}\n\n请关闭当前软件，然后打开这个新版本。"
+        )
+
+    def on_update_download_failed(self, error):
+        if self.update_progress_dialog:
+            self.update_progress_dialog.close()
+        QMessageBox.warning(self, "下载失败", f"下载更新失败：{error}")
 
     def show_shortcuts_dialog(self):
         """打开快捷键说明对话框（复用设置对话框）"""
@@ -1210,6 +1582,14 @@ class ShopManagerApp(QMainWindow):
                 except Exception:
                     pass
             self.store_margin_dialogs.clear()
+
+            product_spec_dialog = getattr(self, "product_spec_dialog", None)
+            if product_spec_dialog is not None:
+                try:
+                    product_spec_dialog.close()
+                except Exception:
+                    pass
+                self.product_spec_dialog = None
 
             daily_dialog = getattr(self, "daily_task_dialog", None)
             if daily_dialog is not None:
@@ -1602,6 +1982,9 @@ class ShopManagerApp(QMainWindow):
     
     def closeEvent(self, event):
         """关闭事件处理 - 最小化到托盘而不是退出"""
+        if getattr(self, "_is_quitting", False):
+            event.accept()
+            return
         if self.tray_icon.isVisible():
             self.hide()
             self.tray_icon.showMessage(
@@ -1620,6 +2003,8 @@ class ShopManagerApp(QMainWindow):
             if self.windowState() & Qt.WindowMinimized:
                 # 最小化到任务栏（默认行为，不做额外处理）
                 pass
+        elif event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            QTimer.singleShot(100, self.show_pending_update_notification)
         super().changeEvent(event)
 
     def center_on_screen(self):
@@ -1637,22 +2022,20 @@ class ShopManagerApp(QMainWindow):
         self.resize(1350, 1000)
         self.center_on_screen()
 
-        # 调试标签
-        self.debug_label = QLabel("🔧 调试: shop_manager.py (ShopManagerApp)")
-        self.debug_label.setStyleSheet("font-size: 10px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-bottom: 1px solid #ddd;")
-        self.debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.debug_label.setCursor(Qt.IBeamCursor)
-
-        # 系统资源监控显示（顶部细条）
-        self.resource_label = QLabel("📊 系统资源: 初始化...")
+        self.resource_label = QLabel("资源: 初始化...")
         self.resource_label.setStyleSheet("""
-            background-color: #2c3e50; 
-            color: #ecf0f1; 
-            font-size: 10px; 
-            padding: 1px 10px;
+            QLabel {
+                color: #5c6670;
+                font-size: 11px;
+                padding: 1px 6px;
+                border: 1px solid #d9dee3;
+                border-radius: 4px;
+                background: #f8f9fa;
+            }
         """)
-        self.resource_label.setFixedHeight(18)
-        self.resource_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.resource_label.setFixedHeight(24)
+        self.resource_label.setMinimumWidth(260)
+        self.resource_label.setAlignment(Qt.AlignCenter)
         
         # 启动资源监控定时器
         self.resource_timer = QTimer()
@@ -2009,6 +2392,7 @@ class ShopManagerApp(QMainWindow):
         toolbar.addWidget(self.product_sort_combo)
 
         toolbar.addStretch()
+        toolbar.addWidget(self.resource_label)
 
         # 状态栏左下角按钮区域
         bottom_left_widget = QWidget()
@@ -2114,6 +2498,44 @@ class ShopManagerApp(QMainWindow):
         bottom_left_layout.addWidget(self.btn_real_promotion_mode)
         self._update_real_promotion_mode_button_style()
 
+        self.btn_update_center = QPushButton("开发者模式")
+        self.btn_update_center.setFixedSize(92, 26)
+        self.btn_update_center.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #2c3e50;
+            }
+        """)
+        self.btn_update_center.clicked.connect(self.show_update_center)
+        self.btn_update_center.setToolTip("输入开发者密码后推送局域网更新")
+        bottom_left_layout.addWidget(self.btn_update_center)
+
+        self.btn_check_update = QPushButton("检查更新")
+        self.btn_check_update.setFixedSize(82, 26)
+        self.btn_check_update.setStyleSheet("""
+            QPushButton {
+                background-color: #2d8f6f;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background-color: #23745a;
+            }
+        """)
+        self.btn_check_update.clicked.connect(self.check_saved_or_server_update)
+        self.btn_check_update.setToolTip("检查更新，优先使用最近一次收到的更新下载地址")
+        bottom_left_layout.addWidget(self.btn_check_update)
+
         self.statusBar().addWidget(bottom_left_widget)
 
         # 状态栏右下角按钮区域
@@ -2214,35 +2636,7 @@ class ShopManagerApp(QMainWindow):
         # --- 布局代码 (保持你原有的不变) ---
         main_layout = QVBoxLayout()
 
-        # 添加调试标签到最顶部
-        main_layout.addWidget(self.debug_label)
-
-        # 添加资源监控标签到顶部
-        main_layout.addWidget(self.resource_label)
-
-        debug_label = QLabel("【主界面工具栏区】")
-        debug_label.setStyleSheet("background-color: #FFB6C1; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        main_layout.addWidget(debug_label)
-
         main_layout.addLayout(toolbar)
-
-        debug_container = QWidget()
-        debug_layout = QHBoxLayout(debug_container)
-        debug_layout.setContentsMargins(0, 0, 0, 0)
-        debug_layout.setSpacing(10)
-
-        debug_label1 = QLabel("【左侧冻结列区】")
-        debug_label1.setStyleSheet("background-color: #98FB98; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label1.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(debug_label1)
-
-        debug_label2 = QLabel("【右侧主表区】")
-        debug_label2.setStyleSheet("background-color: #87CEEB; color: #000; padding: 2px 5px; font-size: 11px;")
-        debug_label2.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        debug_layout.addWidget(debug_label2)
-
-        main_layout.addWidget(debug_container)
         main_layout.addWidget(self.table)
         
         central_widget = QWidget()
@@ -2861,9 +3255,29 @@ class ShopManagerApp(QMainWindow):
 
     def open_product_spec_dialog(self, db, product_id, product_code, product_title, parent):
         """打开规格与毛利对话框（供 StoreMarginDialog 等调用，避免 dialogs 依赖本模块）"""
-        dialog = ProductSpecDialog(db, product_id, product_code, product_title, parent)
+        existing = getattr(self, "product_spec_dialog", None)
+        if existing is not None:
+            try:
+                if getattr(existing, "product_id", None) == product_id:
+                    if existing.isMinimized():
+                        existing.showNormal()
+                    else:
+                        existing.show()
+                    existing.raise_()
+                    existing.activateWindow()
+                    return existing
+                existing.close()
+            except RuntimeError:
+                pass
+            self.product_spec_dialog = None
+
+        dialog = ProductSpecDialog(db, product_id, product_code, product_title, self)
         dialog.main_app = self
+        dialog.destroyed.connect(lambda _=None, d=dialog: setattr(self, "product_spec_dialog", None) if getattr(self, "product_spec_dialog", None) is d else None)
+        self.product_spec_dialog = dialog
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         return dialog
 
     def open_profit_calculator_dialog(self, margin_rate, avg_price, store_id, store_name, scope, parent, db):
@@ -3486,9 +3900,7 @@ class ShopManagerApp(QMainWindow):
             prod_code = widget.prod_code      # 用户输入的ID
             prod_title = widget.prod_title    # 商品标题
         
-        # 直接使用 ProductSpecDialog（不需要导入，因为在同一个文件）
-        dialog = ProductSpecDialog(self.db, product_id, prod_code, prod_title, self)
-        dialog.show()
+        self.open_product_spec_dialog(self.db, product_id, prod_code, prod_title, self)
 
     def prev_month(self):
         try:
@@ -3533,17 +3945,29 @@ class ShopManagerApp(QMainWindow):
             v_scroll = self.table.verticalScrollBar()
             saved_y = v_scroll.value() if v_scroll else None
             h_scroll = self.table.horizontalScrollBar()
+
+            def target_scroll_value():
+                header = self.table.horizontalHeader()
+                column_left = header.sectionPosition(day)
+                column_width = self.table.columnWidth(day)
+                viewport_width = self.table.viewport().width()
+                target = column_left - max(0, (viewport_width - column_width) // 2)
+                if h_scroll:
+                    return max(h_scroll.minimum(), min(h_scroll.maximum(), target))
+                return target
+
+            target_x = target_scroll_value()
             if h_scroll:
-                col_x = self.table.columnViewportPosition(day)
-                absolute_x = h_scroll.value() + col_x
-                target_x = absolute_x - max(0, (self.table.viewport().width() - self.table.columnWidth(day)) // 2)
-                h_scroll.setValue(max(h_scroll.minimum(), min(h_scroll.maximum(), target_x)))
+                h_scroll.setValue(target_x)
+
             visible_row = 0
             for row in range(self.table.rowCount()):
                 if not self.table.isRowHidden(row):
                     visible_row = row
                     break
             self.table.setCurrentCell(visible_row, day)
+            if h_scroll:
+                h_scroll.setValue(target_x)
             if v_scroll and saved_y is not None:
                 v_scroll.setValue(saved_y)
             self.update_frozen_geometry()
@@ -3723,10 +4147,19 @@ class ShopManagerApp(QMainWindow):
             
             # 按钮
             btn_layout = QHBoxLayout()
+            btn_pdd_code_fetch = QPushButton("抓取添加编码")
+            btn_pdd_code_fetch.setToolTip("打开当前店铺的拼多多商家端网页，并打开抓取添加编码窗口")
+            btn_pdd_code_fetch.clicked.connect(lambda _checked=False, sid=store_id: self.open_pdd_code_fetch_for_store(sid))
+            btn_pdd_code_fetch.setStyleSheet(
+                "QPushButton { background-color: #f39c12; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #d68910; }"
+            )
             btn_ok = QPushButton("确定")
             btn_ok.clicked.connect(dialog.accept)
             btn_cancel = QPushButton("取消")
             btn_cancel.clicked.connect(dialog.reject)
+            btn_layout.addWidget(btn_pdd_code_fetch)
+            btn_layout.addStretch()
             btn_layout.addWidget(btn_ok)
             btn_layout.addWidget(btn_cancel)
             layout.addLayout(btn_layout)
@@ -3896,8 +4329,12 @@ class ShopManagerApp(QMainWindow):
                 self.apply_realtime_search()
             else:
                 self.clear_search_filter()
-            if getattr(self, "current_category_filter", "") or getattr(self, "current_filter_tags", None):
-                self.apply_tag_filter(close_menu=False)
+            if (
+                getattr(self, "current_category_filter", "")
+                or getattr(self, "current_filter_tags", None)
+                or getattr(self, "current_store_filter", None)
+            ):
+                self.apply_tag_filter(close_menu=False, show_message=False)
         except Exception as e:
             print(f"刷新搜索和筛选状态失败: {e}")
     
@@ -4143,7 +4580,7 @@ class ShopManagerApp(QMainWindow):
         self.store_filter_menu.move(global_pos)
         self.store_filter_menu.exec_()
 
-    def apply_store_filter(self, store_id=None, close_menu=False):
+    def apply_store_filter(self, store_id=None, close_menu=False, show_message=True):
         """应用店铺筛选
 
         Args:
@@ -4161,10 +4598,18 @@ class ShopManagerApp(QMainWindow):
 
             if close_menu and self.store_filter_menu:
                 self.store_filter_menu.close()
-                return
 
             if not self.current_store_filter:
                 self.clear_store_filter()
+                return
+
+            if self._has_active_product_filter_inputs():
+                self.db.set_setting("store_filter_ids", ",".join(map(str, self.current_store_filter)))
+                self.apply_tag_filter(close_menu=False, show_message=False)
+                visible_count = sum(1 for row in range(self.table.rowCount()) if not self.table.isRowHidden(row))
+                self.btn_store_filter.setText(f"🏪 店铺 ({visible_count})")
+                if show_message:
+                    self.show_toast(f"店铺筛选: 显示 {visible_count} 个商品")
                 return
 
             selected_store_id = store_id if store_id else (list(self.current_store_filter)[0] if self.current_store_filter else None)
@@ -4194,7 +4639,8 @@ class ShopManagerApp(QMainWindow):
             filtered_count = self.table.rowCount() - hidden_count
             self.btn_store_filter.setText(f"🏪 店铺 ({filtered_count})")
             self.db.set_setting("store_filter_ids", ",".join(map(str, self.current_store_filter)) if self.current_store_filter else "")
-            self.show_toast(f"店铺筛选: 显示 {filtered_count} 个商品")
+            if show_message:
+                self.show_toast(f"店铺筛选: 显示 {filtered_count} 个商品")
 
         except Exception as e:
             print(f"应用店铺筛选失败: {e}")
@@ -4213,6 +4659,10 @@ class ShopManagerApp(QMainWindow):
         """清除店铺筛选，显示所有商品"""
         self.clear_store_filter_selection()
         self.btn_store_filter.setText("🏪 店铺")
+
+        if self._has_active_product_filter_inputs():
+            self.apply_tag_filter(close_menu=False, show_message=False)
+            return
 
         for row in range(self.table.rowCount()):
             self.table.setRowHidden(row, False)
@@ -4405,15 +4855,19 @@ class ShopManagerApp(QMainWindow):
             has_category_filter = bool(getattr(self, "current_category_filter", ""))
             search_match_ids = getattr(self, "current_search_match_ids", None)
             has_search_filter = search_match_ids is not None
+            has_store_filter = bool(getattr(self, "current_store_filter", set()))
 
             if not filters and not profit_filters and not has_category_filter and not has_search_filter:
-                self.clear_tag_filter()
-                self.btn_tag_filter.setText("🏷️ 筛选")
-                for row in range(self.table.rowCount()):
-                    self.table.setRowHidden(row, False)
-                    self.frozen_table.setRowHidden(row, False)
-                if show_message:
-                    self.show_toast("已显示所有商品")
+                if has_store_filter:
+                    self.apply_store_filter(close_menu=False, show_message=show_message)
+                else:
+                    self.clear_tag_filter()
+                    self.btn_tag_filter.setText("🏷️ 筛选")
+                    for row in range(self.table.rowCount()):
+                        self.table.setRowHidden(row, False)
+                        self.frozen_table.setRowHidden(row, False)
+                    if show_message:
+                        self.show_toast("已显示所有商品")
                 return
             
             all_product_ids = self.get_all_product_ids_with_current_store()
@@ -4480,6 +4934,10 @@ class ShopManagerApp(QMainWindow):
                 if has_search_filter and should_include:
                     if pid not in search_match_ids:
                         should_include = False
+
+                if has_store_filter and should_include:
+                    if self.product_store_map.get(pid) not in self.current_store_filter:
+                        should_include = False
                 
                 if should_include:
                     matching_ids.add(pid)
@@ -4509,6 +4967,28 @@ class ShopManagerApp(QMainWindow):
             import traceback
             traceback.print_exc()
             QMessageBox.warning(self, "筛选失败", f"标签筛选出错: {e}")
+
+    def _has_active_product_filter_inputs(self):
+        try:
+            if getattr(self, "current_search_match_ids", None) is not None:
+                return True
+            if getattr(self, "current_category_filter", ""):
+                return True
+            buttons = [
+                self.btn_filter_coupon,
+                self.btn_filter_new_customer,
+                self.btn_filter_limited_time,
+                self.btn_filter_marketing,
+                self.btn_filter_natural_flow,
+                self.btn_filter_sitewide,
+                self.btn_filter_profit,
+                self.btn_filter_loss,
+                self.btn_filter_break_even,
+                self.btn_filter_missing_roi_bid,
+            ]
+            return any(btn.isChecked() for btn in buttons)
+        except Exception:
+            return False
     
     def clear_tag_filter_selection(self):
         """清空标签筛选选择"""
@@ -4668,6 +5148,23 @@ class ShopManagerApp(QMainWindow):
             return str(int(number))
         return str(int(round(number)))
 
+    def _format_cost_attribute_value(self, key, value):
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            return ""
+        numeric_text = text.replace(",", "")
+        try:
+            number = float(numeric_text)
+            if number.is_integer():
+                text = str(int(number))
+        except ValueError:
+            pass
+        if key == "size":
+            return text if re.search(r"\bmm\b|毫米", text, flags=re.I) else f"{text}mm"
+        if key == "pages":
+            return text if "张" in text else f"{text}张"
+        return text
+
     def import_cost_data(self):
         """导入成本表 - 最终版 (直接全量读取，无预览，只显示结果)"""
         # 1. 检查依赖
@@ -4744,10 +5241,15 @@ class ShopManagerApp(QMainWindow):
             col_category = df.iloc[:, category_col_idx] if category_col_idx is not None else None
             col_weight = df.iloc[:, weight_col_idx] if weight_col_idx is not None else None
             attribute_cols = {}
+            import_product_attribute = attribute_col_indices is not None
             if attribute_col_indices:
                 for key, col_idx in attribute_col_indices.items():
                     if col_idx is not None:
-                        attribute_cols[key] = df.iloc[:, int(col_idx)]
+                        col_index = int(col_idx)
+                        attribute_cols[key] = {
+                            "series": df.iloc[:, col_index],
+                            "header": str(df.columns[col_index]).strip(),
+                        }
             row_colors = read_cost_row_colors(file_path, name_col_idx=name_col_idx, spec_col_idx=spec_col_idx)
             
             count_success = 0
@@ -4762,7 +5264,7 @@ class ShopManagerApp(QMainWindow):
             # 实际上 safe_execute 已经是逐条提交，对于几万行数据可能会慢，但最稳定
             
             self.db.conn.execute("BEGIN TRANSACTION") # 开启事务，极大提高写入速度
-            self.db.cursor.execute("UPDATE cost_library SET sort_order=NULL")
+            self.db.cursor.execute("UPDATE cost_library SET sort_order=NULL, manual_sort_order=NULL")
 
             for idx in range(total_rows):
                 try:
@@ -4800,19 +5302,26 @@ class ShopManagerApp(QMainWindow):
                     source_bg_color = row_colors.get(idx, "")
 
                     product_attribute = ""
+                    product_attribute_is_combo = 0
                     if attribute_cols and not re.search(r"\+|＋|﹢", spec_name or ""):
                         attr_parts = []
-                        for key in ("size", "pages", "cover", "print"):
-                            col_attr = attribute_cols.get(key)
-                            if col_attr is None:
+                        for key in ("size", "pages", "print"):
+                            attr_info = attribute_cols.get(key)
+                            if not attr_info:
                                 continue
+                            col_attr = attr_info.get("series")
                             attr_val = col_attr.iloc[idx]
                             if pd.isna(attr_val):
                                 continue
                             attr_text = str(attr_val).strip()
-                            if attr_text and attr_text.lower() != "nan":
-                                attr_parts.append(attr_text)
-                        product_attribute = " ".join(attr_parts)
+                            if not attr_text or attr_text.lower() == "nan":
+                                continue
+                            if key in ("size", "pages"):
+                                attr_text = self._format_cost_attribute_value(key, attr_text)
+                            header_text = str(attr_info.get("header") or "").strip()
+                            attr_parts.append(f"{header_text}：{attr_text}" if header_text else attr_text)
+                        product_attribute = "\n".join(attr_parts)
+                    product_attribute_combo_disabled = 0
                     
                     # 获取价格
                     price_val = col_price.iloc[idx]
@@ -4855,8 +5364,8 @@ class ShopManagerApp(QMainWindow):
                     self.db.cursor.execute(
                         """INSERT INTO cost_library
                            (spec_code, spec_name, quantity, category_label, category_color, cost_price, sort_order, source_bg_color,
-                            product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute, product_attribute_combo_disabled, product_attribute_is_combo)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(spec_code) DO UPDATE SET
                                spec_name=excluded.spec_name,
                                quantity=excluded.quantity,
@@ -4871,11 +5380,21 @@ class ShopManagerApp(QMainWindow):
                                misc_fee=excluded.misc_fee,
                                cost_calc_mode=excluded.cost_calc_mode,
                                product_attribute=CASE
-                                   WHEN excluded.product_attribute <> '' THEN excluded.product_attribute
+                                   WHEN ? THEN excluded.product_attribute
                                    ELSE cost_library.product_attribute
+                               END,
+                               product_attribute_combo_disabled=CASE
+                                   WHEN ? THEN excluded.product_attribute_combo_disabled
+                                   ELSE cost_library.product_attribute_combo_disabled
+                               END,
+                               product_attribute_is_combo=CASE
+                                   WHEN ? THEN excluded.product_attribute_is_combo
+                                   ELSE cost_library.product_attribute_is_combo
                                END""",
                         (spec_code, spec_name, quantity, category_label, category_color, cost_price, idx + 1, source_bg_color,
-                         product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute)
+                         product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, product_attribute,
+                         product_attribute_combo_disabled, product_attribute_is_combo,
+                         int(import_product_attribute), int(import_product_attribute), int(import_product_attribute))
                     )
 
                     if should_record_history:
@@ -5106,6 +5625,7 @@ if __name__ == "__main__":
         pass
     
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     single_instance_mutex, already_running = acquire_single_instance_mutex()
     if already_running:
         if not notify_existing_instance():

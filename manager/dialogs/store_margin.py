@@ -208,7 +208,7 @@ class PddUnmatchedTaskWindow(QDialog):
 class PddProductMatchDialog(QDialog):
     """拼多多商品列表 ID 抓取与本地店铺商品匹配测试窗口。"""
 
-    def __init__(self, db, monitor, default_store_id=None, parent=None, mode="combined", store_id_provider=None, owner=None):
+    def __init__(self, db, monitor, default_store_id=None, parent=None, mode="combined", store_id_provider=None, owner=None, initial_product_id="", auto_search=False):
         super().__init__(parent)
         self.db = db
         self.monitor = monitor
@@ -216,6 +216,8 @@ class PddProductMatchDialog(QDialog):
         self.mode = mode
         self.store_id_provider = store_id_provider
         self.owner = owner or parent
+        self.initial_product_id = str(initial_product_id or "").strip()
+        self.auto_search = bool(auto_search)
         self.missing_ids = []
         self.last_debug_info = {}
         self.last_product_id = ""
@@ -243,6 +245,8 @@ class PddProductMatchDialog(QDialog):
         self.init_ui()
         self.load_stores()
         self.apply_mode_layout()
+        if self.mode == "price" and self.initial_product_id and self.auto_search:
+            QTimer.singleShot(300, self._auto_search_initial_price_product)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -335,16 +339,19 @@ class PddProductMatchDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["规格图", "规格信息", "规格编码", "价格", "商品匹配", "软件规格", "原始文本"])
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_code_table_context_menu)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 190)
-        self.table.setColumnWidth(1, 240)
-        self.table.setColumnWidth(2, 170)
-        self.table.setColumnWidth(3, 90)
-        self.table.setColumnWidth(4, 90)
-        self.table.setColumnWidth(5, 220)
+        self.table.setColumnWidth(0, 58)
+        self.table.setColumnWidth(1, 210)
+        self.table.setColumnWidth(2, 150)
+        self.table.setColumnWidth(3, 70)
+        self.table.setColumnWidth(4, 72)
+        self.table.setColumnWidth(5, 150)
         layout.addWidget(self.table)
 
         self.price_scroll_area = QScrollArea()
@@ -442,7 +449,29 @@ class PddProductMatchDialog(QDialog):
             self.btn_overwrite_without_price.hide()
             self.btn_open_current_spec.hide()
             self._set_price_table_mode()
-            self.lbl_summary.setText("已打开抓取价格管理窗口。请确认浏览器停在价格管理页面后，点击“开始抓取”。")
+            if self.initial_product_id and self.auto_search:
+                self.lbl_summary.setText(
+                    f"已打开抓取价格管理窗口。将尝试搜索商品ID {self.initial_product_id}，请确认页面结果后点击“开始抓取”。"
+                )
+            elif self.initial_product_id:
+                self.lbl_summary.setText(
+                    f"已打开抓取价格管理窗口。请确认浏览器已进入价格管理页面，之后再点击“开始抓取”。当前商品ID：{self.initial_product_id}"
+                )
+            else:
+                self.lbl_summary.setText("已打开抓取价格管理窗口。请确认浏览器停在价格管理页面后，点击“开始抓取”。")
+
+    def _auto_search_initial_price_product(self):
+        product_id = str(self.initial_product_id or "").strip()
+        if not product_id:
+            return
+        try:
+            result = self.monitor.search_price_management_product(product_id)
+        except Exception as e:
+            result = {"ok": False, "status": f"自动搜索失败：{e}"}
+        status = result.get("status") if isinstance(result, dict) else ""
+        if not status:
+            status = f"已尝试搜索商品ID {product_id}"
+        self.lbl_summary.setText(f"{status}。请确认价格管理页面结果后，点击“开始抓取”。")
 
     def start_current_mode_scan(self):
         if self.mode == "price":
@@ -459,7 +488,10 @@ class PddProductMatchDialog(QDialog):
     def open_browser(self):
         try:
             store_id = self._activate_browser_store_context()
-            self.monitor.open_merchant_page(store_id)
+            if hasattr(self.monitor, "activate_store_browser"):
+                self.monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            else:
+                self.monitor.open_merchant_page(store_id)
             self.lbl_summary.setText("已打开商家端。请手动进入“添加/编辑商品编码”窗口或价格管理页面，再点击对应抓取按钮。")
         except Exception as e:
             QMessageBox.warning(self, "拼多多链接抓取", f"打开商家端失败：{e}")
@@ -618,12 +650,13 @@ class PddProductMatchDialog(QDialog):
         if not image_url:
             item = QTableWidgetItem("")
             item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, col, item)
             return
 
         label = QLabel()
         label.setAlignment(Qt.AlignCenter)
-        label.setFixedSize(78, 78)
+        label.setFixedSize(54, 54)
         label.setToolTip(image_url)
         pixmap = QPixmap()
         try:
@@ -635,14 +668,85 @@ class PddProductMatchDialog(QDialog):
             pixmap = QPixmap()
 
         if not pixmap.isNull():
-            label.setPixmap(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            label.setPixmap(pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.table.setCellWidget(row, col, label)
-            self.table.setRowHeight(row, 84)
+            self.table.setRowHeight(row, 58)
         else:
             short_url = image_url[:80] + ("..." if len(image_url) > 80 else "")
             item = QTableWidgetItem(short_url)
             item.setTextAlignment(Qt.AlignCenter)
+            item.setToolTip(image_url)
+            item.setData(Qt.UserRole, image_url)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, col, item)
+
+    def _code_table_image_url(self, row):
+        widget = self.table.cellWidget(row, 0)
+        if widget is not None:
+            return str(widget.toolTip() or "").strip()
+        item = self.table.item(row, 0)
+        if not item:
+            return ""
+        return str(item.data(Qt.UserRole) or item.toolTip() or item.text() or "").strip()
+
+    def _set_code_table_item(self, row, col, value, editable=True, color=None):
+        item = QTableWidgetItem(str(value or ""))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setToolTip(str(value or ""))
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if color:
+            item.setForeground(QColor(color))
+        self.table.setItem(row, col, item)
+
+    def _code_table_specs_from_view(self):
+        specs = []
+        for row in range(self.table.rowCount()):
+            def cell_text(col):
+                item = self.table.item(row, col)
+                return str(item.text() if item else "").strip()
+
+            spec_info = cell_text(1)
+            spec_code = cell_text(2)
+            price = cell_text(3)
+            raw_text = cell_text(6)
+            image = self._code_table_image_url(row)
+            if not spec_info and not spec_code and not price and not image:
+                continue
+            if not spec_info and not image:
+                continue
+            specs.append({
+                "spec_info": spec_info,
+                "spec_code": spec_code,
+                "price": price,
+                "image": image,
+                "raw_text": raw_text,
+            })
+        return self._dedupe_specs(specs)
+
+    def _sync_code_table_specs_to_state(self):
+        if self.mode == "code" and self.table.isVisible():
+            self.last_specs = self._code_table_specs_from_view()
+
+    def show_code_table_context_menu(self, pos):
+        if self.mode != "code" or not self.table.isVisible():
+            return
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.selectRow(row)
+        menu = QMenu(self)
+        action_delete = QAction("删除当前规格行", self)
+        action_delete.triggered.connect(lambda _checked=False, r=row: self.delete_code_table_row(r))
+        menu.addAction(action_delete)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def delete_code_table_row(self, row):
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self.table.removeRow(row)
+        self._sync_code_table_specs_to_state()
+        self.lbl_summary.setText(f"已删除 1 行规格，当前界面剩余 {self.table.rowCount()} 行。保存/覆盖将使用当前界面内容。")
 
     def _download_image_bytes(self, image_url):
         image_url = str(image_url or "").strip()
@@ -701,12 +805,13 @@ class PddProductMatchDialog(QDialog):
             self.btn_copy_unmatched_specs.setEnabled(False)
         self.price_scroll_area.setVisible(False)
         self.table.setVisible(True)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self._clear_price_result_cards()
         self.table.clear()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["规格图", "规格信息", "规格编码", "价格", "商品匹配", "软件规格", "原始文本"])
         self.table.horizontalHeader().setStretchLastSection(True)
-        widths = [190, 240, 170, 90, 90, 220, 260]
+        widths = [58, 210, 150, 70, 72, 150, 220]
         for col, width in enumerate(widths):
             self.table.setColumnWidth(col, width)
 
@@ -726,6 +831,7 @@ class PddProductMatchDialog(QDialog):
         self.lbl_software_product_title.setText("匹配结果: --")
         self._set_product_image_previews([])
         self.table.setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.price_scroll_area.setVisible(True)
         self._clear_price_result_cards()
 
@@ -1139,23 +1245,96 @@ class PddProductMatchDialog(QDialog):
         return cursor
 
     def _refresh_store_margin_after_link_write(self):
-        parent = self.owner or self.parent()
-        if not parent:
+        targets = []
+
+        def add_target(obj):
+            if obj is not None and obj not in targets:
+                targets.append(obj)
+
+        owner = self.owner or self.parent()
+        add_target(owner)
+        add_target(self.parent())
+        add_target(getattr(owner, "main_app", None))
+
+        store_id = self.current_store_id()
+        for target in list(targets):
+            store_dialogs = getattr(target, "store_margin_dialogs", None)
+            if isinstance(store_dialogs, dict) and store_id in store_dialogs:
+                add_target(store_dialogs.get(store_id))
+
+        for target in targets:
+            for method_name in (
+                "load_specs",
+                "load_products",
+                "update_compare_columns",
+                "update_product_avg_price",
+                "calculate_total_margin",
+                "delayed_refresh",
+                "force_refresh_frozen_table",
+            ):
+                method = getattr(target, method_name, None)
+                if callable(method):
+                    method()
+            if hasattr(target, "load_data_safe"):
+                target.load_data_safe()
+
+    def _refresh_code_table_match_status(self):
+        if self.mode != "code" or not self.table.isVisible():
             return
-        for method_name in (
-            "load_specs",
-            "load_products",
-            "update_compare_columns",
-            "update_product_avg_price",
-            "calculate_total_margin",
-            "delayed_refresh",
-        ):
-            method = getattr(parent, method_name, None)
-            if callable(method):
-                method()
-        main_app = getattr(parent, "main_app", None)
-        if main_app and hasattr(main_app, "load_data_safe"):
-            main_app.load_data_safe()
+        store_id = self.current_store_id()
+        product_id = str(self.last_product_id or "").strip()
+        specs = self._code_table_specs_from_view()
+        self.last_specs = specs
+
+        local_products = self._local_products_for_store(store_id) if store_id else {}
+        product_match = local_products.get(product_id) if product_id else None
+        matched = bool(product_match)
+        self.missing_ids = [] if matched or not product_id else [product_id]
+        software_title = product_match.get("title", "") if product_match else ""
+        local_specs = self._local_specs_for_product(product_match.get("id")) if product_match else {}
+
+        self.lbl_software_product_title.setText(f"软件标题: {software_title or '--'}")
+        matched_specs = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 2)
+            spec_code = str(item.text() if item else "").strip()
+            normalized_spec_code = self._normalize_spec_code(spec_code)
+            spec_matched = bool(
+                spec_code and (
+                    spec_code in local_specs or normalized_spec_code in local_specs
+                )
+            )
+            if spec_matched:
+                matched_specs += 1
+            local_spec_name = ""
+            if spec_code:
+                local_spec_name = local_specs.get(spec_code, "") or local_specs.get(normalized_spec_code, "")
+            local_spec_display = local_spec_name or (
+                "已匹配规格" if spec_matched else ("未匹配规格" if matched and spec_code else "")
+            )
+            self._set_code_table_item(
+                row,
+                4,
+                "已匹配" if matched else "未匹配",
+                editable=False,
+                color="#27ae60" if matched else "#e74c3c",
+            )
+            self._set_code_table_item(
+                row,
+                5,
+                local_spec_display,
+                editable=False,
+                color="#27ae60" if spec_matched else "#e67e22",
+            )
+
+        if hasattr(self, "btn_open_current_spec"):
+            self.btn_open_current_spec.setEnabled(bool(product_match))
+        self.lbl_summary.setText(
+            f"当前编码窗口：商品ID {product_id or '未识别'}，规格 {len(specs)} 条，"
+            f"图片 {len(self.last_product_images or [])} 张，"
+            f"{'已匹配本店商品' if matched else '未匹配本店商品'}，"
+            f"规格匹配 {matched_specs}/{len(specs)}。"
+        )
 
     def save_current_link_to_store(self):
         store_id = self.current_store_id()
@@ -1164,6 +1343,8 @@ class PddProductMatchDialog(QDialog):
             return
         product_id = str(self.last_product_id or "").strip()
         title = str(self.last_title or "").strip()
+        self.table.clearFocus()
+        self._sync_code_table_specs_to_state()
         specs = self._dedupe_specs(self.last_specs or [])
         if not product_id or not title:
             QMessageBox.warning(self, "提示", "当前抓取结果缺少商品ID或标题，请先重新抓取添加编码界面。")
@@ -1286,9 +1467,12 @@ class PddProductMatchDialog(QDialog):
             self._record_store_link_change(store_id, "update" if is_update else "add", product_id, title)
 
             self._refresh_store_margin_after_link_write()
-            self.scan_current_page()
             if hasattr(self, "btn_open_current_spec"):
                 self.btn_open_current_spec.setEnabled(True)
+            self.lbl_summary.setText(
+                f"已按当前界面内容{'覆盖' if is_update else '创建'}本店铺链接：{product_id}，规格 {len(specs)} 个。"
+            )
+            self._refresh_code_table_match_status()
             QMessageBox.information(self, "写入完成", f"已{'覆盖' if is_update else '创建'}本店铺链接：{product_id}\n规格：{len(specs)} 个")
         except Exception as e:
             QMessageBox.warning(self, "写入失败", f"创建/覆盖链接失败：{e}")
@@ -1300,6 +1484,8 @@ class PddProductMatchDialog(QDialog):
             return
         product_id = str(self.last_product_id or "").strip()
         title = str(self.last_title or "").strip()
+        self.table.clearFocus()
+        self._sync_code_table_specs_to_state()
         specs = self._dedupe_specs(self.last_specs or [])
         if not product_id or not title:
             QMessageBox.warning(self, "提示", "当前抓取结果缺少商品ID或标题，请先重新抓取添加编码界面。")
@@ -1392,7 +1578,11 @@ class PddProductMatchDialog(QDialog):
             parent = self.owner or self.parent()
             if parent and hasattr(parent, "load_products"):
                 parent.load_products()
-            self.scan_current_page()
+            self._refresh_store_margin_after_link_write()
+            self.lbl_summary.setText(
+                f"已按当前界面内容覆盖商品 {product_id} 的非价格信息，规格 {len(kept_ids)} 个。"
+            )
+            self._refresh_code_table_match_status()
             QMessageBox.information(self, "覆盖完成", f"已覆盖商品 {product_id} 的非价格信息。\n规格：{len(kept_ids)} 个\n已有规格价格保持不变；新增规格价格为 0。")
         except Exception as e:
             QMessageBox.warning(self, "覆盖失败", f"覆盖除价格之外的信息失败：{e}")
@@ -1476,13 +1666,13 @@ class PddProductMatchDialog(QDialog):
                 if col == 0:
                     self._set_image_preview_cell(row, col, value)
                     continue
-                item = QTableWidgetItem(str(value))
-                item.setTextAlignment(Qt.AlignCenter)
+                editable = col in (1, 2, 3, 6)
+                color = None
                 if col == 4:
-                    item.setForeground(QColor("#27ae60" if matched else "#e74c3c"))
+                    color = "#27ae60" if matched else "#e74c3c"
                 if col == 5:
-                    item.setForeground(QColor("#27ae60" if spec_matched else "#e67e22"))
-                self.table.setItem(row, col, item)
+                    color = "#27ae60" if spec_matched else "#e67e22"
+                self._set_code_table_item(row, col, value, editable=editable, color=color)
 
         matched_specs = sum(1 for spec in specs if str(spec.get("spec_code", "") or "").strip() in local_specs)
         self.lbl_summary.setText(
@@ -1679,12 +1869,7 @@ class PddProductMatchDialog(QDialog):
                 change_type="pdd_price_marketing_sync",
             )
 
-            parent = self.owner or self.parent()
-            if parent:
-                if hasattr(parent, "load_products"):
-                    parent.load_products()
-                if hasattr(parent, "calculate_total_margin"):
-                    parent.calculate_total_margin()
+            self._refresh_store_margin_after_link_write()
             self.refresh_price_management_product(product_id)
             QMessageBox.information(self, "同步完成", f"已同步商品 {product_id} 的价格和营销信息。")
         except Exception as e:
@@ -1885,7 +2070,10 @@ class PddLinkControlDialog(QDialog):
     def open_browser(self):
         try:
             store_id = self._activate_browser_store_context()
-            self.monitor.open_merchant_page(store_id)
+            if hasattr(self.monitor, "activate_store_browser"):
+                self.monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            else:
+                self.monitor.open_merchant_page(store_id)
             self.refresh_browser_display()
         except Exception as e:
             QMessageBox.warning(self, "拼多多链接抓取", f"打开商家端失败：{e}")

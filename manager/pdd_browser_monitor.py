@@ -8,12 +8,13 @@ import socket
 import struct
 import subprocess
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
 
 PDD_MERCHANT_URL = "https://mms.pinduoduo.com/"
+PDD_PRICE_MANAGEMENT_URL = "https://mms.pinduoduo.com/goods/goods-price-management"
 
 
 class BrowserMonitorError(Exception):
@@ -199,12 +200,17 @@ class PddBrowserMonitor:
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.profile_processes[self.active_profile_key] = self.process
 
-    def open_merchant_page(self, store_id=None):
+    def activate_store_browser(self, store_id=None, open_url=True, open_new_tab=False):
         if store_id is not None:
             self.set_store_context(store_id)
-        if not self.is_devtools_alive():
+        was_running = self.is_devtools_alive()
+        if not was_running:
             self.start()
-            return
+            return {"running": False, "started": True, "profile_dir": self.profile_dir, "port": self.port}
+        if not open_url:
+            return {"running": True, "started": False, "profile_dir": self.profile_dir, "port": self.port}
+        if not open_new_tab:
+            return {"running": True, "started": False, "profile_dir": self.profile_dir, "port": self.port}
         try:
             requests.put(
                 f"http://127.0.0.1:{self.port}/json/new?{PDD_MERCHANT_URL}",
@@ -212,6 +218,123 @@ class PddBrowserMonitor:
             )
         except Exception:
             pass
+        return {"running": True, "started": False, "profile_dir": self.profile_dir, "port": self.port}
+
+    def open_merchant_page(self, store_id=None, open_new_tab=False):
+        return self.activate_store_browser(store_id, open_url=True, open_new_tab=open_new_tab)
+
+    def open_price_management_page(self, store_id=None):
+        state = self.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+        if state.get("started"):
+            time.sleep(1.0)
+
+        target = self._get_pdd_target()
+        if not target:
+            return {"ok": False, "status": "未找到拼多多商家端页签，请确认浏览器已打开"}
+
+        script = r"""
+(async () => {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+  await sleep(800);
+
+  const spans = Array.from(document.querySelectorAll('span.nav-item-text'));
+  const targetSpan = spans.find(node => clean(node.innerText || node.textContent) === '价格管理')
+    || spans.find(node => clean(node.innerText || node.textContent).includes('价格管理'));
+  if (!targetSpan) {
+    return { ok: false, status: '未找到 span.nav-item-text 价格管理入口' };
+  }
+
+  const clickable = targetSpan.closest('a, button, [role="button"], li, div') || targetSpan;
+  clickable.scrollIntoView({ block: 'center', inline: 'center' });
+  await sleep(150);
+  clickable.click();
+  await sleep(1200);
+  return { ok: true, status: '已点击价格管理入口' };
+})()
+"""
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=8) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True, "awaitPromise": True})
+                value = result.get("result", {}).get("value", {})
+                return value if isinstance(value, dict) else {"ok": False, "status": "点击价格管理脚本未返回有效结果"}
+        except Exception as exc:
+            return {"ok": False, "status": f"打开价格管理页面失败：{exc}"}
+
+    def search_price_management_product(self, product_id):
+        product_id = str(product_id or "").strip()
+        if not product_id:
+            return {"ok": False, "status": "商品ID为空，未执行搜索"}
+        if not self.is_devtools_alive():
+            return {"ok": False, "status": "浏览器未运行，未执行搜索"}
+        target = self._get_pdd_target(prefer_price=True)
+        if not target:
+            return {"ok": False, "status": "未找到拼多多商家端页签，未执行搜索"}
+
+        product_id_json = json.dumps(product_id, ensure_ascii=False)
+        script = f"""
+(async () => {{
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const productId = {product_id_json};
+  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+  await sleep(1200);
+
+  const setValue = (input, value) => {{
+    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }};
+
+  const exactInputs = Array.from(document.querySelectorAll('input[class*="IPT_input_"], textarea[class*="IPT_input_"]'));
+  const candidates = Array.from(document.querySelectorAll('input, textarea')).filter(input => {{
+    const text = clean([
+      input.placeholder,
+      input.getAttribute('aria-label'),
+      input.getAttribute('data-testid'),
+      input.name,
+      input.id,
+      input.className
+    ].join(' '));
+    const type = String(input.type || '').toLowerCase();
+    if (type && ['button', 'checkbox', 'radio', 'submit'].includes(type)) return false;
+    return /商品|ID|编号|goods|search|搜索|标题/.test(text);
+  }});
+  const allInputs = Array.from(document.querySelectorAll('input, textarea')).filter(input => {{
+    const type = String(input.type || '').toLowerCase();
+    return !type || !['button', 'checkbox', 'radio', 'submit'].includes(type);
+  }});
+  const input = exactInputs[0] || candidates[0] || allInputs[0];
+  if (!input) return {{ ok: false, status: '未找到价格管理搜索输入框' }};
+
+  input.focus();
+  setValue(input, productId);
+  input.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }}));
+  input.dispatchEvent(new KeyboardEvent('keyup', {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }}));
+  await sleep(250);
+
+  const exactButtons = Array.from(document.querySelectorAll('button[class*="BTN_outerWrapper_"][class*="BTN_primary_"][class*="BTN_medium_"]'));
+  const buttons = Array.from(document.querySelectorAll('button,[role="button"],a')).filter(node => {{
+    const text = clean(node.innerText || node.textContent || node.getAttribute('aria-label'));
+    return /查询|搜索|筛选/.test(text);
+  }});
+  const button = exactButtons.find(node => /查询/.test(clean(node.innerText || node.textContent || node.getAttribute('aria-label'))))
+    || exactButtons[0]
+    || buttons[0];
+  if (button) button.click();
+  await sleep(500);
+  return {{ ok: true, status: `已尝试搜索商品ID：${{productId}}` }};
+}})()
+"""
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=8) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True, "awaitPromise": True})
+                value = result.get("result", {}).get("value", {})
+                return value if isinstance(value, dict) else {"ok": False, "status": "搜索脚本未返回有效结果"}
+        except Exception as exc:
+            return {"ok": False, "status": f"搜索商品ID失败：{exc}"}
 
     def is_devtools_alive(self):
         try:
@@ -309,7 +432,7 @@ class PddBrowserMonitor:
                 "title": "",
             }
 
-        target = self._get_pdd_target()
+        target = self._get_pdd_target(prefer_price=True)
         if not target:
             return {
                 "running": True,
@@ -342,13 +465,19 @@ class PddBrowserMonitor:
             "title": title,
         }
 
-    def _get_pdd_target(self):
+    def _get_pdd_target(self, prefer_price=False):
         try:
             targets = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5).json()
         except Exception:
             return None
 
         pages = [t for t in targets if t.get("type") == "page"]
+        if prefer_price:
+            for target in pages:
+                url = target.get("url", "")
+                title = target.get("title", "")
+                if "goods-price-management" in url or "价格管理" in title:
+                    return target
         for target in pages:
             url = target.get("url", "")
             if "pinduoduo.com" in url or "yangkeduo.com" in url:
@@ -786,10 +915,47 @@ class PddBrowserMonitor:
     };
     const codeFromText = text => {
       const value = String(text || '');
-      const labeled = value.match(/(?:\u89c4\u683c\u7f16\u7801|\u7f16\u7801|SKU|sku)[:\uff1a]?\s*([A-Za-z0-9_-]{3,})/);
+      const labeled = value.match(/(?:\u89c4\u683c\u7f16\u7801|\u7f16\u7801|SKU|sku)[:\uff1a]?\s*([^\s\n\r]{2,80})/);
       if (labeled) return labeled[1];
       const loose = value.match(/\b([A-Za-z0-9_-]*[A-Za-z_][A-Za-z0-9_-]{2,}|\d{6,})\b/);
       return loose ? loose[1] : '';
+    };
+    const cleanCodeCellText = text => {
+      let value = clean(text || '');
+      value = value
+        .replace(/^(?:\u89c4\u683c\u7f16\u7801|\u7f16\u7801|SKU|sku)[:\uff1a]?\s*/i, '')
+        .replace(/(?:\u8bf7\u8f93\u5165|\u5df2\u8f93\u5165)/g, '')
+        .trim();
+      const parts = value.split(/\s+/).map(clean).filter(Boolean);
+      if (parts.length > 1) {
+        const uniqueParts = Array.from(new Set(parts));
+        if (uniqueParts.length === 1) return uniqueParts[0];
+      }
+      return value;
+    };
+    const isBadCodeCandidate = (value, options = {}) => {
+      const text = clean(value || '');
+      if (!text) return true;
+      const compact = text.replace(/\s+/g, '');
+      if (/^(商品编码|商品ID|商品id|商品编号|规格信息|规格|信息|规格编码|编码|当前价|价格|售价|库存|图片|保存|删除|编辑|请输入|已输入)$/.test(compact)) return true;
+      if (/^(?:当前价|价格|售价)[:：]?[￥¥]?[0-9]+(?:\.[0-9]{1,2})?$/.test(compact)) return true;
+      if (!options.allowShortNumber && /^[￥¥]?[0-9]{1,5}(?:\.[0-9]{1,2})?$/.test(compact)) return true;
+      return false;
+    };
+    const codeFromCodeCell = text => {
+      const value = cleanCodeCellText(text);
+      return isBadCodeCandidate(value, { allowShortNumber: true }) ? '' : value;
+    };
+    const tailCodeCandidateFromText = text => {
+      const source = clean(text || '').replace(/(\u8bf7\u8f93\u5165|\u5df2\u8f93\u5165)/g, '').trim();
+      if (!source) return '';
+      const parts = source.split(/\s+/).map(clean).filter(Boolean);
+      for (let i = parts.length - 1; i >= 0; i -= 1) {
+        const candidate = cleanCodeCellText(parts[i]);
+        const hasPriceBeforeCandidate = /(?:\u5f53\u524d\u4ef7|\u4ef7\u683c|\u552e\u4ef7|[\uffe5\u00a5])/.test(parts.slice(0, i).join(' '));
+        if (!isBadCodeCandidate(candidate, { allowShortNumber: hasPriceBeforeCandidate })) return candidate;
+      }
+      return '';
     };
     const specInfoFromText = text => {
       const isDraftWarningText = value => /(\u8349\u7a3f\u7bb1|\u6b63\u5728\u7f16\u8f91|\u786e\u8ba4\u4fee\u6539\u5f53\u524d\u5546\u54c1\u7f16\u7801|\u81ea\u52a8\u5220\u9664\u8349\u7a3f|\u53bb\u67e5\u770b\u8349\u7a3f)/.test(String(value || ''));
@@ -825,12 +991,8 @@ class PddBrowserMonitor:
 
     const chooseCodeFromValues = values => {
       for (const value of values) {
-        const text = clean(value);
-        if (/^\d{6,}$/.test(text)) return text;
-      }
-      for (const value of values) {
-        const text = clean(value);
-        if (/^[A-Za-z0-9_-]{3,}$/.test(text) && !/^[0-9]+(?:\.[0-9]{1,2})?$/.test(text)) return text;
+        const text = codeFromCodeCell(value);
+        if (text && !/^[0-9]+(?:\.[0-9]{1,2})?$/.test(text)) return text;
       }
       return '';
     };
@@ -895,16 +1057,18 @@ class PddBrowserMonitor:
       };
       for (const item of controls) {
         const merged = `${item.meta} ${item.value}`;
-        const isCode = /(\u7f16\u7801|SKU|sku|code)/i.test(merged) || /^\d{6,}$/.test(item.value) || (/^[A-Za-z0-9_-]{4,}$/.test(item.value) && !/^[0-9]+(?:\.[0-9]{1,2})?$/.test(item.value));
+        const hasCodeMeta = /(\u7f16\u7801|SKU|sku|code)/i.test(item.meta);
+        const looksLikeCode = /^\d{6,}(?:[-_][^\s]{1,40})?$/.test(item.value) || /^[A-Za-z0-9][^\s]{2,80}$/.test(item.value);
+        const isCode = hasCodeMeta || (!isBadCodeCandidate(item.value) && looksLikeCode && !/^[0-9]+(?:\.[0-9]{1,2})?$/.test(item.value));
         const isPrice = !/^\d{6,}$/.test(item.value) && (/(\u4ef7\u683c|\u552e\u4ef7|price)/i.test(merged) || /^[0-9]{1,5}(?:\.[0-9]{1,2})?$/.test(item.value));
         const isSpec = /(\u89c4\u683c|\u89c4\u683c\u4fe1\u606f|\u89c4\u683c\u540d\u79f0|spec|sku)/i.test(merged) && !isCode && !isPrice;
 
         if (isSpec && current.spec_info && (current.spec_code || current.price)) flush();
         if (isSpec && !current.spec_info) current.spec_info = item.value;
-        else if (isCode && !current.spec_code) current.spec_code = item.value;
+        else if (isCode && !current.spec_code) current.spec_code = codeFromCodeCell(item.value);
         else if (isPrice && !current.price) current.price = item.value;
         else if (!current.spec_info && /[\u4e00-\u9fa5A-Za-z]/.test(item.value) && item.value.length <= 120) current.spec_info = item.value;
-        else if (!current.spec_code && isCode) current.spec_code = item.value;
+        else if (!current.spec_code && isCode) current.spec_code = codeFromCodeCell(item.value);
 
         current.raw_text = [current.raw_text, `${item.meta} => ${item.value}`].filter(Boolean).join(' | ');
         current.node = item.el.parentElement || item.el;
@@ -956,6 +1120,7 @@ class PddBrowserMonitor:
       if (/^\u5546\u54c1\u7f16\u7801[A-Za-z0-9_-]{3,}(?:\u8bf7\u8f93\u5165|\u5df2\u8f93\u5165)?$/.test(compactRawText)) return false;
       if (/^\u5546\u54c1\u7f16\u7801/.test(compactSpecName) && normalizedSpec.spec_code && !normalizedSpec.price && !normalizedSpec.image) return false;
       if (!normalizedSpec.spec_code && !normalizedSpec.spec_info && !normalizedSpec.price && !normalizedSpec.image) return false;
+      if (!normalizedSpec.spec_info && !normalizedSpec.image) return false;
       if (normalizedSpec.spec_code && !normalizedSpec.spec_info && !normalizedSpec.price && !normalizedSpec.image) return false;
       if (!normalizedSpec.spec_code && !normalizedSpec.spec_info) return false;
       if (/^(商品编码|商品编码请输入|规格信息|规格|信息|编码|规格编码|请输入|已输入)$/.test(compactSpecName) && !normalizedSpec.spec_code && !normalizedSpec.price) return false;
@@ -994,8 +1159,25 @@ class PddBrowserMonitor:
       return true;
     };
 
+    const tableColumnIndexes = rows => {
+      const result = { spec: -1, code: -1, price: -1 };
+      const headerRows = rows.slice(0, 8);
+      for (const row of headerRows) {
+        const cells = Array.from(row.querySelectorAll('th,td,[role="cell"],[role="columnheader"]'));
+        if (cells.length < 2) continue;
+        const texts = cells.map(cell => richTextOf(cell));
+        for (let i = 0; i < texts.length; i += 1) {
+          const text = clean(texts[i]).replace(/\s+/g, '');
+          if (result.spec < 0 && /规格信息|规格名称|规格$/.test(text)) result.spec = i;
+          if (result.code < 0 && /规格编码|编码|SKU|sku/i.test(text)) result.code = i;
+          if (result.price < 0 && /当前价|价格|售价/.test(text)) result.price = i;
+        }
+      }
+      return result;
+    };
     const extractSpecsFromTables = () => {
       const rows = queryAll('tr,[role="row"]');
+      const columnIndexes = tableColumnIndexes(rows);
       for (const row of rows) {
         const cells = Array.from(row.querySelectorAll('th,td,[role="cell"],[role="columnheader"]'));
         if (cells.length < 2) continue;
@@ -1005,6 +1187,28 @@ class PddBrowserMonitor:
         const cellTexts = cells.map(cell => richTextOf(cell));
         const values = controlValuesOf(row);
         const image = firstImageIn(row);
+        const textAt = index => index >= 0 && index < cellTexts.length ? cellTexts[index] : '';
+        const columnSpec = {
+          spec_info: specInfoFromText(textAt(columnIndexes.spec)),
+          spec_code: codeFromCodeCell(textAt(columnIndexes.code)),
+          price: priceFromText(textAt(columnIndexes.price)),
+          image,
+          raw_text: rowText
+        };
+        const hasColumnSpec = columnSpec.spec_info || columnSpec.spec_code || columnSpec.price;
+        if (hasColumnSpec) {
+          if (!columnSpec.spec_code && (columnSpec.spec_info || columnSpec.price)) {
+            columnSpec.spec_code = tailCodeCandidateFromText(rowText);
+          }
+          pushSpec(columnSpec, row, rowText, {
+            source: columnSpec.spec_code ? 'table-column-row' : 'table-column-row-no-code',
+            column_indexes: columnIndexes,
+            cell_texts: cellTexts.slice(0, 12),
+            control_values: values.slice(0, 20),
+            tail_code_candidate: tailCodeCandidateFromText(rowText)
+          });
+          continue;
+        }
         const spec = {
           spec_info: '',
           spec_code: '',
@@ -1020,30 +1224,44 @@ class PddBrowserMonitor:
         spec.spec_code = spec.spec_code || chooseCodeFromValues(values);
         spec.price = spec.price || choosePriceFromValues(values);
         spec.spec_info = spec.spec_info || chooseSpecInfoFromValues(values);
-        pushSpec(spec, row, rowText, { source: 'table-row', cell_texts: cellTexts.slice(0, 12), control_values: values.slice(0, 20) });
+        const tailCodeCandidate = tailCodeCandidateFromText(rowText);
+        if (!spec.spec_code && (spec.spec_info || spec.price)) spec.spec_code = tailCodeCandidate;
+        pushSpec(spec, row, rowText, {
+          source: tailCodeCandidate && spec.spec_code === tailCodeCandidate ? 'table-row-tail-code' : 'table-row',
+          cell_texts: cellTexts.slice(0, 12),
+          control_values: values.slice(0, 20),
+          tail_code_candidate: tailCodeCandidate
+        });
       }
     };
     extractSpecsFromTables();
-    extractSpecsFromControlSequence();
+    if (!specs.length) extractSpecsFromControlSequence();
 
-    for (const node of candidateNodes) {
-      const text = richTextOf(node);
-      if (!text || text.length > 1200) continue;
-      const controlValues = controlValuesOf(node);
-      const hasSpecSignal = /(\u89c4\u683c|\u7f16\u7801|SKU|sku|\u4ef7\u683c|\u552e\u4ef7|[\uffe5\u00a5])/.test(text) || controlValues.length >= 2;
-      if (!hasSpecSignal) continue;
+    if (!specs.length) {
+      for (const node of candidateNodes) {
+        const text = richTextOf(node);
+        if (!text || text.length > 1200) continue;
+        const controlValues = controlValuesOf(node);
+        const hasSpecSignal = /(\u89c4\u683c|\u7f16\u7801|SKU|sku|\u4ef7\u683c|\u552e\u4ef7|[\uffe5\u00a5])/.test(text) || controlValues.length >= 2;
+        if (!hasSpecSignal) continue;
 
-      const specCode = codeFromText(text) || chooseCodeFromValues(controlValues);
-      const specInfo = specInfoFromText(text) || chooseSpecInfoFromValues(controlValues);
-      const price = priceFromText(text) || choosePriceFromValues(controlValues);
-      const image = firstImageIn(node);
-      pushSpec(
-        { spec_info: specInfo, spec_code: specCode, price, image, raw_text: text },
-        node,
-        text,
-        { source: 'candidate-node', control_values: controlValues.slice(0, 20) }
-      );
-      if (specs.length >= 200) break;
+        const specCode = codeFromText(text) || chooseCodeFromValues(controlValues);
+        const specInfo = specInfoFromText(text) || chooseSpecInfoFromValues(controlValues);
+        const price = priceFromText(text) || choosePriceFromValues(controlValues);
+        const tailCodeCandidate = tailCodeCandidateFromText(text);
+        const image = firstImageIn(node);
+        pushSpec(
+          { spec_info: specInfo, spec_code: specCode || ((specInfo || price) ? tailCodeCandidate : ''), price, image, raw_text: text },
+          node,
+          text,
+          {
+            source: !specCode && tailCodeCandidate ? 'candidate-node-tail-code' : 'candidate-node',
+            control_values: controlValues.slice(0, 20),
+            tail_code_candidate: tailCodeCandidate
+          }
+        );
+        if (specs.length >= 200) break;
+      }
     }
 
     const collectReactLikeData = () => {
@@ -1093,7 +1311,7 @@ class PddBrowserMonitor:
       }
       return results.slice(0, 20);
     };
-    const reactDebug = collectReactLikeData();
+    const reactDebug = specs.length ? [] : collectReactLikeData();
 
     const productImages = unique([productCardImage]).slice(0, 1);
     return {
@@ -1309,12 +1527,16 @@ class PddBrowserMonitor:
     if (!value || /无优惠|暂无优惠|无商家出资/.test(value)) {
       return { coupon_amount: '', new_customer_discount: '' };
     }
-    const couponMatch =
-      value.match(/(?:优惠券|商品立减券|店铺券|立减券)[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
-      value.match(/(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?[^0-9]{0,40}(?:优惠券|商品立减券|店铺券|立减券)/);
     const newCustomerMatch =
-      value.match(/新客立减[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
-      value.match(/(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?[^0-9]{0,40}新客立减/);
+      value.match(/(?:新客立减|首件立减)[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
+      value.match(/(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?[^0-9]{0,40}(?:新客立减|首件立减)/);
+    const couponMatch =
+      /首件立减/.test(value)
+        ? null
+        : (
+          value.match(/(?:优惠券|商品立减券|店铺券|立减券)[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
+          value.match(/(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?[^0-9]{0,40}(?:优惠券|商品立减券|店铺券|立减券)/)
+        );
     return {
       coupon_amount: couponMatch ? couponMatch[1] : '',
       new_customer_discount: newCustomerMatch ? newCustomerMatch[1] : ''
@@ -1340,7 +1562,7 @@ class PddBrowserMonitor:
         .replace(/\s+/g, ' ')
         .trim();
     }
-    const known = tag.match(/拼单价|限量折扣|大促搜索池|场景专属|限时限量购|百亿补贴|秒杀|活动价|搜索池|营销活动/);
+    const known = tag.match(/拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|限时限量购|百亿补贴|秒杀|活动价|搜索池|营销活动/);
     tag = known ? known[0] : '';
     return { price, tag, tag_type: classifyPriceTag(tag) };
   };
@@ -1505,8 +1727,8 @@ class PddBrowserMonitor:
     const lines = linesOf(text);
     for (const line of lines) {
       if (line.includes(productId)) continue;
-      if (/(商品ID|券前价|商家出资|单件预估|规格|￥|¥|优惠券|新客立减|拼单价|限量折扣|大促|搜索池|无优惠|活动|营销|折扣|预估实收)/.test(line)) continue;
-      if (/^(?:[0-9]+(?:\.[0-9]{1,2})?\s*)+(?:大促|搜索池|无优惠|拼单价|限量折扣|活动|营销|元|$)/.test(line)) continue;
+      if (/(商品ID|券前价|商家出资|单件预估|规格|￥|¥|优惠券|新客立减|拼单价|限量折扣|大促|首页推荐专区|9块9|搜索池|秒杀|无优惠|活动|营销|折扣|预估实收|存在低价风险|低价风险查看)/.test(line)) continue;
+      if (/^(?:[0-9]+(?:\.[0-9]{1,2})?\s*)+(?:大促|首页推荐专区|9块9|搜索池|秒杀|无优惠|拼单价|限量折扣|活动|营销|元|$)/.test(line)) continue;
       if (line.length >= 4 && line.length <= 140) return line;
     }
     return '';
@@ -1517,7 +1739,8 @@ class PddBrowserMonitor:
       const text = clean(value);
       if (!text) return true;
       if (/^(ID[:：]?\s*)?\d{6,}$/.test(text)) return true;
-      if (/^(商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情|详情|收起|展开|on|off|--)$/.test(text)) return true;
+      if (/^(商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情|详情|收起|展开|存在低价风险查看|on|off|--)$/.test(text)) return true;
+      if (/存在低价风险|低价风险查看/.test(text)) return true;
       if (/^(商品ID|ID)[:：]?\s*\d{6,}/.test(text)) return true;
       return false;
     };
@@ -1526,7 +1749,7 @@ class PddBrowserMonitor:
     const lines = linesOf(text);
     for (const line of lines) {
       if (isBadSpecName(line)) continue;
-      if (/(商品ID|券前价|商家出资|单件预估|优惠券|新客立减|拼单价|限量折扣|大促|搜索池|无优惠|活动|营销|折扣|￥|¥)/.test(line)) continue;
+      if (/(商品ID|券前价|商家出资|单件预估|优惠券|新客立减|拼单价|限量折扣|大促|首页推荐专区|9块9|搜索池|秒杀|无优惠|活动|营销|折扣|￥|¥|存在低价风险|低价风险查看)/.test(line)) continue;
       if (/^[0-9]+(?:\.[0-9]{1,2})?$/.test(line)) continue;
       if (line.length >= 1 && line.length <= 80 && /[\u4e00-\u9fa5A-Za-z]/.test(line)) return line;
     }
@@ -1535,23 +1758,33 @@ class PddBrowserMonitor:
   const specNameLinesOf = text => linesOf(text).filter(line => {
     if (!line) return false;
     if (/^(ID[:：]?\s*)?\d{6,}$/.test(line)) return false;
-    if (/^(商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情|详情|收起|展开|on|off|--)$/.test(line)) return false;
+    if (/^(商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情|详情|收起|展开|存在低价风险查看|on|off|--)$/.test(line)) return false;
     if (/^(商品ID|ID)[:：]?\s*\d{6,}/.test(line)) return false;
-    if (/(商品ID|券前价|商家出资|单件预估|优惠券|新客立减|拼单价|限量折扣|大促|搜索池|无优惠|活动|营销|折扣|￥|¥|价格|售价)/.test(line)) return false;
+    if (/(商品ID|券前价|商家出资|单件预估|优惠券|新客立减|拼单价|限量折扣|大促|首页推荐专区|9块9|搜索池|秒杀|无优惠|活动|营销|折扣|￥|¥|价格|售价|存在低价风险|低价风险查看)/.test(line)) return false;
     if (/^[0-9]+(?:\.[0-9]{1,2})?$/.test(line)) return false;
     return line.length <= 100 && /[\u4e00-\u9fa5A-Za-z]/.test(line);
   }).map(line => {
     const labeled = line.match(/(?:规格名称|规格信息|规格)[:：]\s*(.{1,100})/);
     return clean(labeled ? labeled[1] : line);
   }).filter(Boolean);
+  const isPriceLine = line => {
+    const text = clean(line);
+    if (!text) return false;
+    if (!moneyValue(text)) return false;
+    if (/券前价|商家出资|单件预估|优惠券|新客立减|无优惠|商品ID|规格|商品预览|商品管理|设置红线价|价格及优惠详情/.test(text)) return false;
+    if (/拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动/.test(text)) {
+      return /^(?:￥|¥)?\s*[0-9]+(?:\.[0-9]{1,2})?\s*(?:拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动)?$/.test(text);
+    }
+    return /^(?:￥|¥)?\s*[0-9]+(?:\.[0-9]{1,2})?$/.test(text);
+  };
   const priceLinesOf = text => {
     const sourceLines = linesOf(text);
     const lines = [];
     for (let i = 0; i < sourceLines.length; i += 1) {
       const line = sourceLines[i];
-      if (!moneyValue(line)) continue;
+      if (!isPriceLine(line)) continue;
       const next = sourceLines[i + 1] || '';
-      if (/拼单价|限量折扣|大促搜索池|场景专属|搜索池|活动价|营销活动/.test(next) && !moneyValue(next)) {
+      if (/拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动/.test(next) && !moneyValue(next)) {
         lines.push(`${line} ${next}`);
       } else {
         lines.push(line);
@@ -1559,7 +1792,7 @@ class PddBrowserMonitor:
     }
     if (lines.length) return lines;
     const compact = clean(text);
-    const matches = [...compact.matchAll(/(?:￥|¥)?\s*[0-9]+(?:\.[0-9]{1,2})?(?:\s*(?:拼单价|限量折扣|大促搜索池|场景专属|搜索池|活动价|营销活动))?/g)];
+    const matches = [...compact.matchAll(/(?:￥|¥)?\s*[0-9]+(?:\.[0-9]{1,2})?(?:\s*(?:拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动))?/g)];
     return matches.map(match => clean(match[0])).filter(Boolean);
   };
   const discountLinesOf = text => {
@@ -1567,9 +1800,9 @@ class PddBrowserMonitor:
     const result = [];
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i];
-      if (/(优惠券|商品立减券|店铺券|立减券|新客立减|无优惠|暂无优惠|无商家出资)/.test(line)) {
+      if (/(优惠券|商品立减券|店铺券|立减券|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(line)) {
         const prev = lines[i - 1] || '';
-        result.push(moneyValue(prev) && !/(拼单价|限量折扣|大促搜索池|场景专属|搜索池|活动价|营销活动)/.test(prev) ? `${prev} ${line}` : line);
+        result.push(moneyValue(prev) && !/(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动)/.test(prev) ? `${prev} ${line}` : line);
       }
     }
     return result;
@@ -1582,15 +1815,17 @@ class PddBrowserMonitor:
       for (let i = 0; i < sourceLines.length; i += 1) {
         const specName = sourceLines[i];
         if (!specNameLinesOf(specName).length) continue;
-        const priceLine = sourceLines[i + 1] || '';
-        const tagLine = sourceLines[i + 2] || '';
-        const discountAmountLine = sourceLines[i + 3] || '';
-        const discountTextLine = sourceLines[i + 4] || '';
-        const receiptLine = sourceLines[i + 5] || '';
-        if (!moneyValue(priceLine)) continue;
-        if (!/(拼单价|限量折扣|大促搜索池|场景专属|搜索池|活动价|营销活动)/.test(tagLine)) continue;
+        let offset = 1;
+        while (/存在低价风险|低价风险查看/.test(sourceLines[i + offset] || '')) offset += 1;
+        const priceLine = sourceLines[i + offset] || '';
+        const tagLine = sourceLines[i + offset + 1] || '';
+        const discountAmountLine = sourceLines[i + offset + 2] || '';
+        const discountTextLine = sourceLines[i + offset + 3] || '';
+        const receiptLine = sourceLines[i + offset + 4] || '';
+        if (!isPriceLine(priceLine)) continue;
+        if (!/(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动)/.test(tagLine)) continue;
         const priceSource = `${priceLine} ${tagLine}`;
-        const discountSource = /(优惠券|商品立减券|店铺券|立减券|新客立减|无优惠|暂无优惠|无商家出资)/.test(discountTextLine)
+        const discountSource = /(优惠券|商品立减券|店铺券|立减券|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(discountTextLine)
           ? `${discountAmountLine} ${discountTextLine}`
           : '';
         const receiptSource = moneyValue(receiptLine) ? receiptLine : '';
@@ -1599,7 +1834,7 @@ class PddBrowserMonitor:
           price_source: priceSource,
           discount_source: discountSource,
           receipt_source: receiptSource,
-          raw_text: sourceLines.slice(i, i + 6).join(' ')
+          raw_text: sourceLines.slice(i, i + offset + 5).join(' ')
         });
       }
       return parsed;
@@ -1629,7 +1864,7 @@ class PddBrowserMonitor:
     const specLines = specNameLinesOf(specCellText);
     const beforeCellMoneyValues = moneyValuesOf(beforeCellText);
     const beforeCellIsCombined = beforeCellMoneyValues.length >= 2
-      && /(拼单价|限量折扣|大促搜索池|场景专属|搜索池|活动价|营销活动|无优惠|优惠券|新客立减)/.test(beforeCellText);
+      && /(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动|无优惠|优惠券|新客立减)/.test(beforeCellText);
     const operationCellText = /商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情/.test(receiptCellText)
       ? ''
       : receiptCellText;
@@ -1716,7 +1951,7 @@ class PddBrowserMonitor:
     const candidateNodes = Array.from(document.querySelectorAll('[class*="row"],[class*="Row"],[class*="goods"],[class*="Goods"],[class*="product"],[class*="Product"],div'))
       .filter(node => {
         const text = textOf(node);
-        return text.length >= 40 && text.length <= 2500 && /\d{6,}/.test(text) && /券前价|单件预估实收|商家出资|拼单价|限量折扣|￥|¥/.test(text);
+        return text.length >= 40 && text.length <= 2500 && /\d{6,}/.test(text) && /券前价|单件预估实收|商家出资|拼单价|限量折扣|首页推荐专区|9块9|秒杀|￥|¥/.test(text);
       });
     for (const node of candidateNodes) {
       const text = richTextOf(node);

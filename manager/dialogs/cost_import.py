@@ -228,7 +228,6 @@ class CostImportDialog(QDialog):
         attribute_layout.setContentsMargins(18, 0, 0, 0)
         self.combo_attr_size = self._make_attribute_combo_row(attribute_layout, "尺寸")
         self.combo_attr_pages = self._make_attribute_combo_row(attribute_layout, "张数")
-        self.combo_attr_cover = self._make_attribute_combo_row(attribute_layout, "封面制作")
         self.combo_attr_print = self._make_attribute_combo_row(attribute_layout, "印刷工艺")
         layout.addWidget(self.attribute_widget)
         self._toggle_attribute_mapping(False)
@@ -281,7 +280,7 @@ class CostImportDialog(QDialog):
             self.combo_price.clear()
             self.combo_category.clear()
             self.combo_weight.clear()
-            for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_cover, self.combo_attr_print):
+            for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_print):
                 combo.clear()
                 combo.addItem("（不导入）", None)
             self.combo_name.addItem("（不导入）", None)
@@ -307,7 +306,7 @@ class CostImportDialog(QDialog):
                 self.combo_price.addItem(display_text, idx)
                 self.combo_category.addItem(display_text, idx)
                 self.combo_weight.addItem(display_text, idx)
-                for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_cover, self.combo_attr_print):
+                for combo in (self.combo_attr_size, self.combo_attr_pages, self.combo_attr_print):
                     combo.addItem(display_text, idx)
 
             if self.combo_spec.count() == 0:
@@ -344,13 +343,12 @@ class CostImportDialog(QDialog):
         attribute_keywords = {
             "size": ["\u5c3a\u5bf8", "\u89c4\u683c\u5c3a\u5bf8", "\u5927\u5c0f", "\u5c3a\u7801", "size"],
             "pages": ["\u5f20\u6570", "\u9875\u6570", "\u6570\u91cf\u5f20", "pages", "sheets"],
-            "cover": ["\u5c01\u9762\u5236\u4f5c"],
             "print": ["\u5370\u5237\u5de5\u827a", "\u5370\u5237", "\u5de5\u827a", "printing", "print"],
         }
         preferred_price_keywords = ["产品成本", "单品成本", "单个成本", "产品单价"] if self.cost_mode == "detail" else ["总成本"]
         price_keywords = ["产品成本", "单品成本", "单个成本", "产品单价", "进价", "成本", "价格", "Price", "Cost", "单价", "Money"] if self.cost_mode == "detail" else ["成本", "价格", "Price", "Cost", "单价", "进价", "Money"]
         name_found = category_found = spec_found = quantity_found = price_found = weight_found = False
-        attr_found = {"size": False, "pages": False, "cover": False, "print": False}
+        attr_found = {"size": False, "pages": False, "print": False}
 
         for idx, name in enumerate(self.column_names):
             name_str = str(name).strip()
@@ -360,7 +358,6 @@ class CostImportDialog(QDialog):
             for key, combo in (
                 ("size", self.combo_attr_size),
                 ("pages", self.combo_attr_pages),
-                ("cover", self.combo_attr_cover),
                 ("print", self.combo_attr_print),
             ):
                 if not attr_found[key] and any(k.lower() in name_lower for k in attribute_keywords[key]):
@@ -432,7 +429,6 @@ class CostImportDialog(QDialog):
             attr_indices = {
                 "size": self.combo_attr_size.currentData(),
                 "pages": self.combo_attr_pages.currentData(),
-                "cover": self.combo_attr_cover.currentData(),
                 "print": self.combo_attr_print.currentData(),
             }
         if spec_idx is None or price_idx is None:

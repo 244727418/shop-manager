@@ -304,6 +304,12 @@ class SafeDatabaseManager:
                     print("已添加product_attribute_combo_disabled字段到cost_library表")
                 except Exception as e:
                     print(f"添加product_attribute_combo_disabled字段失败: {e}")
+            if 'product_attribute_is_combo' not in cost_columns:
+                try:
+                    self.cursor.execute("ALTER TABLE cost_library ADD COLUMN product_attribute_is_combo INTEGER DEFAULT 0")
+                    print("已添加product_attribute_is_combo字段到cost_library表")
+                except Exception as e:
+                    print(f"添加product_attribute_is_combo字段失败: {e}")
             if 'manual_sort_order' not in cost_columns:
                 try:
                     self.cursor.execute("ALTER TABLE cost_library ADD COLUMN manual_sort_order INTEGER")
@@ -1192,6 +1198,29 @@ class SafeDatabaseManager:
             )
             self.conn.commit()
             return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def delete_cost_categories(self, labels):
+        labels = [str(label or "").strip() for label in (labels or [])]
+        labels = [label for label in dict.fromkeys(labels) if label]
+        if not labels:
+            return 0
+        placeholders = ",".join("?" for _ in labels)
+        try:
+            self.cursor.execute(
+                f"UPDATE cost_library SET category_label='', category_color='' WHERE category_label IN ({placeholders})",
+                labels,
+            )
+            self.cursor.execute(
+                f"UPDATE products SET product_category_label='' WHERE product_category_label IN ({placeholders})",
+                labels,
+            )
+            self.cursor.execute(f"DELETE FROM cost_categories WHERE label IN ({placeholders})", labels)
+            deleted = self.cursor.rowcount
+            self.conn.commit()
+            return deleted
         except Exception:
             self.conn.rollback()
             raise

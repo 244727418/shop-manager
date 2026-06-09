@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """本地素材库窗口。"""
 import hashlib
+import gc
 import os
 import re
 import shutil
 import time
 
-from PyQt5.QtCore import QEvent, QMimeData, QPoint, QRect, QSize, Qt, QSettings, QThread, QUrl, pyqtSignal
-from PyQt5.QtGui import QColor, QDesktopServices, QDrag, QIcon, QKeySequence, QPixmap
+from PyQt5.QtCore import QEvent, QMimeData, QPoint, QPropertyAnimation, QRect, QSize, Qt, QSettings, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QColor, QDesktopServices, QDrag, QIcon, QImageReader, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -47,6 +48,7 @@ class FlowLayout(QLayout):
 
     def addItem(self, item):
         self._items.append(item)
+        self.invalidate()
 
     def count(self):
         return len(self._items)
@@ -55,7 +57,9 @@ class FlowLayout(QLayout):
         return self._items[index] if 0 <= index < len(self._items) else None
 
     def takeAt(self, index):
-        return self._items.pop(index) if 0 <= index < len(self._items) else None
+        item = self._items.pop(index) if 0 <= index < len(self._items) else None
+        self.invalidate()
+        return item
 
     def expandingDirections(self):
         return Qt.Orientations(Qt.Orientation(0))
@@ -141,7 +145,11 @@ class MaterialImageItemDelegate(QStyledItemDelegate):
         model.setData(index, editor.toPlainText().strip(), Qt.EditRole)
 
     def updateEditorGeometry(self, editor, option, index):
-        editor.setGeometry(option.rect.adjusted(3, 116, -3, -3))
+        widget = getattr(option, "widget", None)
+        if getattr(widget, "compact_material_view", False):
+            editor.setGeometry(option.rect.adjusted(1, 78, -1, -1))
+            return
+        editor.setGeometry(option.rect.adjusted(1, 114, -1, -1))
 
     def eventFilter(self, editor, event):
         if isinstance(editor, QTextEdit):
@@ -150,7 +158,7 @@ class MaterialImageItemDelegate(QStyledItemDelegate):
                 self.closeEditor.emit(editor)
                 return False
             if event.type() == QEvent.KeyPress:
-                if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() & Qt.ControlModifier:
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                     self.commitData.emit(editor)
                     self.closeEditor.emit(editor)
                     return True
@@ -164,17 +172,21 @@ class MaterialImageList(QListWidget):
     PATH_ROLE = Qt.UserRole + 1
     ORIGINAL_TEXT_ROLE = Qt.UserRole + 2
     PREFIX_ROLE = Qt.UserRole + 3
+    INTERNAL_MOVE_MIME = "application/x-shop-material-image-paths"
+    INTERNAL_SOURCE_COLUMN_MIME = "application/x-shop-material-source-column"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, column_key=None, compact=False):
         super().__init__(parent)
+        self.material_column_key = column_key
+        self.compact_material_view = compact
         self.setViewMode(QListWidget.IconMode)
-        self.setIconSize(QSize(110, 110))
-        self.setGridSize(QSize(148, 168))
+        self.setIconSize(QSize(76, 76) if compact else QSize(110, 110))
+        self.setGridSize(QSize(86, 124) if compact else QSize(136, 154))
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
         self.setWrapping(True)
         self.setSelectionMode(QListWidget.ExtendedSelection)
-        self.setSpacing(3)
+        self.setSpacing(0 if compact else 1)
         self.setWordWrap(True)
         self.setTextElideMode(Qt.ElideNone)
         self.setUniformItemSizes(False)
@@ -186,41 +198,71 @@ class MaterialImageList(QListWidget):
         self.setDefaultDropAction(Qt.CopyAction)
         self.setDropIndicatorShown(True)
         self.setItemDelegate(MaterialImageItemDelegate(self))
-        self.setStyleSheet(
-            """
-            QListWidget {
-                border: 1px solid #d9dee5;
-                border-radius: 6px;
-                background: #ffffff;
-                padding: 3px;
-            }
-            QListWidget::item {
-                border: 1px solid transparent;
-                border-radius: 6px;
-                padding: 3px;
-            }
-            QListWidget::item:selected {
-                background: #e8f4ff;
-                border-color: #3498db;
-                color: #1f2d3d;
-                outline: none;
-            }
-            QListWidget::item:focus {
-                outline: none;
-            }
-            """
-        )
+        if compact:
+            self.setStyleSheet(
+                """
+                QListWidget {
+                    border: 1px solid #111111;
+                    border-radius: 0px;
+                    background: #ffffff;
+                    padding: 0px;
+                }
+                QListWidget::item {
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
+                }
+                QListWidget::item:selected {
+                    background: #e8f4ff;
+                    color: #1f2d3d;
+                    outline: none;
+                }
+                QListWidget::item:focus {
+                    outline: none;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QListWidget {
+                    border: 1px solid #111111;
+                    border-radius: 6px;
+                    background: #ffffff;
+                    padding: 1px;
+                }
+                QListWidget::item {
+                    border: 1px solid #111111;
+                    border-radius: 3px;
+                    padding: 1px;
+                }
+                QListWidget::item:selected {
+                    background: #e8f4ff;
+                    border-color: #3498db;
+                    color: #1f2d3d;
+                    outline: none;
+                }
+                QListWidget::item:focus {
+                    outline: none;
+                }
+                """
+            )
 
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.Copy):
             parent = self.window()
             if hasattr(parent, "copy_selected_images"):
-                parent.copy_selected_images()
+                parent.copy_selected_images(self)
                 return
         if event.matches(QKeySequence.Paste):
             parent = self.window()
             if hasattr(parent, "paste_images_from_clipboard"):
-                parent.paste_images_from_clipboard()
+                parent.paste_images_from_clipboard(self)
+                return
+        if event.key() == Qt.Key_Delete:
+            parent = self.window()
+            if hasattr(parent, "delete_images"):
+                parent.delete_images(self)
                 return
         super().keyPressEvent(event)
 
@@ -231,8 +273,8 @@ class MaterialImageList(QListWidget):
             return
         rect = self.visualItemRect(item)
         icon_height = self.iconSize().height()
-        icon_top = rect.top() + 8
-        icon_bottom = icon_top + icon_height + 12
+        icon_top = rect.top() + (0 if self.compact_material_view else 8)
+        icon_bottom = icon_top + icon_height + (4 if self.compact_material_view else 12)
         parent = self.window()
         if event.pos().y() <= icon_bottom:
             if hasattr(parent, "open_image_viewer"):
@@ -243,10 +285,12 @@ class MaterialImageList(QListWidget):
     def eventFilter(self, watched, event):
         if watched is self.viewport() and event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop):
             parent = self.window()
+            if hasattr(parent, "set_active_link_image_column"):
+                parent.set_active_link_image_column(self.material_column_key)
             mime_data = event.mimeData()
             if not hasattr(parent, "can_import_mime_data") or not parent.can_import_mime_data(mime_data):
                 return super().eventFilter(watched, event)
-            event.setDropAction(Qt.CopyAction)
+            event.setDropAction(Qt.MoveAction if mime_data.hasFormat(self.INTERNAL_MOVE_MIME) else Qt.CopyAction)
             if event.type() == QEvent.Drop:
                 if hasattr(parent, "import_from_mime_data") and parent.import_from_mime_data(mime_data):
                     event.accept()
@@ -257,23 +301,31 @@ class MaterialImageList(QListWidget):
         return super().eventFilter(watched, event)
 
     def dragEnterEvent(self, event):
+        parent = self.window()
+        if hasattr(parent, "set_active_link_image_column"):
+            parent.set_active_link_image_column(self.material_column_key)
         if event.mimeData().hasUrls() or event.mimeData().hasImage():
-            event.setDropAction(Qt.CopyAction)
+            event.setDropAction(Qt.MoveAction if event.mimeData().hasFormat(self.INTERNAL_MOVE_MIME) else Qt.CopyAction)
             event.accept()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
+        parent = self.window()
+        if hasattr(parent, "set_active_link_image_column"):
+            parent.set_active_link_image_column(self.material_column_key)
         if event.mimeData().hasUrls() or event.mimeData().hasImage():
-            event.setDropAction(Qt.CopyAction)
+            event.setDropAction(Qt.MoveAction if event.mimeData().hasFormat(self.INTERNAL_MOVE_MIME) else Qt.CopyAction)
             event.accept()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event):
         parent = self.window()
+        if hasattr(parent, "set_active_link_image_column"):
+            parent.set_active_link_image_column(self.material_column_key)
         if hasattr(parent, "import_from_mime_data") and parent.import_from_mime_data(event.mimeData()):
-            event.setDropAction(Qt.CopyAction)
+            event.setDropAction(Qt.MoveAction if event.mimeData().hasFormat(self.INTERNAL_MOVE_MIME) else Qt.CopyAction)
             event.accept()
             return
         super().dropEvent(event)
@@ -295,6 +347,9 @@ class MaterialImageList(QListWidget):
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(path) for path in paths])
         mime.setText("\n".join(paths))
+        mime.setData(self.INTERNAL_MOVE_MIME, "\n".join(paths).encode("utf-8"))
+        if self.material_column_key:
+            mime.setData(self.INTERNAL_SOURCE_COLUMN_MIME, str(self.material_column_key).encode("utf-8"))
         return mime
 
     def startDrag(self, supported_actions):
@@ -305,13 +360,22 @@ class MaterialImageList(QListWidget):
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(path) for path in paths])
         mime.setText("\n".join(paths))
+        mime.setData(self.INTERNAL_MOVE_MIME, "\n".join(paths).encode("utf-8"))
+        if self.material_column_key:
+            mime.setData(self.INTERNAL_SOURCE_COLUMN_MIME, str(self.material_column_key).encode("utf-8"))
         drag.setMimeData(mime)
         current = self.currentItem()
         if current and current.icon():
             pixmap = current.icon().pixmap(self.iconSize())
             if not pixmap.isNull():
                 drag.setPixmap(pixmap)
-        drag.exec_(Qt.CopyAction)
+        drag.exec_(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+
+    def enterEvent(self, event):
+        parent = self.window()
+        if hasattr(parent, "set_active_link_image_column"):
+            parent.set_active_link_image_column(self.material_column_key)
+        super().enterEvent(event)
 
 
 class MaterialImageViewerDialog(QDialog):
@@ -356,8 +420,13 @@ class PdfExtractWorker(QThread):
         self.output_folder = output_folder
         self.page_limit = page_limit
         self.base_name = base_name
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        self._cancel_requested = True
 
     def run(self):
+        doc = None
         try:
             try:
                 import fitz
@@ -373,6 +442,9 @@ class PdfExtractWorker(QThread):
             os.makedirs(self.output_folder, exist_ok=True)
             saved = []
             for page_index in range(count):
+                if self._cancel_requested:
+                    self.failed.emit("PDF 提取已取消。")
+                    return
                 page = doc.load_page(page_index)
                 pix = page.get_pixmap(alpha=False)
                 filename = f"{self.base_name}_第{page_index + 1:02d}页.png"
@@ -380,10 +452,24 @@ class PdfExtractWorker(QThread):
                 pix.save(dest)
                 saved.append(dest)
                 self.progress.emit(page_index + 1, count)
+                del pix
+                del page
+                if page_index % 5 == 4:
+                    gc.collect()
             doc.close()
+            doc = None
             self.finished_ok.emit(saved)
+        except MemoryError:
+            self.failed.emit("PDF 页面过大，内存不足，提取失败。")
         except Exception as e:
             self.failed.emit(str(e))
+        finally:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+            gc.collect()
 
     @staticmethod
     def unique_destination_path(folder, filename):
@@ -446,6 +532,9 @@ class MaterialLibraryDialog(QDialog):
         self.product_state = {}
         self.link_state = {}
         self.local_root_folders = {}
+        self.local_spec_folder_mappings = {}
+        self.local_link_folder_paths = {}
+        self.local_category_folder_paths = {}
         self.current_category = None
         self.current_spec = None
         self.selected_category_labels = set()
@@ -461,6 +550,12 @@ class MaterialLibraryDialog(QDialog):
         self.selected_link_product_ids = set()
         self.link_product_buttons = {}
         self.link_store_filter_id = None
+        self.active_link_image_column = "main"
+        self.link_image_lists = {}
+        self.link_image_column_overrides = {}
+        self._chip_animations = {}
+        self._category_sync_queue = []
+        self._category_sync_running = False
         self.pending_pdf_path = ""
         self.pdf_worker = None
         self.setAcceptDrops(True)
@@ -489,6 +584,9 @@ class MaterialLibraryDialog(QDialog):
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         btn_open = QPushButton("打开文件夹")
         btn_open.clicked.connect(self.open_current_folder)
+        self.btn_copy_link_folder_path = QPushButton("复制文件夹路径")
+        self.btn_copy_link_folder_path.clicked.connect(self.copy_current_folder_path)
+        self.btn_copy_link_folder_path.setVisible(False)
         btn_refresh = QPushButton("刷新")
         btn_refresh.clicked.connect(self.refresh_current_view)
         self.mode_button = QPushButton("产品素材库")
@@ -499,6 +597,7 @@ class MaterialLibraryDialog(QDialog):
         btn_settings.clicked.connect(self.choose_root_folder)
         top.addWidget(title)
         top.addWidget(self.path_label, 1)
+        top.addWidget(self.btn_copy_link_folder_path)
         top.addWidget(self.mode_button)
         top.addWidget(btn_open)
         top.addWidget(btn_refresh)
@@ -508,7 +607,7 @@ class MaterialLibraryDialog(QDialog):
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("搜索:"))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索当前层级的气泡")
+        self.search_input.setPlaceholderText("搜索商品类型、规格名称、规格编码")
         self.search_input.textChanged.connect(self.refresh_bubbles)
         search_row.addWidget(self.search_input, 1)
         self.store_filter_combo = QComboBox()
@@ -560,7 +659,15 @@ class MaterialLibraryDialog(QDialog):
         self.image_list.customContextMenuRequested.connect(self.show_image_context_menu)
         self.image_list.itemChanged.connect(self.handle_image_item_changed)
         content_row = QHBoxLayout()
-        content_row.addWidget(self.image_list, 1)
+        self.image_area = QWidget()
+        image_area_layout = QVBoxLayout(self.image_area)
+        image_area_layout.setContentsMargins(0, 0, 0, 0)
+        image_area_layout.setSpacing(4)
+        image_area_layout.addWidget(self.image_list, 1)
+        self.link_image_panel = self.create_link_image_panel()
+        self.link_image_panel.setVisible(False)
+        image_area_layout.addWidget(self.link_image_panel, 1)
+        content_row.addWidget(self.image_area, 1)
         attr_panel = QWidget()
         attr_panel.setFixedWidth(280)
         attr_layout = QVBoxLayout(attr_panel)
@@ -639,6 +746,39 @@ class MaterialLibraryDialog(QDialog):
         layout.addWidget(self.pdf_status_label)
         layout.addStretch()
         return panel
+
+    def create_link_image_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
+        self.link_image_lists = {}
+        for key, title in (("main", "主图"), ("detail", "详情页"), ("sku", "SKU")):
+            top_row.addWidget(self.create_link_image_column(key, title), 1)
+        layout.addLayout(top_row, 1)
+        return panel
+
+    def create_link_image_column(self, key, title):
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        label = QLabel(title)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(
+            "QLabel { font-weight: bold; color: #2c3e50; background: #f3f6f9; border: 1px solid #111111; padding: 3px; }"
+        )
+        image_list = MaterialImageList(self, column_key=key, compact=True)
+        image_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        image_list.customContextMenuRequested.connect(self.show_image_context_menu)
+        image_list.itemChanged.connect(self.handle_image_item_changed)
+        self.link_image_lists[key] = image_list
+        layout.addWidget(label)
+        layout.addWidget(image_list, 1)
+        return column
 
     def settings_key(self, mode=None):
         mode = mode or self.library_mode
@@ -734,6 +874,12 @@ class MaterialLibraryDialog(QDialog):
         self.mode_button.blockSignals(False)
         self.store_filter_combo.setVisible(is_link)
         self.show_inactive_links_checkbox.setVisible(is_link)
+        if hasattr(self, "image_list"):
+            self.image_list.setVisible(not is_link)
+        if hasattr(self, "link_image_panel"):
+            self.link_image_panel.setVisible(is_link)
+        if hasattr(self, "btn_copy_link_folder_path"):
+            self.btn_copy_link_folder_path.setVisible(is_link)
         if hasattr(self, "pdf_import_panel"):
             self.pdf_import_panel.setVisible(not is_link)
         self.search_input.blockSignals(True)
@@ -831,6 +977,8 @@ class MaterialLibraryDialog(QDialog):
         text = str(spec_name or "").strip()
         if not text:
             return ""
+        text = re.sub(r"\s*[【\[\(（]\s*\d+\s*(?:张|页|本|套|份|个|册)\s*[】\]\)）]\s*$", "", text)
+        text = re.sub(r"\s*\d+\s*(?:张|页|本|套|份|个|册)\s*$", "", text)
         text = re.sub(r"\s*\d+\s*本\s*[（(]\s*\d+\s*张\s*[）)]\s*$", "", text)
         text = re.sub(r"\s*[（(]\s*\d+\s*张\s*[）)]\s*$", "", text)
         text = re.sub(r"\s*[【\[\(（]\s*\d+\s*本\s*装?\s*[】\]\)）]\s*$", "", text)
@@ -849,15 +997,254 @@ class MaterialLibraryDialog(QDialog):
         value = re.sub(r"\s+", "", value)
         return value
 
+    def normalize_material_spec_name(self, spec_name):
+        text = str(spec_name or "").strip()
+        if not text:
+            return ""
+        text = text.replace("（", "(").replace("）", ")").replace("【", "[").replace("】", "]")
+        text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fffA-Za-z0-9])", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        units = "张|页|本|套|份|个|册"
+        changed = True
+        while changed:
+            before = text
+            text = re.sub(rf"\s*[\[(]\s*(?:共\s*)?\d+\s*(?:{units})(?:\s*装)?\s*[\])]$", "", text)
+            text = re.sub(rf"\s*\d+\s*(?:{units})\s*[\[(]\s*\d+\s*(?:张|页)\s*[\])]$", "", text)
+            text = re.sub(rf"\s*\d+\s*(?:{units})(?:\s*装)?$", "", text)
+            changed = text != before
+        return text.strip() or str(spec_name or "").strip()
+
+    def normalize_material_spec_name(self, spec_name):
+        text = str(spec_name or "").strip()
+        if not text:
+            return ""
+        text = (
+            text.replace("（", "(")
+            .replace("）", ")")
+            .replace("【", "[")
+            .replace("】", "]")
+            .replace("｛", "[")
+            .replace("｝", "]")
+        )
+        text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fffA-Za-z0-9])", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        units = r"张|页|本|套|份|个|册"
+        count_units = r"本|套|份|个|册"
+        page_units = r"张|页"
+        changed = True
+        while changed:
+            before = text
+            text = re.sub(
+                rf"\s*共\s*\d+\s*(?:{count_units})(?:\s*[\[(]\s*\d+\s*(?:{page_units})\s*[\])])?\s*$",
+                "",
+                text,
+            )
+            text = re.sub(
+                rf"\s*[\[(]\s*(?:共\s*)?\d+\s*(?:{units})(?:\s*[\[(]\s*\d+\s*(?:{units})\s*[\])])?(?:\s*装)?\s*[\])]\s*$",
+                "",
+                text,
+            )
+            text = re.sub(rf"\s*\d+\s*(?:{units})(?:\s*装)?\s*$", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            changed = text != before
+        return text or str(spec_name or "").strip()
+
     def category_folder(self, category):
         root = self.root_folder()
         return os.path.join(root, self.safe_folder_name(category.get("label"), "未命名类型"))
+
+    def category_identity_key(self, specs):
+        codes = sorted({
+            str(code or "").strip()
+            for spec in specs or []
+            for code in (spec.get("codes", []) or [spec.get("primary_code", ""), spec.get("code", "")])
+            if str(code or "").strip()
+        })
+        if not codes:
+            return ""
+        digest = hashlib.md5("|".join(codes).encode("utf-8")).hexdigest()
+        return f"category_folder_path/{self.settings_key(self.PRODUCT_MODE)}/{digest}"
+
+    def sync_category_folder(self, category, specs=None):
+        if not self.root_folder():
+            return ""
+        specs = specs if specs is not None else self.get_specs_for_category(category.get("label", ""))
+        target = self.category_folder(category)
+        key = self.category_identity_key(specs)
+        if key:
+            old_path = str(self.settings.value(key, "") or "").strip()
+            if not old_path:
+                old_path = str(self.local_category_folder_paths.get(key, "") or "").strip()
+            if old_path and os.path.isdir(old_path) and os.path.abspath(old_path) != os.path.abspath(target):
+                try:
+                    self.merge_or_move_material_folder(old_path, target)
+                except Exception:
+                    pass
+        os.makedirs(target, exist_ok=True)
+        if key:
+            self.local_category_folder_paths[key] = target
+            self.settings.setValue(key, target)
+            self.settings.sync()
+        return target
 
     def spec_folder(self, category, spec):
         return os.path.join(
             self.category_folder(category),
             self.safe_folder_name(spec.get("name"), "未命名规格"),
         )
+
+    def spec_alias_folder_names(self, spec):
+        names = []
+        for name in [spec.get("name", ""), spec.get("primary_original_name", "")] + list(spec.get("aliases", [])):
+            safe_name = self.safe_folder_name(name, "未命名规格")
+            if safe_name and safe_name not in names:
+                names.append(safe_name)
+            normalized = self.safe_folder_name(self.normalize_material_spec_name(name), "未命名规格")
+            if normalized and normalized not in names:
+                names.append(normalized)
+        return names
+
+    def spec_folder_mapping_key(self, category, code):
+        category_name = self.safe_folder_name(category.get("label"), "未命名类型")
+        code_value = self.safe_folder_name(code, "未命名编码")
+        return f"spec_folder_name/{self.settings_key(self.PRODUCT_MODE)}/{category_name}/{code_value}"
+
+    def spec_folder_path_mapping_key(self, code):
+        code_value = self.safe_folder_name(code, "未命名编码")
+        return f"spec_folder_path/{self.settings_key(self.PRODUCT_MODE)}/{code_value}"
+
+    def mapped_spec_folder_paths(self, category, spec):
+        paths = []
+        root = self.root_folder()
+        for code in spec.get("codes", []) or [spec.get("primary_code", "")]:
+            if not code:
+                continue
+            path_key = self.spec_folder_path_mapping_key(code)
+            value = str(self.settings.value(path_key, "") or "").strip()
+            if value and value not in paths:
+                paths.append(value)
+            code_value = self.safe_folder_name(code, "未命名编码")
+            prefix = f"spec_folder_name/{self.settings_key(self.PRODUCT_MODE)}/"
+            suffix = f"/{code_value}"
+            try:
+                keys = self.settings.allKeys()
+            except Exception:
+                keys = []
+            for key in keys:
+                if not key.startswith(prefix) or not key.endswith(suffix):
+                    continue
+                category_name = key[len(prefix):-len(suffix)]
+                folder_name = str(self.settings.value(key, "") or "").strip()
+                if root and category_name and folder_name:
+                    legacy_path = os.path.join(root, category_name, folder_name)
+                    if legacy_path not in paths:
+                        paths.append(legacy_path)
+        return paths
+
+    def discover_spec_folder_paths_across_categories(self, category, spec):
+        root = self.root_folder()
+        if not root or not os.path.isdir(root):
+            return []
+        current_category_folder = os.path.abspath(self.category_folder(category))
+        folder_names = set(self.spec_alias_folder_names(spec))
+        paths = []
+        try:
+            category_names = os.listdir(root)
+        except Exception:
+            return []
+        for category_name in category_names:
+            category_path = os.path.join(root, category_name)
+            if not os.path.isdir(category_path):
+                continue
+            for folder_name in folder_names:
+                source = os.path.join(category_path, folder_name)
+                if not os.path.isdir(source):
+                    continue
+                if os.path.abspath(source) == os.path.abspath(os.path.join(current_category_folder, folder_name)):
+                    continue
+                if source not in paths:
+                    paths.append(source)
+        return paths
+
+    def mapped_spec_folder_names(self, category, spec):
+        names = []
+        for code in spec.get("codes", []) or [spec.get("primary_code", "")]:
+            if not code:
+                continue
+            key = self.spec_folder_mapping_key(category, code)
+            value = str(self.settings.value(key, "") or "").strip()
+            if not value:
+                value = str(self.local_spec_folder_mappings.get(key, "") or "").strip()
+            if value and value not in names:
+                names.append(value)
+        return names
+
+    def save_spec_folder_mapping(self, category, spec, folder_name):
+        target = self.spec_folder(category, spec)
+        for code in spec.get("codes", []) or [spec.get("primary_code", "")]:
+            if code:
+                key = self.spec_folder_mapping_key(category, code)
+                self.local_spec_folder_mappings[key] = folder_name
+                self.settings.setValue(key, folder_name)
+                self.settings.setValue(self.spec_folder_path_mapping_key(code), target)
+        self.settings.sync()
+
+    def merge_or_move_material_folder(self, source, target):
+        if not source or not os.path.isdir(source):
+            return
+        if os.path.abspath(source) == os.path.abspath(target):
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if not os.path.exists(target):
+            try:
+                os.rename(source, target)
+                return
+            except OSError:
+                os.makedirs(target, exist_ok=True)
+        for name in os.listdir(source):
+            src_path = os.path.join(source, name)
+            dst_path = os.path.join(target, name)
+            if os.path.isdir(src_path):
+                self.merge_or_move_material_folder(src_path, dst_path)
+            else:
+                dst_path = self.unique_destination_path(target, name) if os.path.exists(dst_path) else dst_path
+                shutil.move(src_path, dst_path)
+        try:
+            os.rmdir(source)
+        except OSError:
+            pass
+
+    def sync_spec_folder(self, category, spec):
+        if not self.root_folder():
+            return ""
+        target = self.spec_folder(category, spec)
+        category_folder = self.category_folder(category)
+        folder_names = self.spec_alias_folder_names(spec) + [
+            name for name in self.mapped_spec_folder_names(category, spec)
+            if name not in self.spec_alias_folder_names(spec)
+        ]
+        for source in self.mapped_spec_folder_paths(category, spec) + self.discover_spec_folder_paths_across_categories(category, spec):
+            if os.path.isdir(source) and os.path.abspath(source) != os.path.abspath(target):
+                try:
+                    self.merge_or_move_material_folder(source, target)
+                except Exception:
+                    pass
+        for folder_name in folder_names:
+            source = os.path.join(category_folder, folder_name)
+            if os.path.isdir(source) and os.path.abspath(source) != os.path.abspath(target):
+                try:
+                    self.merge_or_move_material_folder(source, target)
+                except Exception:
+                    pass
+        self.save_spec_folder_mapping(category, spec, self.safe_folder_name(spec.get("name"), "未命名规格"))
+        return target
+
+    def sync_spec_folders(self, category, specs=None):
+        if not self.root_folder():
+            return
+        self.sync_category_folder(category, specs if specs is not None else self.specs)
+        for spec in specs if specs is not None else self.specs:
+            self.sync_spec_folder(category, spec)
 
     def load_categories(self):
         try:
@@ -877,13 +1264,71 @@ class MaterialLibraryDialog(QDialog):
                 for label, color, sort_order, count in rows
                 if str(label or "").strip()
             ]
+            self.schedule_deferred_category_sync()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"读取成本库商品类型失败：\n{e}")
             self.categories = []
         self.refresh_bubbles()
 
+    def sync_all_category_folders(self):
+        if not self.root_folder():
+            return
+        for category in self.categories:
+            try:
+                specs = self.get_specs_for_category(category.get("label", ""))
+                self.sync_category_folder(category, specs)
+            except Exception:
+                pass
+
+    def schedule_deferred_category_sync(self):
+        if not self.root_folder():
+            return
+        self._category_sync_queue = list(self.categories)
+        if self._category_sync_running:
+            return
+        self._category_sync_running = bool(self._category_sync_queue)
+        if self._category_sync_running:
+            QTimer.singleShot(0, self.process_deferred_category_sync)
+
+    def process_deferred_category_sync(self):
+        if not self._category_sync_queue:
+            self._category_sync_running = False
+            return
+        category = self._category_sync_queue.pop(0)
+        try:
+            specs = self.get_specs_for_category(category.get("label", ""))
+            self.sync_category_folder(category, specs)
+        except Exception:
+            pass
+        QTimer.singleShot(20, self.process_deferred_category_sync)
+
     def load_specs(self, category_label):
         self.specs = self.get_specs_for_category(category_label)
+
+    def spec_matches_keyword(self, spec, keyword):
+        if not keyword:
+            return True
+        values = [
+            spec.get("name", ""),
+            spec.get("code", ""),
+            spec.get("primary_code", ""),
+            spec.get("primary_original_name", ""),
+        ]
+        values.extend(spec.get("aliases", []) or [])
+        values.extend(spec.get("codes", []) or [])
+        return any(keyword in str(value or "").lower() for value in values)
+
+    def category_matches_keyword(self, category, keyword):
+        if not keyword:
+            return True
+        label = str(category.get("label", "") or "")
+        if keyword in label.lower():
+            return True
+        try:
+            specs = self.get_specs_for_category(label)
+        except Exception:
+            return False
+        return any(self.spec_matches_keyword(spec, keyword) for spec in specs)
 
     def get_specs_for_category(self, category_label):
         rows = self.db.safe_fetchall(
@@ -926,12 +1371,87 @@ class MaterialLibraryDialog(QDialog):
             item.pop("attribute_keys", None)
         return specs
 
+    def get_specs_for_category(self, category_label):
+        rows = self.db.safe_fetchall(
+            """SELECT COALESCE(spec_name, ''), spec_code, COALESCE(product_attribute, ''),
+                      manual_sort_order, sort_order
+               FROM cost_library
+               WHERE COALESCE(category_label, '') = ?
+               ORDER BY CASE WHEN manual_sort_order IS NULL THEN 1 ELSE 0 END,
+                        manual_sort_order, sort_order, spec_code""",
+            (category_label,),
+        )
+        grouped = {}
+        for spec_name, spec_code, product_attribute, manual_sort_order, sort_order in rows:
+            original_name = str(spec_name or "").strip() or str(spec_code or "").strip() or "未命名规格"
+            normalized_name = self.normalize_material_spec_name(original_name) or original_name
+            key = normalized_name.lower()
+            code = str(spec_code or "").strip()
+            item = grouped.get(key)
+            if not item:
+                item = {
+                    "name": normalized_name,
+                    "code": code,
+                    "primary_code": code,
+                    "primary_original_name": original_name,
+                    "manual_sort": manual_sort_order,
+                    "sort": sort_order,
+                    "codes": [],
+                    "aliases": [],
+                    "attributes": [],
+                    "attribute_keys": set(),
+                }
+                grouped[key] = item
+            if code and code not in item["codes"]:
+                item["codes"].append(code)
+            if original_name not in item["aliases"]:
+                item["aliases"].append(original_name)
+            target_name = self.normalize_material_spec_name(item.get("primary_original_name", "")) or item["name"]
+            if item["name"] != target_name:
+                item["name"] = target_name
+            attr_text = str(product_attribute or "").strip()
+            attr_key = self.normalize_attribute_key(attr_text)
+            if attr_text and attr_key and attr_key not in item["attribute_keys"]:
+                item["attributes"].append(attr_text)
+                item["attribute_keys"].add(attr_key)
+        specs = list(grouped.values())
+        for item in specs:
+            item.pop("attribute_keys", None)
+        return specs
+
     def clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        layout.invalidate()
+
+    def refresh_chip_layout_geometry(self, scroll, content, layout):
+        if not scroll.isVisible():
+            return
+        layout.invalidate()
+        layout.activate()
+        content.updateGeometry()
+        content.adjustSize()
+        scroll.viewport().update()
+        scroll.updateGeometry()
+
+    def schedule_chip_layout_refresh(self):
+        targets = (
+            (self.category_scroll, self.category_content, self.category_layout),
+            (self.spec_scroll, self.spec_content, self.spec_layout),
+            (self.link_product_scroll, self.link_product_content, self.link_product_layout),
+        )
+        for scroll, content, layout in targets:
+            self.refresh_chip_layout_geometry(scroll, content, layout)
+        QTimer.singleShot(
+            0,
+            lambda: [
+                self.refresh_chip_layout_geometry(scroll, content, layout)
+                for scroll, content, layout in targets
+            ],
+        )
 
     def refresh_bubbles(self):
         if self.library_mode == self.LINK_MODE:
@@ -952,7 +1472,7 @@ class MaterialLibraryDialog(QDialog):
         keyword = self.search_input.text().strip().lower()
         for category in self.categories:
             label = category["label"]
-            if keyword and keyword not in label.lower():
+            if not self.category_matches_keyword(category, keyword):
                 continue
             button = self.create_chip(label, category.get("color") or "#DDEBF7")
             button.setChecked(label in self.selected_category_labels)
@@ -961,6 +1481,7 @@ class MaterialLibraryDialog(QDialog):
             self.category_buttons[label] = button
         if not self.categories:
             self.image_count_label.setText("成本库里还没有商品类型")
+        self.schedule_chip_layout_refresh()
 
     def refresh_spec_bubbles(self):
         self.category_scroll.setVisible(False)
@@ -973,14 +1494,15 @@ class MaterialLibraryDialog(QDialog):
         keyword = self.search_input.text().strip().lower()
         for spec in self.specs:
             name = spec["name"]
-            aliases = spec.get("aliases", [])
-            if keyword and keyword not in name.lower() and not any(keyword in str(alias or "").lower() for alias in aliases):
+            if not self.spec_matches_keyword(spec, keyword):
                 continue
             button = self.create_chip(name, self.current_category.get("color") or "#DDEBF7")
             button.setChecked(name in self.selected_spec_names)
+            self.configure_spec_drop_target(button, spec)
             button.clicked.connect(lambda _checked=False, s=spec: self.toggle_spec(s))
             self.spec_layout.addWidget(button)
             self.spec_buttons[name] = button
+        self.schedule_chip_layout_refresh()
 
     def create_chip(self, text, color):
         bg = QColor(color if color else "#DDEBF7")
@@ -988,6 +1510,9 @@ class MaterialLibraryDialog(QDialog):
         button = QPushButton(text)
         button.setCheckable(True)
         button.setMinimumHeight(34)
+        button.setProperty("baseMinimumHeight", 34)
+        button.setAcceptDrops(True)
+        button.installEventFilter(self)
         button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         button.setStyleSheet(
             f"""
@@ -1006,9 +1531,108 @@ class MaterialLibraryDialog(QDialog):
                 border: 2px solid #2f80ed;
                 padding: 4px 13px;
             }}
+            QPushButton[dropHover="true"] {{
+                background-color: #eafff2;
+                border: 2px solid #27ae60;
+                padding: 4px 13px;
+            }}
             """
         )
         return button
+
+    def configure_spec_drop_target(self, button, spec):
+        button.setProperty("materialDropTarget", "product_spec")
+        button.material_spec = spec
+
+    def configure_link_product_drop_target(self, button, item):
+        button.setProperty("materialDropTarget", "link_product")
+        button.material_link_item = item
+        button.setAcceptDrops(True)
+        button.installEventFilter(self)
+
+    def set_chip_drop_hover(self, button, active):
+        button.setProperty("dropHover", bool(active))
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+        base_height = int(button.property("baseMinimumHeight") or 34)
+        target_height = base_height + 6 if active else base_height
+        animation = QPropertyAnimation(button, b"minimumHeight", self)
+        animation.setDuration(120)
+        animation.setStartValue(button.minimumHeight())
+        animation.setEndValue(target_height)
+        animation.valueChanged.connect(lambda _value: self.schedule_chip_layout_refresh())
+        animation.finished.connect(self.schedule_chip_layout_refresh)
+        animation.start()
+        self._chip_animations[id(button)] = animation
+
+    def eventFilter(self, watched, event):
+        if getattr(watched, "property", None) and watched.property("materialDropTarget") in ("product_spec", "link_product"):
+            if event.type() in (QEvent.DragEnter, QEvent.DragMove):
+                if self.image_paths_from_mime_data(event.mimeData()):
+                    self.set_chip_drop_hover(watched, True)
+                    event.setDropAction(Qt.MoveAction if event.mimeData().hasFormat(MaterialImageList.INTERNAL_MOVE_MIME) else Qt.CopyAction)
+                    event.accept()
+                    return True
+            if event.type() == QEvent.DragLeave:
+                self.set_chip_drop_hover(watched, False)
+                return False
+            if event.type() == QEvent.Drop:
+                self.set_chip_drop_hover(watched, False)
+                paths = self.image_paths_from_mime_data(event.mimeData())
+                target_type = watched.property("materialDropTarget")
+                if target_type == "product_spec":
+                    spec = getattr(watched, "material_spec", None)
+                    moved = bool(paths and spec and self.move_images_to_spec(paths, spec))
+                else:
+                    item = getattr(watched, "material_link_item", None)
+                    source_column = self.internal_drag_source_column_from_mime(event.mimeData())
+                    moved = bool(paths and item and self.move_images_to_link_product(paths, item, source_column))
+                if moved:
+                    event.setDropAction(Qt.MoveAction if event.mimeData().hasFormat(MaterialImageList.INTERNAL_MOVE_MIME) else Qt.CopyAction)
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def image_paths_from_mime_data(self, mime_data):
+        paths = []
+        if mime_data.hasUrls():
+            paths.extend(url.toLocalFile() for url in mime_data.urls() if url.isLocalFile())
+        if mime_data.hasText():
+            paths.extend(self.paths_from_text(mime_data.text()))
+        result = []
+        for path in paths:
+            path = os.path.abspath(path)
+            if self.is_image_file(path) and path not in result:
+                result.append(path)
+        return result
+
+    def move_images_to_spec(self, paths, spec):
+        if not self.current_category or not self.ensure_root_folder():
+            return False
+        target_folder = self.sync_spec_folder(self.current_category, spec) or self.spec_folder(self.current_category, spec)
+        os.makedirs(target_folder, exist_ok=True)
+        moved = 0
+        for path in paths:
+            if not self.is_image_file(path):
+                continue
+            if os.path.abspath(os.path.dirname(path)) == os.path.abspath(target_folder):
+                continue
+            dest = self.unique_destination_path(target_folder, os.path.basename(path))
+            try:
+                os.replace(path, dest)
+                moved += 1
+            except Exception:
+                try:
+                    shutil.move(path, dest)
+                    moved += 1
+                except Exception as e:
+                    QMessageBox.warning(self, "移动失败", f"移动图片失败：\n{path}\n\n{e}")
+                    break
+        if moved:
+            self.refresh_current_view()
+            self.image_count_label.setText(f"已移动 {moved} 张图片到 {spec.get('name', '')}")
+        return moved > 0
 
     def load_store_filter(self, preferred_store_id=None):
         self.store_filter_combo.blockSignals(True)
@@ -1091,6 +1715,30 @@ class MaterialLibraryDialog(QDialog):
                     return os.path.join(current_root, dirname)
         return ""
 
+    def link_folder_mapping_key(self, item):
+        db_id = item.get("db_id")
+        if db_id is None:
+            return ""
+        return f"link_folder_path/{self.settings_key(self.LINK_MODE)}/{db_id}"
+
+    def mapped_link_folder_path(self, item):
+        key = self.link_folder_mapping_key(item)
+        if not key:
+            return ""
+        value = str(self.settings.value(key, "") or "").strip()
+        if not value:
+            value = str(self.local_link_folder_paths.get(key, "") or "").strip()
+        return value
+
+    def save_link_folder_mapping(self, item, folder):
+        key = self.link_folder_mapping_key(item)
+        if not key or not folder:
+            return
+        value = os.path.abspath(folder)
+        self.local_link_folder_paths[key] = value
+        self.settings.setValue(key, value)
+        self.settings.sync()
+
     def merge_or_move_folder(self, source, target):
         if not source or not os.path.isdir(source):
             return
@@ -1098,8 +1746,11 @@ class MaterialLibraryDialog(QDialog):
             return
         os.makedirs(os.path.dirname(target), exist_ok=True)
         if not os.path.exists(target):
-            os.rename(source, target)
-            return
+            try:
+                os.rename(source, target)
+                return
+            except OSError:
+                os.makedirs(target, exist_ok=True)
         for name in os.listdir(source):
             src_path = os.path.join(source, name)
             dst_path = os.path.join(target, name)
@@ -1107,7 +1758,14 @@ class MaterialLibraryDialog(QDialog):
                 self.merge_or_move_folder(src_path, dst_path)
             else:
                 dst_path = self.unique_destination_path(target, name) if os.path.exists(dst_path) else dst_path
-                shutil.move(src_path, dst_path)
+                try:
+                    os.replace(src_path, dst_path)
+                except OSError:
+                    shutil.copy2(src_path, dst_path)
+                    try:
+                        os.remove(src_path)
+                    except OSError:
+                        pass
         try:
             os.rmdir(source)
         except OSError:
@@ -1120,13 +1778,16 @@ class MaterialLibraryDialog(QDialog):
         normal = self.link_product_folder(item, use_status=False)
         try:
             if not item.get("deleted"):
-                old_folder = self.find_existing_link_folder(item.get("code", ""))
+                old_folder = self.mapped_link_folder_path(item)
+                if not old_folder or not os.path.isdir(old_folder):
+                    old_folder = self.find_existing_link_folder(item.get("code", ""))
                 if old_folder and os.path.abspath(old_folder) != os.path.abspath(target):
                     self.merge_or_move_folder(old_folder, target)
             if os.path.exists(normal) and os.path.abspath(normal) != os.path.abspath(target) and not os.path.exists(target):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 os.rename(normal, target)
             os.makedirs(target, exist_ok=True)
+            self.save_link_folder_mapping(item, target)
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建链接素材文件夹失败：\n{e}")
             return ""
@@ -1144,8 +1805,9 @@ class MaterialLibraryDialog(QDialog):
         try:
             rows = self.db.safe_fetchall(
                 f"""SELECT p.id, COALESCE(p.name, ''), COALESCE(p.title, ''),
-                          COALESCE(p.link_type, ''), p.image_data, COALESCE(p.is_archived, 0),
-                          p.store_id, COALESCE(s.name, ''), COALESCE(lc.name, '')
+                          COALESCE(p.link_type, ''), p.image_data, COALESCE(p.image_path, ''),
+                          COALESCE(p.is_archived, 0), p.store_id, COALESCE(s.name, ''),
+                          COALESCE(lc.name, '')
                    FROM products p
                    LEFT JOIN stores s ON s.id = p.store_id
                    LEFT JOIN link_combinations lc ON lc.id = p.link_combo_id
@@ -1160,7 +1822,7 @@ class MaterialLibraryDialog(QDialog):
         show_inactive = self.show_inactive_links_checkbox.isChecked()
         items = []
         current_codes = set()
-        for db_id, code, title, link_type, image_data, archived, store_id, store_name, combo in rows:
+        for db_id, code, title, link_type, image_data, image_path, archived, store_id, store_name, combo in rows:
             code = str(code or db_id or "").strip()
             if not code:
                 continue
@@ -1174,6 +1836,7 @@ class MaterialLibraryDialog(QDialog):
                 "store_id": store_id,
                 "store_name": str(store_name or "").strip() or "未命名店铺",
                 "image_data": image_data,
+                "image_path": str(image_path or "").strip(),
                 "archived": bool(archived),
                 "deleted": False,
             }
@@ -1295,6 +1958,7 @@ class MaterialLibraryDialog(QDialog):
                 self.link_product_buttons[item["code"]] = button
         if not self.link_items:
             self.image_count_label.setText("当前没有可显示的链接素材")
+        self.schedule_chip_layout_refresh()
 
     def filtered_link_items(self, keyword):
         if not keyword:
@@ -1318,15 +1982,45 @@ class MaterialLibraryDialog(QDialog):
             text += self.LINK_ARCHIVED_SUFFIX
         if item.get("deleted"):
             text += self.LINK_DELETED_SUFFIX
-        button = self.create_chip(text, "#F7E8D5")
-        button.setMinimumHeight(52)
-        button.setIconSize(QSize(42, 42))
+        button = QToolButton()
+        button.setCheckable(True)
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        button.setIconSize(QSize(64, 64))
+        button.setMinimumSize(QSize(106, 96))
+        button.setMaximumWidth(128)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                background-color: #F7E8D5;
+                color: #1f2d3d;
+                border: 1px solid #b8c2cc;
+                border-radius: 8px;
+                padding: 5px 6px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                border-color: #3498db;
+            }
+            QToolButton:checked {
+                border: 2px solid #2f80ed;
+                padding: 4px 5px;
+            }
+            """
+        )
+        pixmap = QPixmap()
         image_data = item.get("image_data")
         if image_data:
-            pixmap = QPixmap()
-            if pixmap.loadFromData(bytes(image_data)):
-                button.setIcon(QIcon(pixmap.scaled(42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            pixmap.loadFromData(bytes(image_data))
+        if pixmap.isNull():
+            image_path = item.get("image_path", "")
+            if image_path and os.path.exists(image_path):
+                pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            button.setIcon(QIcon(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
         button.setToolTip(item.get("title") or item.get("code", ""))
+        self.configure_link_product_drop_target(button, item)
         return button
 
     def select_link_combo(self, combo):
@@ -1431,6 +2125,7 @@ class MaterialLibraryDialog(QDialog):
 
         if not self.link_items:
             self.image_count_label.setText("当前没有可显示的链接素材")
+        self.schedule_chip_layout_refresh()
 
     def select_category(self, category):
         root = self.ensure_root_folder()
@@ -1441,11 +2136,11 @@ class MaterialLibraryDialog(QDialog):
         self.selected_category_labels = {category.get("label", "")}
         self.selected_spec_names = set()
         try:
-            os.makedirs(self.category_folder(category), exist_ok=True)
+            self.load_specs(category.get("label", ""))
+            self.sync_category_folder(category, self.specs)
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建商品类型文件夹失败：\n{e}")
             return
-        self.load_specs(category.get("label", ""))
         self.search_input.blockSignals(True)
         self.search_input.clear()
         self.search_input.blockSignals(False)
@@ -1471,11 +2166,12 @@ class MaterialLibraryDialog(QDialog):
             self.current_category = selected_category
             self.current_spec = None
             try:
-                os.makedirs(self.category_folder(selected_category), exist_ok=True)
+                self.load_specs(selected_label)
+                self.sync_category_folder(selected_category, self.specs)
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"创建商品类型文件夹失败：\n{e}")
                 return
-            self.load_specs(selected_label)
+            self.sync_spec_folders(selected_category)
             self.refresh_spec_bubbles()
             self.load_images_for_category()
         else:
@@ -1493,6 +2189,7 @@ class MaterialLibraryDialog(QDialog):
         self.selected_spec_names = {spec.get("name", "")}
         try:
             os.makedirs(self.spec_folder(self.current_category, spec), exist_ok=True)
+            self.sync_spec_folder(self.current_category, spec)
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建规格文件夹失败：\n{e}")
             return
@@ -1513,6 +2210,7 @@ class MaterialLibraryDialog(QDialog):
                 self.selected_spec_names.add(name)
                 try:
                     os.makedirs(self.spec_folder(self.current_category, spec), exist_ok=True)
+                    self.sync_spec_folder(self.current_category, spec)
                 except Exception as e:
                     QMessageBox.warning(self, "错误", f"创建规格文件夹失败：\n{e}")
                     return
@@ -1522,6 +2220,7 @@ class MaterialLibraryDialog(QDialog):
             self.selected_spec_names = {name}
             try:
                 os.makedirs(self.spec_folder(self.current_category, spec), exist_ok=True)
+                self.sync_spec_folder(self.current_category, spec)
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"创建规格文件夹失败：\n{e}")
                 return
@@ -1576,15 +2275,30 @@ class MaterialLibraryDialog(QDialog):
     def is_image_file(self, path):
         return os.path.isfile(path) and os.path.splitext(path)[1].lower() in self.IMAGE_EXTENSIONS
 
-    def sorted_image_files(self, folder):
+    def image_natural_sort_key(self, path, white_first=False):
+        name = os.path.basename(path)
+        stem, _ext = os.path.splitext(name)
+        normalized_stem = stem.strip().lower()
+        white_rank = 0 if white_first and normalized_stem == "白底图" else 1
+        parts = re.split(r"(\d+)", normalized_stem)
+        natural_parts = [int(part) if part.isdigit() else part for part in parts]
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0
+        has_number = any(part.isdigit() for part in parts)
+        return (white_rank, 0 if has_number else 1, natural_parts, mtime, name.lower())
+
+    def sorted_image_files(self, folder, white_first=False):
         if not folder or not os.path.isdir(folder):
             return []
         try:
-            return [
+            paths = [
                 os.path.join(folder, name)
-                for name in sorted(os.listdir(folder), key=lambda item: item.lower())
+                for name in os.listdir(folder)
                 if self.is_image_file(os.path.join(folder, name))
             ]
+            return sorted(paths, key=lambda path: self.image_natural_sort_key(path, white_first=white_first))
         except Exception:
             return []
 
@@ -1678,6 +2392,67 @@ class MaterialLibraryDialog(QDialog):
         self.image_count_label.setText(f"当前规格图片：{len(images)} 张")
         self.update_attribute_sidebar()
 
+    def images_for_category(self, category, specs=None):
+        source_specs = specs if specs is not None else self.specs
+        self.sync_category_folder(category, source_specs)
+        self.sync_spec_folders(category, source_specs)
+        folder = self.category_folder(category)
+        images = [(path, os.path.basename(path)) for path in self.sorted_image_files(folder, white_first=True)]
+        for spec in source_specs:
+            spec_name = spec.get("name", "")
+            seen_folders = set()
+            for folder_name in self.spec_alias_folder_names(spec):
+                spec_folder = os.path.join(folder, folder_name)
+                normalized_folder = os.path.abspath(spec_folder)
+                if normalized_folder in seen_folders:
+                    continue
+                seen_folders.add(normalized_folder)
+                for path in self.sorted_image_files(spec_folder, white_first=True):
+                    images.append((path, f"{spec_name} / {os.path.basename(path)}"))
+        return images
+
+    def load_images_for_selected_specs(self):
+        self.image_list.clear()
+        if not self.current_category:
+            return
+        selected_specs = [spec for spec in self.specs if spec.get("name") in self.selected_spec_names]
+        self.sync_category_folder(self.current_category, self.specs)
+        images = []
+        for spec in selected_specs:
+            self.sync_spec_folder(self.current_category, spec)
+            spec_name = spec.get("name", "")
+            seen_folders = set()
+            for folder_name in self.spec_alias_folder_names(spec):
+                folder = os.path.join(self.category_folder(self.current_category), folder_name)
+                normalized_folder = os.path.abspath(folder)
+                if normalized_folder in seen_folders:
+                    continue
+                seen_folders.add(normalized_folder)
+                for path in self.sorted_image_files(folder, white_first=True):
+                    images.append((path, f"{spec_name} / {os.path.basename(path)}"))
+        self.add_image_items(images)
+        self.image_count_label.setText(f"当前规格图片：{len(images)} 张")
+        self.update_attribute_sidebar()
+
+    def load_images_for_spec(self):
+        self.image_list.clear()
+        if not self.current_category or not self.current_spec:
+            return
+        self.sync_category_folder(self.current_category, self.specs)
+        self.sync_spec_folder(self.current_category, self.current_spec)
+        images = []
+        seen_folders = set()
+        for folder_name in self.spec_alias_folder_names(self.current_spec):
+            folder = os.path.join(self.category_folder(self.current_category), folder_name)
+            normalized_folder = os.path.abspath(folder)
+            if normalized_folder in seen_folders:
+                continue
+            seen_folders.add(normalized_folder)
+            images.extend((path, os.path.basename(path)) for path in self.sorted_image_files(folder, white_first=True))
+        self.add_image_items(images)
+        self.image_count_label.setText(f"当前规格图片：{len(images)} 张")
+        self.update_attribute_sidebar()
+
     def selected_link_items(self):
         if not self.selected_link_product_ids:
             return []
@@ -1687,22 +2462,139 @@ class MaterialLibraryDialog(QDialog):
                 selected.append(item)
         return selected
 
+    def link_image_column_prefix(self, column_key):
+        return {
+            "main": "主图",
+            "detail": "详情页",
+            "sku": "SKU",
+        }.get(column_key, "")
+
+    def link_image_column_setting_key(self, path):
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        digest = hashlib.md5(normalized_path.encode("utf-8")).hexdigest()
+        return f"link_image_column/{self.settings_key(self.LINK_MODE)}/{digest}"
+
+    def saved_link_image_column(self, path):
+        key = self.link_image_column_setting_key(path)
+        value = str(self.settings.value(key, "") or "").strip()
+        return value if value in ("main", "detail", "sku") else ""
+
+    def save_link_image_column(self, path, column_key):
+        if column_key not in ("main", "detail", "sku"):
+            return
+        normalized_path = os.path.abspath(path)
+        self.link_image_column_overrides[normalized_path] = column_key
+        self.settings.setValue(self.link_image_column_setting_key(normalized_path), column_key)
+        self.settings.sync()
+
+    def remove_saved_link_image_column(self, path):
+        normalized_path = os.path.abspath(path)
+        self.link_image_column_overrides.pop(normalized_path, None)
+        self.settings.remove(self.link_image_column_setting_key(normalized_path))
+        self.settings.sync()
+
+    def classify_link_image_name(self, filename):
+        stem, _ext = os.path.splitext(os.path.basename(filename))
+        normalized = stem.strip()
+        patterns = (
+            ("main", "主图"),
+            ("detail", "详情页"),
+            ("sku", "sku"),
+        )
+        for column_key, prefix in patterns:
+            pattern = rf"^{re.escape(prefix)}\s*(?:[（(【\[_，,\-]?\s*(\d+)\s*[）)】\]]?)?(?:[_\-]\d+)?$"
+            match = re.match(pattern, normalized, re.IGNORECASE)
+            if match:
+                number = int(match.group(1)) if match.group(1) else 0
+                return column_key, number
+        return "main", 0
+
+    def is_link_auto_named_file(self, filename):
+        column_key, number = self.classify_link_image_name(filename)
+        return column_key in ("main", "detail", "sku") and number > 0
+
+    def link_column_sort_key(self, path):
+        column_key, number = self.classify_link_image_name(os.path.basename(path))
+        if column_key != "main" or number:
+            return (0, number if number else 999999, self.image_natural_sort_key(path))
+        return self.image_natural_sort_key(path)
+
+    def link_image_column_for_path(self, path):
+        normalized_path = os.path.abspath(path)
+        override = self.link_image_column_overrides.get(normalized_path)
+        if override in ("main", "detail", "sku") and os.path.exists(normalized_path):
+            return override
+        saved = self.saved_link_image_column(normalized_path)
+        if saved:
+            self.link_image_column_overrides[normalized_path] = saved
+            return saved
+        column_key, _number = self.classify_link_image_name(os.path.basename(path))
+        return column_key if column_key in ("main", "detail", "sku") else "main"
+
+    def next_link_column_index(self, folder, column_key):
+        if column_key not in ("main", "detail", "sku") or not os.path.isdir(folder):
+            return 1
+        used = set()
+        for name in os.listdir(folder):
+            path = os.path.join(folder, name)
+            if not self.is_image_file(path):
+                continue
+            detected_column, number = self.classify_link_image_name(name)
+            if detected_column == column_key and number > 0:
+                used.add(number)
+        index = 1
+        while index in used:
+            index += 1
+        return index
+
+    def allocate_link_column_index(self, folder, column_key, allocation_state):
+        key = (os.path.abspath(folder), column_key)
+        if key not in allocation_state:
+            used = set()
+            if os.path.isdir(folder):
+                for name in os.listdir(folder):
+                    path = os.path.join(folder, name)
+                    if not self.is_image_file(path):
+                        continue
+                    detected_column, number = self.classify_link_image_name(name)
+                    if detected_column == column_key and number > 0:
+                        used.add(number)
+            allocation_state[key] = used
+        used = allocation_state[key]
+        index = 1
+        while index in used:
+            index += 1
+        used.add(index)
+        return index
+
     def load_images_for_link_selection(self):
-        self.image_list.clear()
+        self.clear_link_image_lists()
         if not self.selected_link_product_ids:
             self.image_count_label.setText("请选择一个或多个商品ID查看链接素材")
             self.update_attribute_sidebar()
             return
-        images = []
+        grouped = {"main": [], "detail": [], "sku": []}
         for item in self.selected_link_items():
+            if not item.get("deleted"):
+                self.ensure_link_product_folder(item)
             folder = item.get("folder_path") or self.link_product_folder(item, use_status=True)
             for path in self.sorted_image_files(folder):
-                name = os.path.basename(path)
+                name = os.path.splitext(os.path.basename(path))[0]
                 if len(self.selected_link_product_ids) != 1:
                     name = f"{item.get('code', '')} / {name}"
-                images.append((path, name))
-        self.add_image_items(images)
-        self.image_count_label.setText(f"当前链接素材图片：{len(images)} 张")
+                column_key = self.link_image_column_for_path(path)
+                grouped[column_key].append((path, name))
+        total = 0
+        empty_texts = {
+            "main": "没有主图",
+            "detail": "没有详情页",
+            "sku": "没有 SKU 图",
+        }
+        for column_key, image_list in self.link_image_lists.items():
+            images = sorted(grouped.get(column_key, []), key=lambda item: self.link_column_sort_key(item[0]))
+            total += len(images)
+            self.add_image_items(images, image_list=image_list, empty_text=empty_texts.get(column_key, "没有图片"))
+        self.image_count_label.setText(f"当前链接素材图片：{total} 张")
         self.update_attribute_sidebar()
 
     def update_attribute_sidebar(self):
@@ -1754,15 +2646,16 @@ class MaterialLibraryDialog(QDialog):
             lines.append(f"  {attrs[0]}")
         return lines
 
-    def add_image_items(self, images):
-        self.image_list.blockSignals(True)
+    def add_image_items(self, images, image_list=None, empty_text="当前文件夹没有可显示的图片"):
+        if image_list is None:
+            image_list = self.image_list
+        image_list.blockSignals(True)
         for path, display_name in images:
-            pixmap = QPixmap(path)
+            pixmap = self.load_thumbnail_pixmap(path, image_list.iconSize())
             if pixmap.isNull():
                 continue
-            icon_pixmap = pixmap.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            item = QListWidgetItem(QIcon(icon_pixmap), display_name)
-            item.setSizeHint(QSize(148, 168))
+            item = QListWidgetItem(QIcon(pixmap), display_name)
+            item.setSizeHint(image_list.gridSize())
             item.setTextAlignment(Qt.AlignCenter)
             item.setFlags(item.flags() | Qt.ItemIsEditable)
             item.setData(MaterialImageList.PATH_ROLE, path)
@@ -1772,19 +2665,58 @@ class MaterialLibraryDialog(QDialog):
                 prefix = display_name.rsplit(" / ", 1)[0]
             item.setData(MaterialImageList.PREFIX_ROLE, prefix)
             item.setToolTip(path)
-            self.image_list.addItem(item)
-        if self.image_list.count() == 0:
+            image_list.addItem(item)
+        if image_list.count() == 0:
             item = QListWidgetItem("当前文件夹没有可显示的图片")
             item.setFlags(Qt.NoItemFlags)
-            self.image_list.addItem(item)
-        self.image_list.blockSignals(False)
+            item.setText(empty_text)
+            image_list.addItem(item)
+        image_list.blockSignals(False)
 
-    def copy_selected_images(self):
+    def load_thumbnail_pixmap(self, path, target_size):
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        original_size = reader.size()
+        if original_size.isValid() and target_size.width() > 0 and target_size.height() > 0:
+            scaled_size = original_size
+            scaled_size.scale(target_size, Qt.KeepAspectRatio)
+            reader.setScaledSize(scaled_size)
+        image = reader.read()
+        if image.isNull():
+            return QPixmap()
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return QPixmap()
+        if pixmap.width() > target_size.width() or pixmap.height() > target_size.height():
+            pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return pixmap
+
+    def clear_link_image_lists(self):
+        for image_list in getattr(self, "link_image_lists", {}).values():
+            image_list.clear()
+
+    def set_active_link_image_column(self, column_key):
+        if self.library_mode == self.LINK_MODE and column_key in ("main", "detail", "sku", "uncategorized"):
+            self.active_link_image_column = column_key
+
+    def image_lists_for_selection(self, source_list=None):
+        if source_list is not None:
+            return [source_list]
+        if self.library_mode == self.LINK_MODE and hasattr(self, "link_image_lists"):
+            focused = QApplication.focusWidget()
+            for image_list in self.link_image_lists.values():
+                if focused is image_list or focused is image_list.viewport():
+                    return [image_list]
+            return list(self.link_image_lists.values())
+        return [self.image_list]
+
+    def copy_selected_images(self, source_list=None):
         paths = []
-        for item in self.image_list.selectedItems():
-            path = item.data(MaterialImageList.PATH_ROLE)
-            if path and os.path.exists(path):
-                paths.append(path)
+        for image_list in self.image_lists_for_selection(source_list):
+            for item in image_list.selectedItems():
+                path = item.data(MaterialImageList.PATH_ROLE)
+                if path and os.path.exists(path) and path not in paths:
+                    paths.append(path)
         if not paths:
             return
         mime = QMimeData()
@@ -1799,7 +2731,8 @@ class MaterialLibraryDialog(QDialog):
         return path if path and os.path.exists(path) else ""
 
     def show_image_context_menu(self, pos):
-        item = self.image_list.itemAt(pos)
+        image_list = self.sender() if isinstance(self.sender(), MaterialImageList) else self.image_list
+        item = image_list.itemAt(pos)
         path = self.image_path_from_item(item)
         if not path:
             return
@@ -1813,8 +2746,8 @@ class MaterialLibraryDialog(QDialog):
         menu.addAction(delete_action)
         open_action.triggered.connect(lambda: self.open_image_viewer(item))
         rename_action.triggered.connect(lambda: self.rename_image_smart(item))
-        delete_action.triggered.connect(lambda: self.delete_images())
-        menu.exec_(self.image_list.viewport().mapToGlobal(pos))
+        delete_action.triggered.connect(lambda: self.delete_images(image_list))
+        menu.exec_(image_list.viewport().mapToGlobal(pos))
 
     def open_image_viewer(self, item):
         path = self.image_path_from_item(item)
@@ -1840,17 +2773,18 @@ class MaterialLibraryDialog(QDialog):
         if os.path.abspath(new_path) == os.path.abspath(path):
             return
         if os.path.exists(new_path):
-            QMessageBox.warning(self, "重命名失败", "同名文件已经存在。")
-            return
+            new_path = self.unique_destination_path(folder, new_stem + ext)
         try:
             os.rename(path, new_path)
         except Exception as e:
             QMessageBox.warning(self, "重命名失败", f"重命名图片失败：\n{e}")
             return
-        self.refresh_current_view()
+        self.remember_link_image_column_after_rename(path, new_path, item)
+        self.refresh_after_image_file_change()
 
     def rename_image_smart(self, item):
-        selected_count = len([selected for selected in self.image_list.selectedItems() if self.image_path_from_item(selected)])
+        image_list = item.listWidget() if item else self.image_list
+        selected_count = len([selected for selected in image_list.selectedItems() if self.image_path_from_item(selected)])
         if selected_count > 1:
             self.batch_rename_images(item)
             return
@@ -1882,29 +2816,46 @@ class MaterialLibraryDialog(QDialog):
             self.reset_image_item_text(item, original_text)
             return
         if os.path.exists(new_path):
-            QMessageBox.warning(self, "重命名失败", "同名文件已经存在。")
-            self.reset_image_item_text(item, original_text)
-            return
+            new_path = self.unique_destination_path(folder, new_filename)
         try:
             os.rename(path, new_path)
         except Exception as e:
             QMessageBox.warning(self, "重命名失败", f"重命名图片失败：\n{e}")
             self.reset_image_item_text(item, original_text)
             return
+        self.remember_link_image_column_after_rename(path, new_path, item)
+        self.refresh_after_image_file_change()
+
+    def remember_link_image_column_after_rename(self, old_path, new_path, item):
+        if self.library_mode != self.LINK_MODE:
+            return
+        source_list = item.listWidget() if item else None
+        column_key = getattr(source_list, "material_column_key", "")
+        if column_key not in ("main", "detail", "sku"):
+            return
+        self.remove_saved_link_image_column(old_path)
+        self.save_link_image_column(new_path, column_key)
+
+    def refresh_after_image_file_change(self):
+        if self.library_mode == self.LINK_MODE:
+            self.load_images_for_link_selection()
+            return
         self.refresh_current_view()
 
     def reset_image_item_text(self, item, text):
-        self.image_list.blockSignals(True)
+        image_list = item.listWidget() if item else self.image_list
+        image_list.blockSignals(True)
         item.setText(text)
-        self.image_list.blockSignals(False)
+        image_list.blockSignals(False)
 
     def selected_image_items_ordered_from(self, start_item):
-        selected = [item for item in self.image_list.selectedItems() if self.image_path_from_item(item)]
+        image_list = start_item.listWidget() if start_item else self.image_list
+        selected = [item for item in image_list.selectedItems() if self.image_path_from_item(item)]
         if start_item not in selected:
             selected.insert(0, start_item)
         ordered = []
-        for index in range(self.image_list.count()):
-            item = self.image_list.item(index)
+        for index in range(image_list.count()):
+            item = image_list.item(index)
             if item in selected:
                 ordered.append(item)
         if start_item in ordered:
@@ -1939,10 +2890,13 @@ class MaterialLibraryDialog(QDialog):
             if normalized_target in used_targets:
                 QMessageBox.warning(self, "批量重命名失败", "生成的新文件名存在重复。")
                 return
-            used_targets.add(normalized_target)
             if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(path):
-                QMessageBox.warning(self, "批量重命名失败", f"同名文件已经存在：\n{target}")
-                return
+                target = self.unique_destination_path(folder, os.path.basename(target))
+                normalized_target = os.path.abspath(target)
+                if normalized_target in used_targets:
+                    QMessageBox.warning(self, "批量重命名失败", "生成的新文件名存在重复。")
+                    return
+            used_targets.add(normalized_target)
             plan.append((path, target))
         temp_plan = []
         try:
@@ -1963,17 +2917,20 @@ class MaterialLibraryDialog(QDialog):
             return
         self.refresh_current_view()
 
-    def delete_images(self):
+    def delete_images(self, source_list=None):
         paths = []
-        for item in self.image_list.selectedItems():
-            path = self.image_path_from_item(item)
-            if path and path not in paths:
-                paths.append(path)
+        for image_list in self.image_lists_for_selection(source_list):
+            for item in image_list.selectedItems():
+                path = self.image_path_from_item(item)
+                if path and path not in paths:
+                    paths.append(path)
         if not paths:
-            current = self.image_list.currentItem()
-            path = self.image_path_from_item(current)
-            if path:
-                paths.append(path)
+            for image_list in self.image_lists_for_selection(source_list):
+                current = image_list.currentItem()
+                path = self.image_path_from_item(current)
+                if path:
+                    paths.append(path)
+                    break
         if not paths:
             return
         reply = QMessageBox.question(
@@ -1999,7 +2956,27 @@ class MaterialLibraryDialog(QDialog):
         if event.matches(QKeySequence.Paste):
             self.paste_images_from_clipboard()
             return
+        if event.key() == Qt.Key_Backspace and not self.is_text_editing_focus():
+            if self.can_go_back_material_level():
+                self.back_to_categories()
+                return
         super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self.pdf_worker and self.pdf_worker.isRunning():
+            QMessageBox.information(self, "提示", "PDF 正在提取中，请等待完成后再关闭素材库窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def is_text_editing_focus(self):
+        widget = QApplication.focusWidget()
+        return isinstance(widget, (QLineEdit, QTextEdit))
+
+    def can_go_back_material_level(self):
+        if self.library_mode == self.LINK_MODE:
+            return bool(self.selected_link_combo or self.selected_link_type or self.selected_link_product_ids)
+        return bool(self.current_category)
 
     def pdf_panel_drag_enter(self, event):
         if self.pdf_paths_from_mime_data(event.mimeData()):
@@ -2046,6 +3023,8 @@ class MaterialLibraryDialog(QDialog):
         super().dropEvent(event)
 
     def can_import_mime_data(self, mime_data):
+        if mime_data.hasFormat(MaterialImageList.INTERNAL_MOVE_MIME):
+            return True
         if self.library_mode != self.LINK_MODE and self.pdf_paths_from_mime_data(mime_data):
             return True
         if mime_data.hasImage():
@@ -2100,6 +3079,7 @@ class MaterialLibraryDialog(QDialog):
             return ""
         if not self.ensure_root_folder():
             return ""
+        self.sync_spec_folder(self.current_category, spec)
         folder = self.spec_folder(self.current_category, spec)
         os.makedirs(folder, exist_ok=True)
         return folder
@@ -2149,11 +3129,143 @@ class MaterialLibraryDialog(QDialog):
         safe_name = self.safe_folder_name(name, "素材")
         ext = ext or ".png"
         candidate = os.path.join(folder, safe_name + ext)
-        index = 1
+        index = 2
         while os.path.exists(candidate):
-            candidate = os.path.join(folder, f"{safe_name}_{index:02d}{ext}")
+            candidate = os.path.join(folder, f"{safe_name}（{index}）{ext}")
             index += 1
         return candidate
+
+    def active_link_import_column(self):
+        if self.library_mode != self.LINK_MODE:
+            return ""
+        if self.active_link_image_column in ("main", "detail", "sku"):
+            return self.active_link_image_column
+        return "main"
+
+    def link_import_filename(self, folder, original_filename, column_key, next_indices):
+        if self.library_mode != self.LINK_MODE or column_key not in ("main", "detail", "sku"):
+            return original_filename
+        if self.is_link_auto_named_file(original_filename):
+            return original_filename
+        prefix = self.link_image_column_prefix(column_key)
+        if not prefix:
+            return original_filename
+        _stem, ext = os.path.splitext(original_filename)
+        ext = ext or ".png"
+        index = self.allocate_link_column_index(folder, column_key, next_indices)
+        return f"{prefix}（{index}）{ext}"
+
+    def link_move_filename(self, folder, original_filename, column_key, next_indices):
+        if self.library_mode != self.LINK_MODE or column_key not in ("main", "detail", "sku"):
+            return original_filename
+        current_column, _number = self.classify_link_image_name(original_filename)
+        if current_column == column_key:
+            return original_filename
+        prefix = self.link_image_column_prefix(column_key)
+        _stem, ext = os.path.splitext(original_filename)
+        ext = ext or ".png"
+        index = self.allocate_link_column_index(folder, column_key, next_indices)
+        return f"{prefix}（{index}）{ext}"
+
+    def link_transfer_filename(self, folder, original_filename, column_key, allocation_state):
+        if column_key not in ("main", "detail", "sku"):
+            return original_filename
+        prefix = self.link_image_column_prefix(column_key)
+        _stem, ext = os.path.splitext(original_filename)
+        ext = ext or ".png"
+        index = self.allocate_link_column_index(folder, column_key, allocation_state)
+        return f"{prefix}（{index}）{ext}"
+
+    def internal_drag_paths_from_mime(self, mime_data):
+        if not mime_data.hasFormat(MaterialImageList.INTERNAL_MOVE_MIME):
+            return []
+        try:
+            text = bytes(mime_data.data(MaterialImageList.INTERNAL_MOVE_MIME)).decode("utf-8")
+        except Exception:
+            return []
+        paths = []
+        for line in text.splitlines():
+            path = os.path.abspath(line.strip())
+            if path and self.is_image_file(path) and path not in paths:
+                paths.append(path)
+        return paths
+
+    def internal_drag_source_column_from_mime(self, mime_data):
+        if not mime_data.hasFormat(MaterialImageList.INTERNAL_SOURCE_COLUMN_MIME):
+            return ""
+        try:
+            column_key = bytes(mime_data.data(MaterialImageList.INTERNAL_SOURCE_COLUMN_MIME)).decode("utf-8").strip()
+        except Exception:
+            return ""
+        return column_key if column_key in ("main", "detail", "sku") else ""
+
+    def move_internal_images_to_link_column(self, paths, source_column=""):
+        if self.library_mode != self.LINK_MODE:
+            return False
+        column_key = self.active_link_image_column
+        if column_key not in ("main", "detail", "sku"):
+            return bool(paths)
+        if source_column == column_key:
+            return bool(paths)
+        moved = 0
+        next_indices = {}
+        for path in paths or []:
+            if not self.is_image_file(path):
+                continue
+            folder = os.path.dirname(path)
+            filename = self.link_move_filename(folder, os.path.basename(path), column_key, next_indices)
+            dest = self.unique_destination_path(folder, filename)
+            if os.path.abspath(path) == os.path.abspath(dest):
+                continue
+            try:
+                os.rename(path, dest)
+                self.remove_saved_link_image_column(path)
+                self.save_link_image_column(dest, column_key)
+                moved += 1
+            except Exception as e:
+                QMessageBox.warning(self, "移动失败", f"移动图片失败：\n{path}\n\n{e}")
+                return moved > 0
+        if moved:
+            self.load_images_for_link_selection()
+            self.image_count_label.setText(f"已移动 {moved} 张图片")
+        return bool(paths)
+
+    def move_images_to_link_product(self, paths, item, source_column=""):
+        if self.library_mode != self.LINK_MODE or not item:
+            return False
+        target_folder = item.get("folder_path") or self.ensure_link_product_folder(item)
+        if not target_folder:
+            return False
+        os.makedirs(target_folder, exist_ok=True)
+        moved = 0
+        allocation_state = {}
+        for path in paths or []:
+            if not self.is_image_file(path):
+                continue
+            source_folder = os.path.abspath(os.path.dirname(path))
+            if source_folder == os.path.abspath(target_folder):
+                continue
+            column_key = source_column if source_column in ("main", "detail", "sku") else self.link_image_column_for_path(path)
+            filename = self.link_transfer_filename(target_folder, os.path.basename(path), column_key, allocation_state)
+            dest = self.unique_destination_path(target_folder, filename)
+            try:
+                os.replace(path, dest)
+                self.remove_saved_link_image_column(path)
+                self.save_link_image_column(dest, column_key)
+                moved += 1
+            except Exception:
+                try:
+                    shutil.move(path, dest)
+                    self.remove_saved_link_image_column(path)
+                    self.save_link_image_column(dest, column_key)
+                    moved += 1
+                except Exception as e:
+                    QMessageBox.warning(self, "移动失败", f"移动图片失败：\n{path}\n\n{e}")
+                    break
+        if moved:
+            self.load_images_for_link_selection()
+            self.image_count_label.setText(f"已移动 {moved} 张图片到 {item.get('code', '')}")
+        return moved > 0
 
     def iter_image_paths(self, path):
         if self.is_image_file(path):
@@ -2172,14 +3284,21 @@ class MaterialLibraryDialog(QDialog):
         if not folder:
             return False
         copied = 0
+        import_time = time.time()
+        column_key = self.active_link_import_column()
+        next_indices = {}
         for raw_path in paths or []:
             path = os.path.abspath(raw_path)
             for image_path in self.iter_image_paths(path):
-                dest = self.unique_destination_path(folder, os.path.basename(image_path))
+                filename = self.link_import_filename(folder, os.path.basename(image_path), column_key, next_indices)
+                dest = self.unique_destination_path(folder, filename)
                 if os.path.abspath(image_path) == os.path.abspath(dest):
                     continue
                 try:
                     shutil.copy2(image_path, dest)
+                    os.utime(dest, (import_time + copied * 0.001, import_time + copied * 0.001))
+                    if self.library_mode == self.LINK_MODE and column_key in ("main", "detail", "sku"):
+                        self.save_link_image_column(dest, column_key)
                     copied += 1
                 except Exception as e:
                     QMessageBox.warning(self, "导入失败", f"导入图片失败：\n{image_path}\n\n{e}")
@@ -2195,11 +3314,19 @@ class MaterialLibraryDialog(QDialog):
             return False
         if image_data is None or not hasattr(image_data, "save") or image_data.isNull():
             return False
-        filename = f"粘贴图片_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        if self.library_mode == self.LINK_MODE:
+            column_key = self.active_link_import_column()
+            filename = self.link_import_filename(folder, "粘贴图片.png", column_key, {})
+        else:
+            filename = f"粘贴图片_{time.strftime('%Y%m%d_%H%M%S')}.png"
         dest = self.unique_destination_path(folder, filename)
         if not image_data.save(dest, "PNG"):
             QMessageBox.warning(self, "导入失败", "剪贴板图片保存失败。")
             return False
+        if self.library_mode == self.LINK_MODE:
+            column_key = self.active_link_import_column()
+            if column_key in ("main", "detail", "sku"):
+                self.save_link_image_column(dest, column_key)
         self.refresh_current_view()
         self.image_count_label.setText("已导入 1 张图片")
         return True
@@ -2208,6 +3335,10 @@ class MaterialLibraryDialog(QDialog):
         return self.import_image_data(QApplication.clipboard().image())
 
     def import_from_mime_data(self, mime_data):
+        internal_paths = self.internal_drag_paths_from_mime(mime_data)
+        if internal_paths:
+            source_column = self.internal_drag_source_column_from_mime(mime_data)
+            return self.move_internal_images_to_link_column(internal_paths, source_column)
         pdf_paths = self.pdf_paths_from_mime_data(mime_data)
         if pdf_paths:
             if self.library_mode == self.LINK_MODE:
@@ -2227,7 +3358,9 @@ class MaterialLibraryDialog(QDialog):
             return self.import_image_data(mime_data.imageData())
         return False
 
-    def paste_images_from_clipboard(self):
+    def paste_images_from_clipboard(self, source_list=None):
+        if isinstance(source_list, MaterialImageList):
+            self.set_active_link_image_column(source_list.material_column_key)
         mime_data = QApplication.clipboard().mimeData()
         if not self.import_from_mime_data(mime_data):
             QMessageBox.information(self, "提示", "剪贴板里没有可导入的图片或本地图片文件。")
@@ -2283,6 +3416,24 @@ class MaterialLibraryDialog(QDialog):
         if self.current_category:
             return self.category_folder(self.current_category)
         return self.root_folder()
+
+    def copy_current_folder_path(self):
+        if not self.ensure_root_folder():
+            return
+        folder = self.current_folder()
+        if self.library_mode == self.LINK_MODE:
+            item = self.selected_single_link_item()
+            if item and not item.get("deleted"):
+                folder = self.ensure_link_product_folder(item) or folder
+        folder = os.path.abspath(folder)
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"创建文件夹失败：\n{e}")
+            return
+        QApplication.clipboard().setText(folder)
+        if hasattr(self, "image_count_label"):
+            self.image_count_label.setText(f"已复制文件夹路径：{folder}")
 
     def open_current_folder(self):
         if not self.ensure_root_folder():

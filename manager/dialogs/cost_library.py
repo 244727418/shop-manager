@@ -927,6 +927,7 @@ class CostCategoryManageDialog(QDialog):
         self.category_table = QTableView()
         self.category_table.setModel(self.category_model)
         self.category_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.category_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.category_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.category_table.clicked.connect(self.on_category_clicked)
         self.category_table.doubleClicked.connect(self.on_category_double_clicked)
@@ -974,6 +975,8 @@ class CostCategoryManageDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_rename = QPushButton("重命名商品类型")
         btn_rename.clicked.connect(self.rename_current_category)
+        btn_delete = QPushButton("删除选中类型")
+        btn_delete.clicked.connect(self.delete_selected_categories)
         btn_save = QPushButton("保存修改")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         btn_save.clicked.connect(self.save_changes)
@@ -983,6 +986,7 @@ class CostCategoryManageDialog(QDialog):
         btn_close.clicked.connect(self.reject)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_rename)
+        btn_layout.addWidget(btn_delete)
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_refresh)
         btn_layout.addWidget(btn_close)
@@ -1086,6 +1090,44 @@ class CostCategoryManageDialog(QDialog):
         parent = self.parent()
         if parent and hasattr(parent, "load_data"):
             parent.load_data()
+        self.load_categories()
+
+    def delete_selected_categories(self):
+        rows = sorted({index.row() for index in self.category_table.selectedIndexes()})
+        labels = []
+        for row in rows:
+            item = self.category_model.item(row, 0)
+            label = item.text().strip() if item else ""
+            if label:
+                labels.append(label)
+        if not labels:
+            QMessageBox.warning(self, "提示", "请先选择要删除的商品类型。")
+            return
+        preview = "\n".join(f"- {label}" for label in labels[:12])
+        if len(labels) > 12:
+            preview += f"\n... 等 {len(labels)} 个"
+        reply = QMessageBox.question(
+            self,
+            "确认删除商品类型",
+            "确定删除选中的商品类型吗？\n\n"
+            f"{preview}\n\n"
+            "这些类型下的成本库规格不会删除，但商品类型会被清空。",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            if not hasattr(self.db, "delete_cost_categories"):
+                raise RuntimeError("当前数据库管理器不支持商品类型删除。")
+            self.db.delete_cost_categories(labels)
+            if hasattr(self.db, "update_all_product_category_labels"):
+                self.db.update_all_product_category_labels()
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", f"商品类型删除失败：{e}")
+            return
+        parent = self.parent()
+        if parent and hasattr(parent, "load_data"):
+            parent.load_data()
+        self.current_category = ""
         self.load_categories()
 
     def load_specs_for_category(self, label):
@@ -3006,7 +3048,7 @@ class ProductAttributeDialog(QDialog):
         self.attribute_edit.setPlainText(current_text)
         name_has_combo_mark = len(self._split_combo_parts(self.current_spec_name)) >= 2
         attribute_has_combo_mark = len(self._split_combo_parts(current_text)) >= 2
-        self._source_has_combo_mark = name_has_combo_mark or attribute_has_combo_mark
+        self._source_has_combo_mark = name_has_combo_mark
         if self.initial_combo_state:
             if attribute_has_combo_mark:
                 self.auto_detect_combo(current_text)
@@ -3015,8 +3057,6 @@ class ProductAttributeDialog(QDialog):
             else:
                 self.combo_check.setChecked(True)
                 self.refresh_selected_table()
-        elif not self.auto_detect_disabled and attribute_has_combo_mark:
-            self.auto_detect_combo(current_text)
         elif not self.auto_detect_disabled and name_has_combo_mark:
             self.auto_detect_combo(self.current_spec_name)
         self.on_combo_toggled(self.combo_check.isChecked())
@@ -3050,15 +3090,17 @@ class ProductAttributeDialog(QDialog):
         combo_layout.addLayout(search_layout)
 
         self.spec_model = QStandardItemModel()
-        self.spec_model.setHorizontalHeaderLabels(["商品名称", "规格编码", "产品属性"])
+        self.spec_model.setHorizontalHeaderLabels(["商品类型", "商品名称", "规格编码", "数量", "产品属性"])
         self.spec_table = QTableView()
         self.spec_table.setModel(self.spec_model)
         self.spec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.spec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.spec_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.spec_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.spec_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.spec_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.spec_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.spec_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.spec_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.spec_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.spec_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.spec_table.clicked.connect(self.on_spec_clicked)
         combo_layout.addWidget(self.spec_table, 1)
 
@@ -3101,19 +3143,27 @@ class ProductAttributeDialog(QDialog):
 
     def load_specs(self):
         rows = self.db.safe_fetchall(
-            """SELECT COALESCE(spec_name, ''), spec_code, COALESCE(product_attribute, '')
+            """SELECT COALESCE(category_label, ''), COALESCE(spec_name, ''), spec_code,
+                      COALESCE(quantity, ''), COALESCE(product_attribute, ''),
+                      COALESCE(product_attribute_combo_disabled, 0), COALESCE(product_attribute_is_combo, 0)
                FROM cost_library
                WHERE COALESCE(spec_code, '') <> ''
                  AND COALESCE(product_attribute, '') <> ''
                ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END, sort_order, spec_code"""
         )
         self.all_specs = [
-            {"name": str(name or ""), "code": str(code or ""), "attribute": str(attribute or "")}
-            for name, code, attribute in rows
+            {
+                "category": str(category or ""),
+                "name": str(name or ""),
+                "code": str(code or ""),
+                "quantity": str(quantity or ""),
+                "attribute": str(attribute or ""),
+            }
+            for category, name, code, quantity, attribute, combo_disabled, attr_is_combo in rows
             if str(code or "").strip()
             and str(code or "").strip() != self.current_spec_code
-            and len(self._split_combo_parts(str(name or ""))) < 2
-            and len(self._split_combo_parts(str(attribute or ""))) < 2
+            and not bool(re.search(r"\+|＋|﹢", str(name or "")))
+            and not (not int(combo_disabled or 0) and int(attr_is_combo or 0))
         ]
         self.refresh_spec_table()
 
@@ -3170,7 +3220,7 @@ class ProductAttributeDialog(QDialog):
         terms = [term for term in text.split() if term]
         rows = []
         for spec in self.all_specs:
-            haystack = f"{spec['name']} {spec['code']} {spec['attribute']}".lower()
+            haystack = f"{spec['category']} {spec['name']} {spec['code']} {spec['quantity']} {spec['attribute']}".lower()
             if terms and not any(term in haystack for term in terms):
                 continue
             hit_count = sum(1 for term in terms if term in haystack)
@@ -3180,7 +3230,7 @@ class ProductAttributeDialog(QDialog):
         for _full_hit, _hit_count, spec in rows:
             row = self.spec_model.rowCount()
             self.spec_model.insertRow(row)
-            for col, value in enumerate((spec["name"], spec["code"], spec["attribute"])):
+            for col, value in enumerate((spec["category"], spec["name"], spec["code"], spec["quantity"], spec["attribute"])):
                 item = QStandardItem(value)
                 item.setEditable(False)
                 item.setTextAlignment(Qt.AlignCenter)
@@ -3283,6 +3333,9 @@ class ProductAttributeDialog(QDialog):
             return 1
         return 0
 
+    def is_combo_product(self):
+        return 1 if self.combo_check.isChecked() else 0
+
 
 class CostLibraryDialog(QDialog):
     """查看、编辑和管理成本库对话框。"""
@@ -3345,11 +3398,12 @@ class CostLibraryDialog(QDialog):
         self._apply_cost_mode_visibility()
         self.load_data()
 
-    def _is_combo_spec(self, spec_name, product_attribute, combo_disabled):
+    def _is_combo_spec(self, spec_name, product_attribute, combo_disabled, explicit_combo=0):
         if int(combo_disabled or 0):
             return False
-        text = f"{spec_name or ''} {product_attribute or ''}"
-        return bool(re.search(r"\+|＋|﹢", text))
+        if int(explicit_combo or 0):
+            return True
+        return bool(re.search(r"\+|＋|﹢", str(spec_name or "")))
 
     def _set_name_combo_state(self, row, is_combo):
         item = self.model.item(row, self.COL_NAME)
@@ -3513,6 +3567,7 @@ class CostLibraryDialog(QDialog):
             query = """SELECT cost_library.category_label, cost_library.spec_name, cost_library.spec_code,
                               COALESCE(cost_library.product_attribute, '') AS product_attribute,
                               COALESCE(cost_library.product_attribute_combo_disabled, 0) AS product_attribute_combo_disabled,
+                              COALESCE(cost_library.product_attribute_is_combo, 0) AS product_attribute_is_combo,
                               cost_library.quantity, cost_library.cost_price,
                               cost_library.sort_order, cost_library.source_bg_color,
                               COALESCE(cost_categories.color, cost_library.category_color, '') AS category_color,
@@ -3539,12 +3594,13 @@ class CostLibraryDialog(QDialog):
                                cost_library.spec_code"""
             rows = self.db.safe_fetchall(query)
             rows = self._filter_and_sort_rows(rows, search_text)
-            for category_label, spec_name, spec_code, product_attribute, combo_disabled, quantity, cost_price, sort_order, source_bg_color, category_color, listed_count, manual_sort_order, category_sort_order, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode in rows:
+            for category_label, spec_name, spec_code, product_attribute, combo_disabled, attr_is_combo, quantity, cost_price, sort_order, source_bg_color, category_color, listed_count, manual_sort_order, category_sort_order, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode in rows:
                 category_value = str(category_label or "")
                 name_value = str(spec_name or "")
                 code_value = str(spec_code or "")
                 attribute_value = str(product_attribute or "")
                 combo_disabled_value = int(combo_disabled or 0)
+                attr_is_combo_value = int(attr_is_combo or 0)
                 quantity_value = self._format_quantity(quantity)
                 listed_count_value = str(int(listed_count or 0))
                 cost_value = float(cost_price) if cost_price is not None else 0.0
@@ -3553,9 +3609,9 @@ class CostLibraryDialog(QDialog):
                 shipping_value = float(shipping_fee) if shipping_fee is not None else None
                 misc_value = float(misc_fee) if misc_fee is not None else None
                 row_color = category_color or source_bg_color or ""
-                is_combo = self._is_combo_spec(name_value, attribute_value, combo_disabled_value)
+                is_combo = self._is_combo_spec(name_value, attribute_value, combo_disabled_value, attr_is_combo_value)
                 self._original_rows[code_value] = (
-                    category_value, name_value, attribute_value, combo_disabled_value, quantity_value, cost_value,
+                    category_value, name_value, attribute_value, combo_disabled_value, attr_is_combo_value, quantity_value, cost_value,
                     product_cost_value, unit_weight_value, shipping_value, misc_value, str(cost_calc_mode or "total")
                 )
 
@@ -3570,6 +3626,7 @@ class CostLibraryDialog(QDialog):
                 attr_item = self.model.item(row_index, self.COL_ATTRIBUTE)
                 if attr_item:
                     attr_item.setData(combo_disabled_value, Qt.UserRole)
+                    attr_item.setData(attr_is_combo_value, Qt.UserRole + 1)
                 self._set_item(row_index, self.COL_QUANTITY, quantity_value, editable=(self.cost_mode == "detail"), bg_color=row_color)
                 self._set_item(row_index, self.COL_PRODUCT_COST, "" if product_cost_value is None else f"{product_cost_value:.2f}", editable=(self.cost_mode == "detail"), bg_color=row_color)
                 self._set_item(row_index, self.COL_UNIT_WEIGHT, "" if unit_weight_value is None else f"{unit_weight_value:.4f}".rstrip("0").rstrip("."), editable=(self.cost_mode == "detail"), bg_color=row_color)
@@ -3653,7 +3710,7 @@ class CostLibraryDialog(QDialog):
         if index.isValid() and QApplication.keyboardModifiers() & Qt.ControlModifier:
             self.toggle_listing_cart_row(index.row())
             return
-        if not index.isValid() or index.column() not in (self.COL_NAME, self.COL_CODE):
+        if not index.isValid() or index.column() != self.COL_CODE:
             return
         item = self.model.item(index.row(), index.column())
         text = item.text().strip() if item else ""
@@ -3678,15 +3735,18 @@ class CostLibraryDialog(QDialog):
             return
         new_value = dialog.attribute_text()
         combo_disabled = dialog.auto_detect_disable_value()
+        attr_is_combo = dialog.is_combo_product()
         if attribute_item:
             attribute_item.setText(new_value)
             attribute_item.setData(combo_disabled, Qt.UserRole)
+            attribute_item.setData(attr_is_combo, Qt.UserRole + 1)
         else:
             self._set_item(index.row(), self.COL_ATTRIBUTE, new_value, editable=False)
             new_item = self.model.item(index.row(), self.COL_ATTRIBUTE)
             if new_item:
                 new_item.setData(combo_disabled, Qt.UserRole)
-        self._set_name_combo_state(index.row(), self._is_combo_spec(spec_name, new_value, combo_disabled))
+                new_item.setData(attr_is_combo, Qt.UserRole + 1)
+        self._set_name_combo_state(index.row(), self._is_combo_spec(spec_name, new_value, combo_disabled, attr_is_combo))
         name_item = self.model.item(index.row(), self.COL_NAME)
         if name_item:
             name_item.emitDataChanged()
@@ -3880,7 +3940,7 @@ class CostLibraryDialog(QDialog):
         return 10**9
 
     def _row_sort_key(self, row):
-        category_label, spec_name, spec_code, _product_attribute, _combo_disabled, quantity, _cost_price, sort_order, _source_bg_color, _category_color, _listed_count, manual_sort_order, category_sort_order = row[:13]
+        category_label, spec_name, spec_code, _product_attribute, _combo_disabled, _attr_is_combo, quantity, _cost_price, sort_order, _source_bg_color, _category_color, _listed_count, manual_sort_order, category_sort_order = row[:14]
         return (
             1 if not str(category_label or "").strip() else 0,
             category_sort_order if category_sort_order is not None else 10**9,
@@ -3904,7 +3964,7 @@ class CostLibraryDialog(QDialog):
 
         matched = []
         for row in rows:
-            category_label, spec_name, spec_code, product_attribute, _combo_disabled, quantity, cost_price, sort_order, source_bg_color, category_color = row[:10]
+            category_label, spec_name, spec_code, product_attribute, _combo_disabled, _attr_is_combo, quantity, cost_price, sort_order, source_bg_color, category_color = row[:11]
             haystack = f"{category_label or ''} {spec_name or ''} {spec_code or ''}".lower()
             hit_count = sum(1 for term in terms if term in haystack)
             if hit_count <= 0:
@@ -4020,6 +4080,7 @@ class CostLibraryDialog(QDialog):
             spec_name = name_item.text().strip() if name_item else ""
             product_attribute = attribute_item.text().strip() if attribute_item else ""
             combo_disabled = int(attribute_item.data(Qt.UserRole) or 0) if attribute_item else 0
+            attr_is_combo = int(attribute_item.data(Qt.UserRole + 1) or 0) if attribute_item else 0
             quantity = quantity_item.text().strip() if quantity_item else ""
             try:
                 product_text = product_item.text().strip() if product_item else ""
@@ -4047,13 +4108,14 @@ class CostLibraryDialog(QDialog):
                 QMessageBox.warning(self, "成本格式错误", f"第 {row + 1} 行 [{spec_code}]：{e}")
                 return
 
-            old_category, old_name, old_attribute, old_combo_disabled, old_quantity, old_cost, old_product_cost, old_unit_weight, old_shipping_fee, old_misc_fee, old_mode = self._original_rows.get(
-                spec_code, ("", "", "", 0, "", None, None, None, None, None, "total")
+            old_category, old_name, old_attribute, old_combo_disabled, old_attr_is_combo, old_quantity, old_cost, old_product_cost, old_unit_weight, old_shipping_fee, old_misc_fee, old_mode = self._original_rows.get(
+                spec_code, ("", "", "", 0, 0, "", None, None, None, None, None, "total")
             )
             category_changed = category_label != old_category
             name_changed = spec_name != old_name
             attribute_changed = product_attribute != old_attribute
             combo_disabled_changed = combo_disabled != int(old_combo_disabled or 0)
+            attr_is_combo_changed = attr_is_combo != int(old_attr_is_combo or 0)
             quantity_changed = quantity != old_quantity
             cost_changed = old_cost is None or abs(new_cost - old_cost) > 0.001
             detail_changed = (
@@ -4068,12 +4130,12 @@ class CostLibraryDialog(QDialog):
                 or ((old_misc_fee is None) != (misc_fee is None))
                 or (old_misc_fee is not None and misc_fee is not None and abs(misc_fee - old_misc_fee) > 0.001)
             )
-            if category_changed or name_changed or attribute_changed or combo_disabled_changed or cost_changed or detail_changed:
+            if category_changed or name_changed or attribute_changed or combo_disabled_changed or attr_is_combo_changed or cost_changed or detail_changed:
                 category_color = self._category_color(category_label) if category_label else ""
                 updates.append((
                     spec_code, category_label, category_color, spec_name, quantity,
                     product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
-                    new_cost, product_attribute, combo_disabled,
+                    new_cost, product_attribute, combo_disabled, attr_is_combo,
                 ))
             if cost_changed:
                 cost_history_changes.append((spec_code, old_cost, new_cost))
@@ -4085,17 +4147,17 @@ class CostLibraryDialog(QDialog):
         import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             self.db.conn.execute("BEGIN TRANSACTION")
-            for spec_code, category_label, category_color, spec_name, quantity, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, new_cost, product_attribute, combo_disabled in updates:
+            for spec_code, category_label, category_color, spec_name, quantity, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode, new_cost, product_attribute, combo_disabled, attr_is_combo in updates:
                 self.db.cursor.execute(
                     """UPDATE cost_library
                        SET category_label=?, category_color=?, spec_name=?, quantity=?,
                            product_cost=?, unit_weight=?, shipping_fee=?, misc_fee=?, cost_calc_mode=?,
-                           cost_price=?, product_attribute=?, product_attribute_combo_disabled=?
+                           cost_price=?, product_attribute=?, product_attribute_combo_disabled=?, product_attribute_is_combo=?
                        WHERE spec_code=?""",
                     (
                         category_label, category_color, spec_name, quantity,
                         product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
-                        new_cost, product_attribute, combo_disabled, spec_code,
+                        new_cost, product_attribute, combo_disabled, attr_is_combo, spec_code,
                     ),
                 )
 

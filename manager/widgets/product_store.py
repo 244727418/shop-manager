@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMenu, QAction
 )
 from PyQt5.QtCore import Qt, QEvent, QTime, QSize, QDate, QBuffer, QByteArray, QIODevice, QTimer
-from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtGui import QImageReader, QPixmap, QIcon
 
 
 def _icons_dir():
@@ -1073,18 +1073,9 @@ class ProductWidget(QWidget):
     def _paste_image_from_clipboard(self):
         clipboard = QApplication.clipboard()
         mime_data = clipboard.mimeData()
-        if not mime_data or not mime_data.hasImage():
-            self.main_app.show_toast("剪贴板中没有图片")
-            return
-
-        image = clipboard.image()
-        if image.isNull():
-            self.main_app.show_toast("剪贴板图片读取失败")
-            return
-
-        pixmap = QPixmap.fromImage(image)
+        pixmap = self._pixmap_from_clipboard_mime(clipboard, mime_data)
         if pixmap.isNull():
-            self.main_app.show_toast("剪贴板图片读取失败")
+            self.main_app.show_toast("剪贴板中没有可用图片")
             return
 
         try:
@@ -1105,6 +1096,42 @@ class ProductWidget(QWidget):
             self._save_product_main_image(image_data, "paste")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"粘贴图片失败: {e}")
+
+    def _pixmap_from_clipboard_mime(self, clipboard, mime_data):
+        if not mime_data:
+            return QPixmap()
+        if mime_data.hasImage():
+            image = clipboard.image()
+            if not image.isNull():
+                pixmap = QPixmap.fromImage(image)
+                if not pixmap.isNull():
+                    return pixmap
+        for path in self._image_paths_from_clipboard_mime(mime_data):
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                return pixmap
+        return QPixmap()
+
+    def _image_paths_from_clipboard_mime(self, mime_data):
+        paths = []
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                if url.isLocalFile():
+                    paths.append(url.toLocalFile())
+        if mime_data.hasText():
+            for line in str(mime_data.text() or "").splitlines():
+                value = line.strip().strip('"')
+                if value.startswith("file:///"):
+                    value = value.replace("file:///", "", 1)
+                paths.append(value)
+        result = []
+        supported = {bytes(fmt).decode("ascii", "ignore").lower() for fmt in QImageReader.supportedImageFormats()}
+        for path in paths:
+            path = os.path.abspath(path)
+            ext = os.path.splitext(path)[1].lstrip(".").lower()
+            if path and os.path.isfile(path) and ext in supported and path not in result:
+                result.append(path)
+        return result
 
     def _save_product_main_image(self, image_data, source):
         changed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

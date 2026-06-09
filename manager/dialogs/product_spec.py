@@ -344,6 +344,224 @@ class SpecImageViewerDialog(QDialog):
         v_bar.setValue((v_bar.maximum() + v_bar.minimum()) // 2)
 
 
+class SpecCostPickerDialog(QDialog):
+    """规格窗口里临时使用的小成本库选择器。"""
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.cart = []
+        self.cart_keys = set()
+        self.setWindowTitle("添加规格")
+        self.resize(760, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        tip = QLabel("搜索成本库规格，按住 Ctrl 单击添加到上架车。")
+        tip.setStyleSheet("color: #6b7280; font-size: 12px;")
+        layout.addWidget(tip)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索商品名称、规格编码、产品属性或分类")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._schedule_search)
+        layout.addWidget(self.search_input)
+
+        self.result_table = QTableWidget(0, 5)
+        self.result_table.setHorizontalHeaderLabels(["商品名称", "规格编码", "产品属性", "数量", "成本"])
+        self.result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.result_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.result_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.result_table.verticalHeader().setVisible(False)
+        self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2, 3, 4):
+            self.result_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.result_table.itemClicked.connect(self._handle_result_click)
+        layout.addWidget(self.result_table, 1)
+
+        cart_header = QHBoxLayout()
+        self.cart_label = QLabel("上架车（0）")
+        self.cart_label.setStyleSheet("font-weight: bold;")
+        clear_btn = QPushButton("清空")
+        clear_btn.clicked.connect(self._clear_cart)
+        cart_header.addWidget(self.cart_label)
+        cart_header.addStretch(1)
+        cart_header.addWidget(clear_btn)
+        layout.addLayout(cart_header)
+
+        self.cart_table = QTableWidget(0, 3)
+        self.cart_table.setHorizontalHeaderLabels(["商品名称", "规格编码", "成本"])
+        self.cart_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.cart_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.cart_table.verticalHeader().setVisible(False)
+        self.cart_table.setMaximumHeight(120)
+        self.cart_table.horizontalHeader().setStretchLastSection(True)
+        self.cart_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2):
+            self.cart_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        layout.addWidget(self.cart_table)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("取消")
+        confirm_btn = QPushButton("确认添加")
+        confirm_btn.setObjectName("primaryButton")
+        cancel_btn.clicked.connect(self.reject)
+        confirm_btn.clicked.connect(self._confirm)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(confirm_btn)
+        layout.addLayout(btn_row)
+
+        self.setStyleSheet("""
+            QDialog { background: #ffffff; }
+            QTableWidget {
+                gridline-color: #e5e7eb;
+                selection-background-color: #dceeff;
+                selection-color: #111827;
+                font-family: YouYuan, 'Microsoft YaHei UI', sans-serif;
+                font-weight: bold;
+            }
+            QHeaderView::section {
+                background: #f3f4f6;
+                padding: 5px;
+                border: 1px solid #e5e7eb;
+                font-weight: bold;
+            }
+            QPushButton {
+                min-height: 28px;
+                padding: 4px 14px;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                background: #ffffff;
+            }
+            QPushButton:hover { background: #f3f4f6; }
+            QPushButton#primaryButton {
+                color: white;
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            QPushButton#primaryButton:hover { background: #1d4ed8; }
+        """)
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._load_results)
+        self._load_results()
+
+    def selected_specs(self):
+        return list(self.cart)
+
+    def _schedule_search(self):
+        self._search_timer.start(180)
+
+    def _load_results(self):
+        keyword = self.search_input.text().strip()
+        params = []
+        where_sql = ""
+        if keyword:
+            like = f"%{keyword}%"
+            where_sql = """
+                WHERE COALESCE(spec_name, '') LIKE ?
+                   OR COALESCE(spec_code, '') LIKE ?
+                   OR COALESCE(product_attribute, '') LIKE ?
+                   OR COALESCE(category_label, '') LIKE ?
+            """
+            params = [like, like, like, like]
+        rows = self.db.safe_fetchall(f"""
+            SELECT
+                COALESCE(category_label, ''),
+                COALESCE(spec_name, ''),
+                COALESCE(spec_code, ''),
+                COALESCE(product_attribute, ''),
+                COALESCE(quantity, ''),
+                COALESCE(cost_price, 0)
+            FROM cost_library
+            {where_sql}
+            ORDER BY
+                CASE WHEN COALESCE(category_label, '') = '' THEN 1 ELSE 0 END,
+                category_label,
+                spec_name,
+                spec_code
+            LIMIT 300
+        """, tuple(params))
+        self.result_table.setRowCount(0)
+        for row_data in rows:
+            record = {
+                "category": row_data[0],
+                "spec_name": row_data[1],
+                "spec_code": row_data[2],
+                "product_attribute": row_data[3],
+                "quantity": row_data[4],
+                "cost_price": float(row_data[5] or 0),
+            }
+            row = self.result_table.rowCount()
+            self.result_table.insertRow(row)
+            values = [
+                record["spec_name"],
+                record["spec_code"],
+                record["product_attribute"],
+                str(record["quantity"]),
+                f"{record['cost_price']:.2f}",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, record)
+                if col in (1, 3, 4):
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.result_table.setItem(row, col, item)
+
+    def _handle_result_click(self, item):
+        if not item or not (QApplication.keyboardModifiers() & Qt.ControlModifier):
+            return
+        record = item.data(Qt.UserRole)
+        if record:
+            self._add_to_cart(record)
+
+    def _record_key(self, record):
+        code = str(record.get("spec_code") or "").strip()
+        if code:
+            return f"code:{code}"
+        return f"name:{str(record.get('spec_name') or '').strip()}"
+
+    def _add_to_cart(self, record):
+        key = self._record_key(record)
+        if key in self.cart_keys:
+            return
+        self.cart_keys.add(key)
+        self.cart.append(dict(record))
+        self._refresh_cart()
+
+    def _clear_cart(self):
+        self.cart = []
+        self.cart_keys = set()
+        self._refresh_cart()
+
+    def _refresh_cart(self):
+        self.cart_label.setText(f"上架车（{len(self.cart)}）")
+        self.cart_table.setRowCount(0)
+        for record in self.cart:
+            row = self.cart_table.rowCount()
+            self.cart_table.insertRow(row)
+            values = [
+                record.get("spec_name", ""),
+                record.get("spec_code", ""),
+                f"{float(record.get('cost_price') or 0):.2f}",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col in (1, 2):
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.cart_table.setItem(row, col, item)
+
+    def _confirm(self):
+        if not self.cart:
+            QMessageBox.information(self, "提示", "请先按住 Ctrl 单击选择要添加的规格。")
+            return
+        self.accept()
+
+
 class ProductSpecDialog(QDialog):
     """商品规格管理与毛利计算器"""
     SPEC_PROMPT_VERSION = "sku_axis_product_memo_deterrence_v4"
@@ -368,7 +586,7 @@ class ProductSpecDialog(QDialog):
     SPEC_TABLE_SELECTION_BG = "#dceeff"
 
     def __init__(self, db_manager, product_id, product_code, product_name, parent=None):
-        super().__init__(parent)
+        super().__init__(None)
         self.db = db_manager
         self.product_id = product_id
         self.product_code = product_code
@@ -377,7 +595,8 @@ class ProductSpecDialog(QDialog):
         self._ensure_ai_spec_prompt_defaults()
         self.two_level_specs = self.db.get_setting(f"product_spec_two_level_{self.product_id}", "0") == "1"
         self.setWindowTitle(f"📦 规格与毛利管理 - {product_name}")
-        self.setWindowFlags(Qt.Window)
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.resize(1720, 930)
         self.setMinimumWidth(1500)
         self._code_click_timer = QTimer(self)
@@ -401,6 +620,7 @@ class ProductSpecDialog(QDialog):
         self._undo_last_snapshot = None
         self.pdd_browser_monitor = None
         self.pdd_code_dialog = None
+        self.pdd_price_dialog = None
         self.init_ui()
         self.is_balancing = False  # 【新增】防止递归死循环的锁
         # 【新增】用于存储加载时的原始规格编码集合，用于后续对比谁被删除了
@@ -417,7 +637,8 @@ class ProductSpecDialog(QDialog):
         QTimer.singleShot(100, self.delayed_refresh)
 
     def closeEvent(self, event):
-        self.load_specs()
+        if self.main_app is not None and getattr(self.main_app, "product_spec_dialog", None) is self:
+            self.main_app.product_spec_dialog = None
         super().closeEvent(event)
 
     def _ensure_ai_spec_prompt_defaults(self):
@@ -436,7 +657,10 @@ class ProductSpecDialog(QDialog):
     def delayed_refresh(self):
         """延迟刷新表格"""
         try:
-            self.table.resizeRowsToContents()
+            if self.table.rowCount() <= 80:
+                self.table.resizeRowsToContents()
+            else:
+                self.table.verticalHeader().setDefaultSectionSize(50)
             self._resize_spec_table_columns_to_content()
             self.table.viewport().update()
             if hasattr(self, 'lbl_gross_break_even'):
@@ -901,6 +1125,16 @@ class ProductSpecDialog(QDialog):
         self.btn_batch_update_prices_by_margin.clicked.connect(self._batch_update_visible_prices_by_margin)
         batch_price_layout.addWidget(self.btn_batch_update_prices_by_margin)
 
+        batch_price_layout.addWidget(QLabel("折扣:"))
+        self.batch_discount_value = QLineEdit()
+        self.batch_discount_value.setPlaceholderText("例如 8.5")
+        self.batch_discount_value.setFixedWidth(80)
+        batch_price_layout.addWidget(self.batch_discount_value)
+
+        self.btn_batch_update_prices_by_discount = QPushButton("按折扣批量打折")
+        self.btn_batch_update_prices_by_discount.clicked.connect(self._batch_update_visible_prices_by_discount)
+        batch_price_layout.addWidget(self.btn_batch_update_prices_by_discount)
+
         spec_filter_layout.addWidget(self.batch_price_controls)
         spec_filter_layout.addStretch()
         spec_filter_widget.setStyleSheet("background-color: #eef7ff; border: 1px solid #cfe8ff; border-radius: 4px;")
@@ -1069,6 +1303,22 @@ class ProductSpecDialog(QDialog):
         """)
         self.btn_pdd_code_fetch.clicked.connect(self.open_pdd_code_fetch_dialog)
 
+        self.btn_pdd_price_fetch = QPushButton("💰 抓取价格管理")
+        self.btn_pdd_price_fetch.setToolTip("打开拼多多商家端价格管理，并搜索当前链接ID")
+        self.btn_pdd_price_fetch.setStyleSheet("""
+            QPushButton {
+                background-color: #8e44ad;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #7d3c98;
+            }
+        """)
+        self.btn_pdd_price_fetch.clicked.connect(self.open_pdd_price_fetch_dialog)
+
         btn_save = QPushButton("💾 保存数据")
         btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px 20px;")
         btn_save.clicked.connect(self.save_data)
@@ -1082,6 +1332,7 @@ class ProductSpecDialog(QDialog):
         btn_layout.addWidget(self.btn_basic_info_summary)
         btn_layout.addWidget(self.btn_promotion_history)
         btn_layout.addWidget(self.btn_pdd_code_fetch)
+        btn_layout.addWidget(self.btn_pdd_price_fetch)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
@@ -1899,6 +2150,97 @@ class ProductSpecDialog(QDialog):
         self._show_action_bubble(msg)
         self._record_undo_step()
 
+    def _batch_update_visible_prices_by_discount(self):
+        value_text = self.batch_discount_value.text().strip().replace("折", "").replace("%", "")
+        if not value_text:
+            QMessageBox.information(self, "提示", "请输入折扣，例如 8.5 折。")
+            return
+
+        try:
+            discount_value = float(value_text)
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的折扣数字。")
+            return
+
+        if discount_value <= 0:
+            QMessageBox.warning(self, "输入错误", "折扣必须大于 0。")
+            return
+        if discount_value <= 1:
+            discount_ratio = discount_value
+        elif discount_value <= 10:
+            discount_ratio = discount_value / 10.0
+        elif discount_value <= 100:
+            discount_ratio = discount_value / 100.0
+        else:
+            QMessageBox.warning(self, "输入错误", "折扣不能超过 100%。")
+            return
+
+        try:
+            coupon = float(self.coupon_input.text()) if self.coupon_input.text() else 0
+            new_customer = float(self.new_customer_input.text()) if self.new_customer_input.text() else 0
+            discount_amount = max(coupon, new_customer)
+        except ValueError:
+            discount_amount = 0.0
+
+        changed = 0
+        skipped = 0
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                if self.table.isRowHidden(row):
+                    continue
+
+                final_price_item = self.table.item(row, self.COL_FINAL_PRICE)
+                sale_price_item = self.table.item(row, self.COL_SALE_PRICE)
+                try:
+                    if final_price_item and final_price_item.text().strip():
+                        current_final_price = float(final_price_item.text().strip())
+                    elif sale_price_item and sale_price_item.text().strip():
+                        current_final_price = float(sale_price_item.text().strip()) - discount_amount
+                    else:
+                        skipped += 1
+                        continue
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                if current_final_price <= 0:
+                    skipped += 1
+                    continue
+
+                new_final_price = current_final_price * discount_ratio
+                new_sale_price = max(0.0, new_final_price + discount_amount)
+
+                item = self.table.item(row, self.COL_SALE_PRICE)
+                if not item:
+                    item = QTableWidgetItem()
+                    self._mark_editable_spec_item(item)
+                    self.table.setItem(row, self.COL_SALE_PRICE, item)
+                else:
+                    self._mark_editable_spec_item(item)
+                item.setText(f"{new_sale_price:.2f}")
+                self.calculate_row_margin(row)
+                changed += 1
+        finally:
+            self.table.blockSignals(False)
+
+        if changed == 0:
+            QMessageBox.information(self, "提示", "当前可见行没有可打折的有效券后价。")
+            return
+
+        self.calculate_total_margin()
+        if hasattr(self, 'lbl_gross_break_even'):
+            self.calculate_roi_metrics()
+        self._refresh_spec_filter_options()
+        self._apply_spec_filters()
+        self.batch_discount_value.clear()
+        self._schedule_spec_table_column_resize()
+        msg = f"已按 {discount_ratio * 10:.2f} 折修改 {changed} 行价格"
+        if skipped:
+            msg += f"，跳过 {skipped} 行"
+        self._show_action_bubble(msg)
+        self._record_undo_step()
+
     def _is_editable_spec_table_cell(self, row, col):
         if row < 0 or col < 0:
             return False
@@ -1982,8 +2324,6 @@ class ProductSpecDialog(QDialog):
         target = (index.row(), index.column(), spec_code)
         old_target = self._spec_code_hover_target
         if old_target and old_target == target:
-            if getattr(self, "_spec_code_hover_visible", False) and getattr(self, "_spec_code_hover_html", ""):
-                self._show_spec_code_hover_text(index.row(), index.column(), self._spec_code_hover_html)
             return
 
         QToolTip.hideText()
@@ -2026,7 +2366,7 @@ class ProductSpecDialog(QDialog):
             return
         viewport = self.table.viewport()
         tooltip_pos = viewport.mapToGlobal(cell_rect.bottomLeft() + QPoint(8, 8))
-        QToolTip.showText(tooltip_pos, tooltip, viewport, cell_rect.adjusted(-2, -2, 2, 2), 30000)
+        QToolTip.showText(tooltip_pos, tooltip, viewport)
 
     def _spec_code_contains_tooltip_html(self, spec_code):
         spec_code = str(spec_code or "").strip()
@@ -2201,7 +2541,7 @@ class ProductSpecDialog(QDialog):
         QApplication.clipboard().setText(str(self.product_code))
         self._show_copy_bubble(f"已复制商品ID: {self.product_code}")
 
-    def _show_copy_bubble(self, text, fade_in_ms=500, hold_ms=900, fade_out_ms=500):
+    def _show_copy_bubble(self, text, fade_in_ms=500, hold_ms=900, fade_out_ms=500, topmost=False):
         """显示窗口内气泡提示，默认保留商品 ID 复制提示的淡入淡出节奏。"""
         for anim in self._copy_toast_animations:
             anim.stop()
@@ -2211,7 +2551,10 @@ class ProductSpecDialog(QDialog):
             self._copy_toast.deleteLater()
             self._copy_toast = None
 
-        toast = QLabel(text, self)
+        toast = QLabel(text, None if topmost else self)
+        if topmost:
+            toast.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            toast.setAttribute(Qt.WA_ShowWithoutActivating, True)
         toast.setAttribute(Qt.WA_TransparentForMouseEvents)
         toast.setStyleSheet("""
             QLabel {
@@ -2228,6 +2571,10 @@ class ProductSpecDialog(QDialog):
         anchor = self.lbl_code.mapTo(self, self.lbl_code.rect().bottomLeft())
         x = min(max(anchor.x(), 8), max(8, self.width() - toast.width() - 8))
         y = min(anchor.y() + 8, max(8, self.height() - toast.height() - 8))
+        if topmost:
+            center = self.mapToGlobal(self.rect().center())
+            x = center.x() - toast.width() // 2
+            y = center.y() - toast.height() // 2
         toast.move(x, y)
 
         opacity = QGraphicsOpacityEffect(toast)
@@ -2873,6 +3220,18 @@ class ProductSpecDialog(QDialog):
             rows_with_final_price.sort(key=lambda x: x[1])
             rows = [r[0] for r in rows_with_final_price]
 
+            spec_codes = [str(row_data[1]) for row_data in rows if row_data[1]]
+            cost_map = {}
+            if spec_codes:
+                for i in range(0, len(spec_codes), 800):
+                    code_chunk = spec_codes[i:i + 800]
+                    placeholders = ",".join(["?"] * len(code_chunk))
+                    cost_rows = self.db.safe_fetchall(
+                        f"SELECT spec_code, cost_price FROM cost_library WHERE spec_code IN ({placeholders})",
+                        tuple(code_chunk)
+                    )
+                    cost_map.update({str(code): float(cost or 0) for code, cost in cost_rows})
+
             # 3. 检查是否有导入的订单数据
             order_data_res = self.db.safe_fetchall(
                 "SELECT SUM(order_count) FROM imported_orders WHERE product_id=?",
@@ -2891,6 +3250,13 @@ class ProductSpecDialog(QDialog):
                 total_orders = sum(spec_orders.values())
             else:
                 total_orders = 0
+            refund_counts = {}
+            if has_imported_orders:
+                refund_rows = self.db.safe_fetchall(
+                    "SELECT spec_code, SUM(refund_count) FROM imported_orders WHERE product_id=? GROUP BY spec_code",
+                    (self.product_code,)
+                )
+                refund_counts = {str(code): int(count or 0) for code, count in refund_rows}
             recognized_total_orders = 0
             if has_imported_orders:
                 for row_data in rows:
@@ -2901,6 +3267,8 @@ class ProductSpecDialog(QDialog):
                 total_orders = recognized_total_orders
 
             # 4. 填充数据
+            self.table.setUpdatesEnabled(False)
+            self.table.blockSignals(True)
             for row_idx, row_data in enumerate(rows):
                 spec_name = str(row_data[0]) if row_data[0] else ""
                 spec_code = str(row_data[1]) if row_data[1] else ""
@@ -2914,8 +3282,7 @@ class ProductSpecDialog(QDialog):
                     self.original_spec_codes.add(spec_code)
                 
                 # 获取成本价
-                cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
-                cost_price = float(cost_res[0][0]) if cost_res else 0.0
+                cost_price = cost_map.get(str(spec_code), 0.0)
 
                 # 计算单行毛利（使用券后价）
                 margin_pct = 0.0
@@ -2993,13 +3360,7 @@ class ProductSpecDialog(QDialog):
 
                 # 权重列 - 根据锁定状态和订单数据显示
                 order_count = spec_orders.get(str(spec_code), 0) if has_recognized_orders else 0
-                refund_count = 0
-                if has_recognized_orders:
-                    refund_res = self.db.safe_fetchall(
-                        "SELECT refund_count FROM imported_orders WHERE product_id=? AND spec_code=?",
-                        (self.product_code, str(spec_code))
-                    )
-                    refund_count = refund_res[0][0] if refund_res and refund_res[0][0] else 0
+                refund_count = refund_counts.get(str(spec_code), 0) if has_recognized_orders else 0
                 if has_recognized_orders and total_orders > 0:
                     display_weight = (order_count / total_orders) * 100
                 else:
@@ -3068,9 +3429,9 @@ class ProductSpecDialog(QDialog):
                 refund_ratio_item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_idx, self.COL_REFUND_RATIO, refund_ratio_item)
 
-                # 🔑【关键修复】强制更新表格
-                self.table.update()
                 self._apply_manual_spec_column_backgrounds(row_idx)
+            self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
             
             # 5. 加载完成后，计算一次综合毛利
             self.calculate_total_margin()
@@ -3110,19 +3471,108 @@ class ProductSpecDialog(QDialog):
             
         except Exception as e:
             import traceback
+            if hasattr(self, "table"):
+                self.table.blockSignals(False)
+                self.table.setUpdatesEnabled(True)
             print(f"加载规格失败：{traceback.format_exc()}")
             QMessageBox.warning(self, "错误", f"加载数据失败：{e}")
 
     def _show_spec_row_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
-        if row < 0:
-            return
-        self.table.selectRow(row)
         menu = QMenu(self)
-        delete_action = QAction("删除规格", self)
-        delete_action.triggered.connect(lambda: self.delete_spec_row(row))
-        menu.addAction(delete_action)
+        add_action = QAction("添加规格", self)
+        add_action.triggered.connect(self.open_temp_cost_library_picker)
+        menu.addAction(add_action)
+        if row >= 0:
+            self.table.selectRow(row)
+            menu.addSeparator()
+            delete_action = QAction("删除规格", self)
+            delete_action.triggered.connect(lambda: self.delete_spec_row(row))
+            menu.addAction(delete_action)
         menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def open_temp_cost_library_picker(self):
+        dialog = SpecCostPickerDialog(self.db, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self._add_cost_library_specs_to_table(dialog.selected_specs())
+
+    def _current_spec_keys(self):
+        keys = set()
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, self.COL_SPEC_CODE)
+            code = code_item.text().strip() if code_item else ""
+            if code:
+                keys.add(f"code:{code}")
+                continue
+            name = self._compose_spec_name(row).strip()
+            if name:
+                keys.add(f"name:{name}")
+        return keys
+
+    def _cost_spec_key(self, record):
+        code = str(record.get("spec_code") or "").strip()
+        if code:
+            return f"code:{code}"
+        return f"name:{str(record.get('spec_name') or '').strip()}"
+
+    def _add_cost_library_specs_to_table(self, specs):
+        if not specs:
+            return
+
+        existing_keys = self._current_spec_keys()
+        added = 0
+        skipped = 0
+        previous_undo_ready = self._undo_ready
+        self._undo_ready = False
+        try:
+            for record in specs:
+                key = self._cost_spec_key(record)
+                if key in existing_keys:
+                    skipped += 1
+                    continue
+                existing_keys.add(key)
+
+                self.add_row()
+                row = self.table.rowCount() - 1
+                spec_name = str(record.get("spec_name") or "").strip() or "新规格"
+                spec_code = str(record.get("spec_code") or "").strip()
+                cost_price = float(record.get("cost_price") or 0)
+
+                self._set_spec_name_cells(row, spec_name)
+                code_item = self.table.item(row, self.COL_SPEC_CODE)
+                if not code_item:
+                    code_item = self._mark_editable_spec_item(QTableWidgetItem(""))
+                    self.table.setItem(row, self.COL_SPEC_CODE, code_item)
+                code_item.setText(spec_code)
+
+                cost_item = self.table.item(row, self.COL_COST)
+                if cost_item:
+                    cost_item.setText(f"{cost_price:.2f}" if cost_price else "")
+
+                self.calculate_row_margin(row)
+                self._apply_manual_spec_column_backgrounds(row)
+                added += 1
+        finally:
+            self._undo_ready = previous_undo_ready
+
+        self._refresh_spec_filter_options()
+        self._apply_spec_filters()
+        self.calculate_total_margin()
+        if hasattr(self, "lbl_gross_break_even"):
+            self.calculate_roi_metrics()
+        self._schedule_spec_table_column_resize()
+        if added:
+            self.table.scrollToBottom()
+            self._record_undo_step()
+
+        if added and skipped:
+            msg = f"已添加{added}个规格，跳过{skipped}个重复规格"
+        elif added:
+            msg = f"已添加{added}个规格"
+        else:
+            msg = "选择的规格已存在"
+        self._show_copy_bubble(msg, fade_in_ms=80, hold_ms=500, fade_out_ms=80)
 
     def delete_spec_row(self, row):
         """
@@ -3277,7 +3727,7 @@ class ProductSpecDialog(QDialog):
         margin_rate = self.get_current_margin_rate()
         return_rate = self.get_return_rate()
         
-        if margin_rate <= 0:
+        if margin_rate == 0:
             self.lbl_gross_break_even.setText("0.00")
             self.lbl_net_break_even.setText("0.00")
             self.lbl_best_roi.setText("0.00")
@@ -3757,22 +4207,16 @@ class ProductSpecDialog(QDialog):
         total_weighted_margin = 0.0
         total_weight = 0.0
 
-        coupon = float(self.coupon_input.text()) if self.coupon_input.text() else 0
-        new_customer = float(self.new_customer_input.text()) if self.new_customer_input.text() else 0
-        max_discount = max(coupon, new_customer)
-
         for r in range(self.table.rowCount()):
             price_item = self.table.item(r, self.COL_SALE_PRICE)
-            code_item = self.table.item(r, self.COL_SPEC_CODE)
             margin_item = self.table.item(r, self.COL_MARGIN_RATE)
             weight_item = self.table.item(r, self.COL_WEIGHT)
 
-            if not all([price_item, code_item, margin_item, weight_item]):
+            if not all([price_item, margin_item, weight_item]):
                 continue
 
             try:
                 price = float(price_item.text())
-                code = code_item.text()
 
                 margin_text = margin_item.text().replace("%", "").replace("％", "").strip()
                 margin_val = float(margin_text) if margin_text else 0.0
@@ -3783,15 +4227,8 @@ class ProductSpecDialog(QDialog):
                 if price <= 0 or weight_val <= 0:
                     continue
 
-                cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (code,))
-                cost = float(cost_res[0][0]) if cost_res else 0.0
-
-                final_price = price - max_discount
-
-                if final_price > 0 and cost > 0:
-                    margin = (final_price - cost) / final_price
-                    total_weighted_margin += margin * weight_val
-                    total_weight += weight_val
+                total_weighted_margin += (margin_val / 100.0) * weight_val
+                total_weight += weight_val
             except Exception:
                 continue
 
@@ -3867,12 +4304,20 @@ class ProductSpecDialog(QDialog):
     def open_pdd_code_fetch_dialog(self):
         """打开拼多多商家端，并直接进入抓取添加编码界面。"""
         try:
+            product_code = str(self.product_code or "").strip()
+            if product_code:
+                QApplication.clipboard().setText(product_code)
+                if hasattr(self, "_show_copy_bubble"):
+                    self._show_copy_bubble(f"已复制商品ID: {product_code}", fade_in_ms=120, hold_ms=700, fade_out_ms=180)
             monitor = self._get_pdd_browser_monitor()
             store_id = self._current_product_store_id()
-            if store_id and hasattr(monitor, "set_store_context"):
-                monitor.set_store_context(store_id)
-            if not monitor.is_devtools_alive():
-                monitor.open_merchant_page(store_id)
+            if hasattr(monitor, "activate_store_browser"):
+                monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            else:
+                if store_id and hasattr(monitor, "set_store_context"):
+                    monitor.set_store_context(store_id)
+                if not monitor.is_devtools_alive():
+                    monitor.open_merchant_page(store_id)
 
             try:
                 from manager.dialogs.store_margin import PddProductMatchDialog
@@ -3893,6 +4338,46 @@ class ProductSpecDialog(QDialog):
             self._show_external_dialog(self.pdd_code_dialog)
         except Exception as e:
             QMessageBox.warning(self, "拼多多链接抓取", f"打开抓取添加编码界面失败：{e}")
+
+    def open_pdd_price_fetch_dialog(self):
+        """打开拼多多价格管理，并在抓取窗口中等待用户手动抓取。"""
+        try:
+            monitor = self._get_pdd_browser_monitor()
+            store_id = self._current_product_store_id()
+            product_code = str(self.product_code or "").strip()
+            if not hasattr(monitor, "open_price_management_page") and store_id and hasattr(monitor, "set_store_context"):
+                monitor.set_store_context(store_id)
+            if hasattr(monitor, "open_price_management_page"):
+                monitor.open_price_management_page(store_id)
+            elif not monitor.is_devtools_alive():
+                monitor.open_merchant_page(store_id)
+
+            try:
+                from manager.dialogs.store_margin import PddProductMatchDialog
+            except ImportError:
+                from dialogs.store_margin import PddProductMatchDialog
+
+            if self.pdd_price_dialog is None:
+                self.pdd_price_dialog = PddProductMatchDialog(
+                    self.db,
+                    monitor,
+                    default_store_id=self._current_product_store_id(),
+                    parent=None,
+                    mode="price",
+                    store_id_provider=self._current_product_store_id,
+                    owner=self,
+                    initial_product_id=product_code,
+                    auto_search=True,
+                )
+                self.pdd_price_dialog.destroyed.connect(lambda _=None: setattr(self, "pdd_price_dialog", None))
+            else:
+                self.pdd_price_dialog.initial_product_id = product_code
+                self.pdd_price_dialog.auto_search = True
+                if hasattr(self.pdd_price_dialog, "_auto_search_initial_price_product"):
+                    QTimer.singleShot(300, self.pdd_price_dialog._auto_search_initial_price_product)
+            self._show_external_dialog(self.pdd_price_dialog)
+        except Exception as e:
+            QMessageBox.warning(self, "拼多多价格管理", f"打开抓取价格管理失败：{e}")
 
     def open_basic_info_summary_dialog(self):
         """生成当前链接规格基础信息，方便复制给外部分析。"""
@@ -6498,7 +6983,7 @@ SKU名称尽量接近35字，最多不超过40字。
                 self.lbl_promotion_ratio.setText("--")
                 return
 
-            if margin_rate <= 0:
+            if margin_rate == 0:
                 self.lbl_net_profit_rate.setText("请设置毛利")
                 self.lbl_net_profit_rate.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fdeaea; padding: 5px 10px; border-radius: 3px;")
                 self.lbl_roi_multiple.setText("--")
@@ -7297,8 +7782,11 @@ SKU名称尽量接近35字，最多不超过40字。
             if not main_view_refreshed:
                 self.main_app.load_data_safe()
 
-            # 6. 成功保存，关闭窗口
-            self.accept()
+            # 6. 成功保存，保留窗口，只提示已保存
+            if hasattr(self, "_show_copy_bubble"):
+                self._show_copy_bubble("已保存", fade_in_ms=80, hold_ms=500, fade_out_ms=120, topmost=True)
+            if hasattr(self, "_reset_undo_history"):
+                self._reset_undo_history()
 
         except Exception as e:
             import traceback
