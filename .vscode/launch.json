@@ -7,7 +7,8 @@
             "request": "launch",
             "program": "${workspaceFolder}/manager/shop_manager.py",
             "console": "integratedTerminal",
-            "justMyCode": false,
+            "justMyCode": true,
+            "subProcess": false,
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             },

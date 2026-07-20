@@ -4,6 +4,8 @@
 import base64
 import json
 import os
+import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -15,6 +17,32 @@ import requests
 
 PDD_MERCHANT_URL = "https://mms.pinduoduo.com/"
 PDD_PRICE_MANAGEMENT_URL = "https://mms.pinduoduo.com/goods/goods-price-management"
+PDD_BROWSER_DISK_CACHE_SIZE = 100 * 1024 * 1024
+PDD_BROWSER_MEDIA_CACHE_SIZE = 50 * 1024 * 1024
+PDD_BROWSER_CLEANUP_DIR_NAMES = {
+    "Cache",
+    "CacheStorage",
+    "Code Cache",
+    "DawnCache",
+    "GPUCache",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "Media Cache",
+    "OptGuideOnDeviceClassifierModel",
+    "OptGuideOnDeviceModel",
+    "ShaderCache",
+    "blob_storage",
+    "component_crx_cache",
+    "optimization_guide_model_store",
+}
+PDD_BROWSER_DISABLED_FEATURES = ",".join([
+    "OptimizationGuideModelDownloading",
+    "OptimizationGuideOnDeviceModel",
+    "OptimizationGuideOnDeviceModelExecution",
+    "OptimizationHints",
+    "OptimizationHintsFetching",
+    "OptimizationTargetPrediction",
+])
 
 
 class BrowserMonitorError(Exception):
@@ -131,18 +159,53 @@ class PddBrowserMonitor:
     _ports_by_profile_root = {}
     _processes_by_profile_root = {}
 
-    def __init__(self, base_dir, port=9223):
+    def __init__(self, base_dir, port=9223, profile_base_dir=None):
         self.base_dir = base_dir
         self.legacy_port = port
         self.store_base_port = port + 100
         self.port = port
         self.process = None
-        self.legacy_profile_root = os.path.join(base_dir, "browser_profiles", "pdd_merchant")
-        self.profile_root = os.path.join(base_dir, "browser_profiles", "pdd_merchant_profiles")
+        profile_base_dir = profile_base_dir or os.path.join(base_dir, "browser_profiles")
+        self.legacy_profile_root = os.path.join(profile_base_dir, "pdd_merchant")
+        self.profile_root = os.path.join(profile_base_dir, "pdd_merchant_profiles")
         self.active_profile_key = "default"
         self.profile_ports = self._ports_by_profile_root.setdefault(self.profile_root, {})
         self.profile_processes = self._processes_by_profile_root.setdefault(self.profile_root, {})
         self.profile_dir = self._profile_dir_for_key(self.active_profile_key)
+
+    def _path_inside(self, path, root):
+        try:
+            path_abs = os.path.abspath(path)
+            root_abs = os.path.abspath(root)
+            return os.path.commonpath([path_abs, root_abs]) == root_abs
+        except Exception:
+            return False
+
+    def _remove_cache_dir(self, path):
+        if not self._path_inside(path, self.profile_dir):
+            return False
+        try:
+            shutil.rmtree(path, ignore_errors=False)
+            return True
+        except Exception:
+            return False
+
+    def cleanup_current_profile_cache(self):
+        if not self.profile_dir or not os.path.isdir(self.profile_dir):
+            return {"removed": 0, "failed": 0}
+
+        removed = 0
+        failed = 0
+        for current_root, dirs, _files in os.walk(self.profile_dir, topdown=True):
+            matched = [name for name in list(dirs) if name in PDD_BROWSER_CLEANUP_DIR_NAMES]
+            for name in matched:
+                full_path = os.path.join(current_root, name)
+                if self._remove_cache_dir(full_path):
+                    removed += 1
+                    dirs.remove(name)
+                else:
+                    failed += 1
+        return {"removed": removed, "failed": failed}
 
     def _profile_key_for_store(self, store_id):
         value = str(store_id or "").strip()
@@ -190,15 +253,37 @@ class PddBrowserMonitor:
             raise BrowserMonitorError("未找到 Chrome 或 Edge 浏览器")
 
         os.makedirs(self.profile_dir, exist_ok=True)
+        self.cleanup_current_profile_cache()
         args = [
             browser_path,
             f"--remote-debugging-port={self.port}",
             f"--user-data-dir={self.profile_dir}",
+            f"--disk-cache-size={PDD_BROWSER_DISK_CACHE_SIZE}",
+            f"--media-cache-size={PDD_BROWSER_MEDIA_CACHE_SIZE}",
+            f"--disable-features={PDD_BROWSER_DISABLED_FEATURES}",
+            "--aggressive-cache-discard",
             "--new-window",
             PDD_MERCHANT_URL,
         ]
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.profile_processes[self.active_profile_key] = self.process
+
+    def stop(self):
+        for key, process in list(self.profile_processes.items()):
+            if process is None:
+                self.profile_processes.pop(key, None)
+                continue
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            except Exception:
+                pass
+            self.profile_processes.pop(key, None)
+        self.process = None
 
     def activate_store_browser(self, store_id=None, open_url=True, open_new_tab=False):
         if store_id is not None:
@@ -260,6 +345,323 @@ class PddBrowserMonitor:
                 return value if isinstance(value, dict) else {"ok": False, "status": "点击价格管理脚本未返回有效结果"}
         except Exception as exc:
             return {"ok": False, "status": f"打开价格管理页面失败：{exc}"}
+
+    def get_current_store_name(self, store_id=None, expected_store_name=""):
+        if store_id is not None:
+            self.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+        if not self.is_devtools_alive():
+            return {"ok": False, "status": "浏览器未运行", "store_name": "", "logged_in": False}
+
+        expected_store_name_json = json.dumps(str(expected_store_name or "").strip(), ensure_ascii=False)
+        script = r"""
+(async () => {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const expectedStoreName = __EXPECTED_STORE_NAME__;
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const compact = value => clean(value).replace(/\s+/g, '');
+  const linesOf = value => String(value || '').split(/\n+/).map(clean).filter(Boolean);
+  const expectedCompact = compact(expectedStoreName);
+  const isLikelyStoreName = value => {
+    const text = clean(value);
+    if (!text || text.length < 2 || text.length > 60) return false;
+    if (/商家后台|后台首页|常用功能|商品列表|价格管理|订单查询|账号信息|店铺信息|退出当前账号|登录|消息|客服/.test(text)) return false;
+    return /店|旗舰|专营|专卖|商贸|农业|百货|工坊|文具|优品|官方/.test(text);
+  };
+  const matchesExpected = value => {
+    if (!expectedCompact) return false;
+    const current = compact(value);
+    return current && (current === expectedCompact || current.includes(expectedCompact) || expectedCompact.includes(current));
+  };
+  const findBySelectors = () => {
+    const selectors = [
+      'span.user-name-text',
+      '[class*="user-name"]',
+      '[class*="UserName"]',
+      '[class*="shop-name"]',
+      '[class*="ShopName"]',
+      '[class*="store-name"]',
+      '[class*="StoreName"]',
+      '[class*="merchant-name"]',
+      '[class*="MerchantName"]'
+    ];
+    let masked = null;
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {
+        const text = clean(node.innerText || node.textContent || node.getAttribute('title'));
+        if (!text) continue;
+        if (!text.includes('*')) return { store_name: text, source: selector };
+        if (!masked) masked = { store_name: text, source: selector };
+      }
+    }
+    return masked;
+  };
+  const findByExpectedText = () => {
+    if (!expectedCompact) return null;
+    const bodyText = clean(document.body && document.body.innerText || '');
+    if (matchesExpected(bodyText)) return { store_name: expectedStoreName, source: 'expected-body-text' };
+    const nodes = Array.from(document.querySelectorAll('[title],[aria-label],[data-title],span,div,a,button'));
+    for (const node of nodes.slice(0, 3000)) {
+      const text = clean([
+        node.innerText,
+        node.textContent,
+        node.getAttribute && node.getAttribute('title'),
+        node.getAttribute && node.getAttribute('aria-label'),
+        node.getAttribute && node.getAttribute('data-title')
+      ].join(' '));
+      if (matchesExpected(text)) return { store_name: expectedStoreName, source: 'expected-node-text' };
+    }
+    return null;
+  };
+  const findByNearbyText = () => {
+    const lines = linesOf(document.body && document.body.innerText || '');
+    const accountIndex = lines.findIndex(line => line === '账号信息' || line === '店铺信息');
+    if (accountIndex > 0) {
+      for (let i = accountIndex - 1; i >= Math.max(0, accountIndex - 5); i -= 1) {
+        if (isLikelyStoreName(lines[i])) return { store_name: lines[i], source: 'near-account-info' };
+      }
+    }
+    const firstStoreLine = lines.find(isLikelyStoreName);
+    if (firstStoreLine) return { store_name: firstStoreLine, source: 'body-line' };
+    return null;
+  };
+  const findByStorage = () => {
+    const storages = [];
+    try { storages.push(localStorage); } catch (e) {}
+    try { storages.push(sessionStorage); } catch (e) {}
+    for (const storage of storages) {
+      for (let i = 0; i < Math.min(storage.length, 500); i += 1) {
+        const key = storage.key(i);
+        const value = storage.getItem(key) || '';
+        const text = clean(`${key} ${value}`).slice(0, 20000);
+        if (matchesExpected(text)) return { store_name: expectedStoreName, source: 'expected-storage' };
+        const match = text.match(/(?:mallName|mall_name|storeName|shopName|merchantName|店铺名称)["'\s:=：]+([^"',，}\]]{2,60})/i);
+        if (match && isLikelyStoreName(match[1])) return { store_name: clean(match[1]), source: 'storage-field' };
+      }
+    }
+    return null;
+  };
+  const found = findBySelectors() || findByExpectedText() || findByNearbyText() || findByStorage();
+  const sampleLines = linesOf(document.body && document.body.innerText || '').slice(0, 80);
+  const storeName = clean(found && found.store_name);
+  return {
+    ok: !!storeName,
+    logged_in: !!storeName,
+    store_name: storeName,
+    source: found && found.source || '',
+    status: storeName ? `当前浏览器店铺：${storeName}` : '未检测到浏览器店铺名称，请确认拼多多商家端已登录或页面已加载完成',
+    url: location.href,
+    title: document.title || '',
+    sample_lines: sampleLines
+  };
+})()
+""".replace("__EXPECTED_STORE_NAME__", expected_store_name_json)
+        last_error = ""
+        last_value = None
+        for _attempt in range(12):
+            target = self._get_pdd_target()
+            if not target:
+                last_error = "未找到拼多多商家端页面"
+                time.sleep(0.5)
+                continue
+            try:
+                with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=3) as ws:
+                    result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True})
+                    value = result.get("result", {}).get("value", {})
+                    if isinstance(value, dict):
+                        last_value = value
+                        if value.get("ok"):
+                            return value
+                    else:
+                        last_error = "店铺名称脚本未返回有效结果"
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(0.5)
+
+        if isinstance(last_value, dict):
+            last_value["status"] = last_value.get("status") or "未检测到浏览器店铺名称，请确认拼多多商家端已登录或页面已加载完成"
+            return last_value
+        return {"ok": False, "status": f"识别当前浏览器店铺名称失败：{last_error}", "store_name": "", "logged_in": False}
+
+    def _store_names_match(self, current_name, expected_name):
+        current = "".join(str(current_name or "").split())
+        expected = "".join(str(expected_name or "").split())
+        if not expected:
+            return True
+        if current and "*" in current:
+            pattern = "^" + re.escape(current).replace("\\*", ".*") + "$"
+            return bool(re.match(pattern, expected))
+        if expected and "*" in expected:
+            pattern = "^" + re.escape(expected).replace("\\*", ".*") + "$"
+            return bool(re.match(pattern, current))
+        return bool(current and (current == expected or current in expected or expected in current))
+
+    def _open_goods_list_and_search_product_staged(self, product_id, expected_store_name="", store_id=None):
+        product_id = str(product_id or "").strip()
+        expected_store_name = str(expected_store_name or "").strip()
+        if store_id is not None:
+            self.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+        if not product_id:
+            return {"ok": False, "status": "商品ID为空，未执行商品列表搜索"}
+        deadline = time.time() + 5
+        while not self.is_devtools_alive() and time.time() < deadline:
+            time.sleep(0.1)
+        if not self.is_devtools_alive():
+            return {"ok": False, "status": "浏览器未运行，未执行商品列表搜索"}
+
+        target = self._get_pdd_target()
+        if not target:
+            return {"ok": False, "status": "未找到拼多多商家端页面，未执行商品列表搜索"}
+        if "goods/goods_list" not in str(target.get("url", "")):
+            try:
+                with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=5) as ws:
+                    ws.call("Page.navigate", {"url": "https://mms.pinduoduo.com/goods/goods_list?msfrom=mms_sidenav"})
+            except Exception as exc:
+                return {"ok": False, "status": f"打开商品列表失败：{exc}", "store_name": ""}
+
+        target = self._get_pdd_target()
+        if not target:
+            return {"ok": False, "status": "商品列表打开后未找到拼多多页面", "store_name": ""}
+
+        product_id_json = json.dumps(product_id, ensure_ascii=False)
+        prefill_script = f"""
+(async () => {{
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const productId = {product_id_json};
+  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+  let input = null;
+  for (let attempt = 0; attempt < 40 && !input; attempt++) {{
+    const inputs = Array.from(document.querySelectorAll('input, textarea')).filter(node => {{
+      const text = clean([
+        node.placeholder,
+        node.getAttribute('aria-label'),
+        node.name,
+        node.id,
+        node.className
+      ].join(' '));
+      return /多个查询请空格或逗号隔开依次输入|商品ID|商品名称|查询|搜索|IPT_input/.test(text);
+    }});
+    input = inputs.find(node => clean(node.placeholder).includes('多个查询请空格或逗号隔开依次输入'))
+      || inputs.find(node => /IPT_input/.test(String(node.className || '')))
+      || inputs[0];
+    if (!input) await sleep(100);
+  }}
+  if (!input) return false;
+  const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (setter) setter.call(input, productId);
+  else input.value = productId;
+  input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return true;
+}})()
+"""
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=5) as ws:
+                ws.call("Runtime.evaluate", {
+                    "expression": prefill_script,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                })
+        except Exception:
+            pass
+
+        store_info = self.get_current_store_name(expected_store_name=expected_store_name)
+        current_store_name = store_info.get("store_name", "") if isinstance(store_info, dict) else ""
+        store_check_warning = ""
+        if not store_info.get("ok"):
+            store_check_warning = store_info.get("status") or "未检测到浏览器店铺名称，已跳过店铺校验"
+        elif not self._store_names_match(current_store_name, expected_store_name):
+            return {
+                "ok": False,
+                "status": f"当前浏览器登录店铺是「{current_store_name}」，不是软件当前店铺「{expected_store_name}」",
+                "logged_in": True,
+                "store_name": current_store_name,
+                "expected_store_name": expected_store_name,
+            }
+
+        current_store_name_json = json.dumps(current_store_name or expected_store_name, ensure_ascii=False)
+        store_check_warning_json = json.dumps(store_check_warning, ensure_ascii=False)
+        script = f"""
+(async () => {{
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const productId = {product_id_json};
+  const currentStoreName = {current_store_name_json};
+  const storeCheckWarning = {store_check_warning_json};
+  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+  const setValue = (input, value) => {{
+    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }};
+  let input = null;
+  for (let attempt = 0; attempt < 40 && !input; attempt++) {{
+    const inputs = Array.from(document.querySelectorAll('input, textarea')).filter(node => {{
+      const type = String(node.type || '').toLowerCase();
+      if (['button', 'checkbox', 'radio', 'submit'].includes(type)) return false;
+      const text = clean([
+        node.placeholder,
+        node.getAttribute('aria-label'),
+        node.getAttribute('data-testid'),
+        node.name,
+        node.id,
+        node.className
+      ].join(' '));
+      return /多个查询请空格或逗号隔开依次输入|商品ID|商品名称|查询|搜索|IPT_input/.test(text);
+    }});
+    input = inputs.find(node => clean(node.placeholder).includes('多个查询请空格或逗号隔开依次输入'))
+      || inputs.find(node => /IPT_input/.test(String(node.className || '')))
+      || inputs[0];
+    if (!input) await sleep(100);
+  }}
+  if (!input) {{
+    return {{ ok: false, status: '已进入商品列表，但未找到商品ID搜索输入框', logged_in: true, store_name: currentStoreName }};
+  }}
+  input.focus();
+  setValue(input, productId);
+  input.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }}));
+  input.dispatchEvent(new KeyboardEvent('keyup', {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }}));
+  await sleep(250);
+  const searchRoot = input.closest('.goods-search-wrap') || input.closest('form') || document;
+  const buttons = Array.from(searchRoot.querySelectorAll('button,[role="button"],a,span')).filter(node => {{
+    const text = clean(node.innerText || node.textContent || node.getAttribute('aria-label'));
+    return text === '查询' || text === '搜索';
+  }});
+  const queryNode = buttons.find(node => clean(node.innerText || node.textContent) === '查询') || buttons[0];
+  if (queryNode) {{
+    const clickable = queryNode.closest('button,[role="button"],a') || queryNode;
+    clickable.click();
+  }}
+  for (let i = 0; i < 24; i++) {{
+    await sleep(500);
+    const body = clean(document.body && document.body.innerText);
+    const hasEdit = Array.from(document.querySelectorAll('a,button,[role="button"]'))
+      .some(node => clean(node.innerText || node.textContent) === '编辑');
+    if (body.includes(productId) && hasEdit) break;
+  }}
+  return {{
+    ok: true,
+    status: storeCheckWarning
+      ? `未完成店铺名称校验，已直接在商品列表搜索商品ID：${{productId}}。${{storeCheckWarning}}`
+      : `已确认店铺「${{currentStoreName}}」，并在商品列表搜索商品ID：${{productId}}`,
+    logged_in: !storeCheckWarning,
+    store_name: currentStoreName
+  }};
+}})()
+"""
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=8) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True, "awaitPromise": True})
+                value = result.get("result", {}).get("value", {})
+                return value if isinstance(value, dict) else {"ok": False, "status": "商品列表搜索脚本未返回有效结果", "store_name": current_store_name}
+        except Exception as exc:
+            return {"ok": False, "status": f"商品列表输入并查询商品ID失败：{exc}", "store_name": current_store_name}
+
+    def open_goods_list_and_search_product(self, product_id, expected_store_name="", store_id=None):
+        return self._open_goods_list_and_search_product_staged(product_id, expected_store_name, store_id)
 
     def search_price_management_product(self, product_id):
         product_id = str(product_id or "").strip()
@@ -354,7 +756,7 @@ class PddBrowserMonitor:
                 "title": "",
             }
 
-        target = self._get_pdd_target()
+        target = self._get_pdd_target(prefer_price=True)
         if not target:
             return {
                 "running": True,
@@ -374,6 +776,8 @@ class PddBrowserMonitor:
         product_visible_count = page_data.get("product_visible_count")
         product_count_source = page_data.get("product_count_source", "")
         is_goods_list = bool(page_data.get("is_goods_list"))
+        is_price_management = bool(page_data.get("is_price_management")) or "goods-price-management" in url or "价格管理" in title
+        is_promotion_page = bool(page_data.get("is_promotion_page"))
         on_sale_count = page_data.get("on_sale_count")
         on_sale_source = page_data.get("on_sale_source", "")
         product_ids = page_data.get("product_ids", [])
@@ -390,7 +794,11 @@ class PddBrowserMonitor:
             and not all(marker in body_text for marker in login_markers)
         )
 
-        if is_goods_list and on_sale_count is not None:
+        if is_price_management:
+            status = "价格管理页已打开"
+        elif is_promotion_page:
+            status = "商品推广页已打开"
+        elif is_goods_list and on_sale_count is not None:
             status = f"商品列表: 在售中 {on_sale_count} 个商品"
         elif is_goods_list:
             status = "商品列表已打开，未读取到在售中数量"
@@ -417,6 +825,8 @@ class PddBrowserMonitor:
             "page_link_ids": page_link_ids,
             "current_code_detail": current_code_detail,
             "is_goods_list": is_goods_list,
+            "is_price_management": is_price_management,
+            "is_promotion_page": is_promotion_page,
             "url": url,
             "title": title,
         }
@@ -465,24 +875,282 @@ class PddBrowserMonitor:
             "title": title,
         }
 
-    def _get_pdd_target(self, prefer_price=False):
+    def inspect_promotion_status_page(self):
+        if not self.is_devtools_alive():
+            return {
+                "ok": False,
+                "running": False,
+                "status": "浏览器未运行",
+                "items": [],
+                "url": "",
+                "title": "",
+            }
+
+        try:
+            targets = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5).json()
+            pages = [
+                target for target in targets
+                if target.get("type") == "page"
+                and ("pinduoduo.com" in str(target.get("url", "")) or "yangkeduo.com" in str(target.get("url", "")))
+            ]
+        except Exception:
+            pages = []
+        preferred = [target for target in pages if self._is_promotion_target(target)]
+        fallback = [target for target in pages if target not in preferred]
+        candidates = preferred + fallback
+        if not candidates:
+            target = self._get_pdd_target(prefer_promotion=True)
+            candidates = [target] if target else []
+        if not candidates:
+            return {
+                "ok": False,
+                "running": True,
+                "status": "浏览器已打开，未找到拼多多商家端页签",
+                "items": [],
+                "url": "",
+                "title": "",
+            }
+
+        best_result = None
+        best_target = None
+        for target in candidates:
+            page_data = self._evaluate_promotion_status_page(target.get("webSocketDebuggerUrl"))
+            items = page_data.get("items") or []
+            if items:
+                best_result = page_data
+                best_target = target
+                break
+            if best_result is None:
+                best_result = page_data
+                best_target = target
+        target = best_target or candidates[0]
+        url = target.get("url", "")
+        title = target.get("title", "")
+        page_data = best_result or {}
+        items = page_data.get("items") or []
+        return {
+            "ok": bool(page_data.get("ok")),
+            "running": True,
+            "status": page_data.get("status") or f"已识别 {len(items)} 条推广状态",
+            "items": items,
+            "debug_items": page_data.get("debug_items", []),
+            "body_sample": page_data.get("body_sample", ""),
+            "url": page_data.get("url") or url,
+            "title": page_data.get("title") or title,
+        }
+
+    def _is_promotion_target(self, target):
+        url = str((target or {}).get("url", "")).lower()
+        title = str((target or {}).get("title", ""))
+        text = f"{url} {title}"
+        return any(
+            marker in text
+            for marker in (
+                "推广", "商品推广", "商品营销", "推广平台", "净目标投产比", "净成交出价",
+                "promotion", "advert", "ad_manage", "ad-manage", "mall-ad", "mms-ad",
+                "marketing", "traffic"
+            )
+        )
+
+    def _target_is_visible(self, target):
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=1) as ws:
+                result = ws.call(
+                    "Runtime.evaluate",
+                    {"expression": "document.visibilityState === 'visible'", "returnByValue": True},
+                )
+                return result.get("result", {}).get("value") is True
+        except Exception:
+            return False
+
+    def _get_pdd_target(self, prefer_price=False, prefer_promotion=False):
         try:
             targets = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5).json()
         except Exception:
             return None
 
         pages = [t for t in targets if t.get("type") == "page"]
+        pdd_pages = [
+            target for target in pages
+            if "pinduoduo.com" in str(target.get("url", ""))
+            or "yangkeduo.com" in str(target.get("url", ""))
+        ]
+        for target in pdd_pages:
+            if self._target_is_visible(target):
+                return target
+        if prefer_promotion:
+            for target in pages:
+                if self._is_promotion_target(target):
+                    return target
         if prefer_price:
             for target in pages:
                 url = target.get("url", "")
                 title = target.get("title", "")
                 if "goods-price-management" in url or "价格管理" in title:
                     return target
-        for target in pages:
-            url = target.get("url", "")
-            if "pinduoduo.com" in url or "yangkeduo.com" in url:
-                return target
+        if pdd_pages:
+            return pdd_pages[0]
         return pages[0] if pages else None
+
+    def _get_product_edit_target(self, product_id=""):
+        product_id = str(product_id or "").strip()
+        try:
+            targets = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5).json()
+        except Exception:
+            return None
+        pages = [t for t in targets if t.get("type") == "page"]
+        for target in pages:
+            url = str(target.get("url", ""))
+            if "goods/goods_add" in url and (not product_id or f"goods_id={product_id}" in url):
+                return target
+        return next((t for t in pages if "goods/goods_add" in str(t.get("url", ""))), None)
+
+    def _get_goods_list_target_with_edit(self, product_id=""):
+        product_id = str(product_id or "").strip()
+        try:
+            targets = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.5).json()
+        except Exception:
+            return None
+        script = """
+(() => {
+  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+  const hasEdit = Array.from(document.querySelectorAll('a,button,[role="button"]'))
+    .some(node => clean(node.innerText || node.textContent) === '编辑');
+  return { text: clean(document.body && document.body.innerText || '').slice(0, 20000), hasEdit };
+})()
+"""
+        for target in [t for t in targets if t.get("type") == "page" and "goods/goods_list" in str(t.get("url", ""))]:
+            try:
+                with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=3) as ws:
+                    result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True})
+                    value = result.get("result", {}).get("value", {})
+                if value.get("hasEdit") and (not product_id or product_id in value.get("text", "")):
+                    return target
+            except Exception:
+                continue
+        return None
+
+    def open_product_edit_page(self, product_id, expected_store_name="", store_id=None):
+        search_result = self.open_goods_list_and_search_product(product_id, expected_store_name, store_id)
+        if not isinstance(search_result, dict) or not search_result.get("ok"):
+            return search_result
+        edit_target = self._get_product_edit_target(product_id)
+        if edit_target:
+            return {"ok": True, "status": "已打开编辑商品页面", "target": edit_target}
+        target = self._get_goods_list_target_with_edit(product_id)
+        if not target:
+            return {"ok": False, "status": "商品列表搜索后未找到该商品的编辑按钮"}
+        script = r"""
+(() => {
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const productId = "__PRODUCT_ID__";
+  const edits = Array.from(document.querySelectorAll('a,button,[role="button"]'))
+    .filter(node => clean(node.innerText || node.textContent) === '编辑');
+  const edit = edits.find(node => {
+    let current = node;
+    for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+      if (clean(current.innerText || current.textContent).includes(productId)) return true;
+    }
+    return false;
+  }) || edits[0];
+  if (!edit) return { ok: false, status: '搜索结果里没有找到编辑按钮' };
+  edit.scrollIntoView({ block: 'center', inline: 'center' });
+  edit.click();
+  return { ok: true, status: '已点击编辑按钮' };
+})()
+""".replace("__PRODUCT_ID__", product_id)
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=5) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True})
+                value = result.get("result", {}).get("value", {})
+        except Exception as exc:
+            return {"ok": False, "status": f"点击编辑按钮失败：{exc}"}
+        if not isinstance(value, dict) or not value.get("ok"):
+            return value if isinstance(value, dict) else {"ok": False, "status": "点击编辑按钮未返回有效结果"}
+        deadline = time.time() + 12
+        edit_target = None
+        while time.time() < deadline:
+            edit_target = self._get_product_edit_target(product_id)
+            if edit_target:
+                return {"ok": True, "status": "已打开编辑商品页面", "target": edit_target}
+            time.sleep(0.5)
+        return {"ok": False, "status": "已点击编辑，但未检测到编辑商品页面"}
+
+    def fetch_product_material_images(self, product_id, expected_store_name="", store_id=None, open_edit=True):
+        if open_edit:
+            result = self.open_product_edit_page(product_id, expected_store_name, store_id)
+            if not isinstance(result, dict) or not result.get("ok"):
+                return result
+            target = result.get("target") or self._get_product_edit_target(product_id)
+        else:
+            target = self._get_product_edit_target(product_id)
+        if not target:
+            return {"ok": False, "status": "未找到编辑商品页面"}
+        script = r"""
+(async () => {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const urlFromCss = value => {
+    const match = String(value || '').match(/url\(["']?([^"')]+)["']?\)/);
+    return match ? match[1] : '';
+  };
+  const cleanUrl = value => {
+    try {
+      const url = new URL(String(value || '').split('?')[0], location.href);
+      return url.href;
+    } catch {
+      return '';
+    }
+  };
+  const isMaterialUrl = url => /pddpic\.com/.test(url || '') && !/mms-shell-search-icon|merchant-pub|msfe-img|upload\/tool|funimg\.pddpic/.test(url || '');
+  const uniquePush = (rows, seen, url, rawUrl) => {
+    const original = cleanUrl(url);
+    const raw = rawUrl || url || '';
+    if (!original || !isMaterialUrl(original) || seen.has(original)) return;
+    seen.add(original);
+    rows.push({ url: original, fallback_url: raw });
+  };
+  async function collect(selector) {
+    const root = document.querySelector(selector);
+    if (!root) return [];
+    root.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await sleep(900);
+    const roots = Array.from(document.querySelectorAll(selector));
+    const rows = [];
+    const seen = new Set();
+    for (const container of roots) {
+      for (const img of Array.from(container.querySelectorAll('img'))) {
+        uniquePush(rows, seen, img.currentSrc || img.src, img.currentSrc || img.src);
+      }
+      for (const node of Array.from(container.querySelectorAll('*'))) {
+        const bg = getComputedStyle(node).backgroundImage;
+        if (bg && bg !== 'none') uniquePush(rows, seen, urlFromCss(bg), urlFromCss(bg));
+      }
+    }
+    return rows;
+  }
+  return {
+    ok: true,
+    url: location.href,
+    title: document.title,
+    images: {
+      main: await collect('#basic\\.carousel_gallery, .goods-basic-line.carouse'),
+      detail: await collect('.detail_pic'),
+      sku: await collect('.goods-spec-sku-v2')
+    }
+  };
+})()
+"""
+        try:
+            with DevToolsWebSocket(target.get("webSocketDebuggerUrl"), timeout=12) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True, "awaitPromise": True})
+                value = result.get("result", {}).get("value", {})
+                if isinstance(value, dict):
+                    total = sum(len(value.get("images", {}).get(key, [])) for key in ("main", "detail", "sku"))
+                    value["status"] = f"已识别素材图片 {total} 张"
+                    return value
+                return {"ok": False, "status": "素材抓取脚本未返回有效结果"}
+        except Exception as exc:
+            return {"ok": False, "status": f"抓取编辑页素材失败：{exc}"}
 
     def _evaluate_page(self, websocket_url):
         if not websocket_url:
@@ -505,7 +1173,9 @@ class PddBrowserMonitor:
   }
 
   const normalizedText = bodyText.replace(/\s+/g, ' ');
+  const isPriceManagement = /价格管理|券前价|商家出资优惠|单件预估实收/.test(`${document.title || ''} ${location.href || ''} ${normalizedText}`);
   const isGoodsList = /商品列表|商品管理|商品ID|商品名称|商品标题|在售中|已售罄|仓库中/.test(normalizedText);
+  const isPromotionPage = !isPriceManagement && /商品推广|商品营销|推广平台|推广计划|推广状态|净目标投产比|目标投产比|净成交出价|成交出价|投产比|adStatusSwitch|GoodsTableBidValue/.test(`${document.title || ''} ${location.href || ''} ${normalizedText}`);
   const parseNumber = value => {
     const n = Number(String(value || '').replace(/,/g, ''));
     return Number.isFinite(n) ? n : null;
@@ -838,7 +1508,41 @@ class PddBrowserMonitor:
     const lineList = text => String(text || '').split(/\n+/).map(x => x.trim()).filter(Boolean);
     const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
     const unique = values => Array.from(new Set(values.map(clean).filter(Boolean)));
-    const allImages = unique(queryAll('img').map(img => img.currentSrc || img.src || img.getAttribute('src') || ''));
+    const imageWidthOf = url => {
+      const match = String(url || '').match(/imageView2\/2\/w\/(\d+)/);
+      return match ? Number(match[1]) || 0 : 0;
+    };
+    const highResImageUrl = url => {
+      let value = clean(url || '');
+      if (!value) return '';
+      try {
+        value = new URL(value, location.href).href;
+      } catch (_error) {
+        return '';
+      }
+      if (!/^https?:\/\//i.test(value)) return '';
+      value = value.replace(/imageView2\/2\/w\/\d+(?:\/q\/\d+)?/, 'imageView2/2/w/1700/q/85');
+      return value;
+    };
+    const imageUrlOf = img => {
+      if (!img) return '';
+      const srcsetUrls = String(img.getAttribute('srcset') || '')
+        .split(',')
+        .map(item => clean(item).split(/\s+/)[0])
+        .filter(Boolean);
+      const candidates = [
+        img.currentSrc,
+        img.src,
+        img.getAttribute('src'),
+        img.getAttribute('data-original'),
+        img.getAttribute('data-origin-src'),
+        img.getAttribute('data-src'),
+        ...srcsetUrls
+      ].map(highResImageUrl).filter(Boolean);
+      candidates.sort((a, b) => imageWidthOf(b) - imageWidthOf(a));
+      return candidates[0] || '';
+    };
+    const allImages = unique(queryAll('img').map(imageUrlOf));
     const visibleDivTexts = queryAll('div,span,p').map(textOf).filter(Boolean);
     const productCard = queryAll('[class*="goodsCard"],[class*="GoodsCard"],[class*="card"],[class*="Card"]')
       .filter(node => /(?:\u5546\u54c1ID|\bID)[:\uff1a]?\s*\d{6,}/.test(textOf(node)))
@@ -852,7 +1556,22 @@ class PddBrowserMonitor:
       })[0] || null;
     const productCardText = textOf(productCard);
     const productCardImgNode = productCard ? productCard.querySelector('img') : null;
-    const productCardImage = productCardImgNode ? (productCardImgNode.currentSrc || productCardImgNode.src || productCardImgNode.getAttribute('src') || '') : '';
+    const productCardImage = imageUrlOf(productCardImgNode);
+    const productImageScore = url => {
+      const value = String(url || '');
+      let score = imageWidthOf(value);
+      if (/gaudit-image/i.test(value)) score += 100000;
+      if (/audit-image/i.test(value)) score += 60000;
+      if (/mms-goods-image/i.test(value)) score += 1000;
+      if (value && value === productCardImage) score += 500;
+      if (/\/w\/(?:40|50|80|100|120)\//.test(value)) score -= 2000;
+      return score;
+    };
+    const bestProductImage = () => {
+      const candidates = unique([productCardImage, ...allImages]);
+      candidates.sort((a, b) => productImageScore(b) - productImageScore(a));
+      return candidates[0] || '';
+    };
     const titleFromProductCard = () => {
       if (!productCard) return '';
       const idNode = Array.from(productCard.querySelectorAll('div,span,p'))
@@ -985,9 +1704,9 @@ class PddBrowserMonitor:
     };
     const firstImageIn = node => {
       const img = node ? node.querySelector('img') : null;
-      return img ? (img.currentSrc || img.src || img.getAttribute('src') || '') : '';
+      return imageUrlOf(img);
     };
-    const imagesIn = node => unique(Array.from(node && node.querySelectorAll ? node.querySelectorAll('img') : []).map(img => img.currentSrc || img.src || img.getAttribute('src') || ''));
+    const imagesIn = node => unique(Array.from(node && node.querySelectorAll ? node.querySelectorAll('img') : []).map(imageUrlOf));
 
     const chooseCodeFromValues = values => {
       for (const value of values) {
@@ -1234,10 +1953,38 @@ class PddBrowserMonitor:
         });
       }
     };
+    const rootPriceSignalCount = (rootText.match(/(?:\u5f53\u524d\u4ef7|\u4ef7\u683c|\u552e\u4ef7)\s*[\uffe5\u00a5]?\s*[0-9]+(?:\.[0-9]{1,2})?/g) || []).length;
+    const extractSpecsFromRootText = () => {
+      const headerMatch = rootText.match(/(?:\u5546\u54c1\u7f16\u7801\s+)?\u89c4\u683c\u4fe1\u606f\s+\u89c4\u683c\u7f16\u7801/);
+      let body = headerMatch ? rootText.slice((headerMatch.index || 0) + headerMatch[0].length) : rootText;
+      body = clean(body)
+        .replace(/(\u8349\u7a3f\u7bb1|\u6b63\u5728\u7f16\u8f91|\u786e\u8ba4\u4fee\u6539\u5f53\u524d\u5546\u54c1\u7f16\u7801|\u81ea\u52a8\u5220\u9664\u8349\u7a3f|\u53bb\u67e5\u770b\u8349\u7a3f).*?(?=\u89c4\u683c\u4fe1\u606f|\u5546\u54c1\u7f16\u7801|$)/g, ' ')
+        .trim();
+      const pattern = /(.{1,160}?)\s*(?:\u5f53\u524d\u4ef7|\u4ef7\u683c|\u552e\u4ef7)[:\uff1a]?\s*([\uffe5\u00a5]?\s*[0-9]+(?:\.[0-9]{1,2})?)(?:\s+([A-Za-z0-9_-]{3,80}))?/g;
+      let match;
+      while ((match = pattern.exec(body))) {
+        const rawSegment = clean(match[0]);
+        const specInfo = specInfoFromText(match[1]);
+        const price = clean(match[2] || '').replace(/\s+/g, '');
+        const directCode = codeFromCodeCell(match[3] || '');
+        const tailCodeCandidate = tailCodeCandidateFromText(rawSegment);
+        if (!specInfo || !price) continue;
+        pushSpec(
+          { spec_info: specInfo, spec_code: directCode || tailCodeCandidate, price, image: '', raw_text: rawSegment },
+          root,
+          rawSegment,
+          {
+            source: directCode || tailCodeCandidate ? 'root-text-sequence-tail-code' : 'root-text-sequence',
+            tail_code_candidate: tailCodeCandidate
+          }
+        );
+        if (specs.length >= 200) break;
+      }
+    };
     extractSpecsFromTables();
     if (!specs.length) extractSpecsFromControlSequence();
 
-    if (!specs.length) {
+    if (!specs.length || rootPriceSignalCount > specs.length) {
       for (const node of candidateNodes) {
         const text = richTextOf(node);
         if (!text || text.length > 1200) continue;
@@ -1263,6 +2010,7 @@ class PddBrowserMonitor:
         if (specs.length >= 200) break;
       }
     }
+    if (rootPriceSignalCount > specs.length) extractSpecsFromRootText();
 
     const collectReactLikeData = () => {
       const results = [];
@@ -1291,7 +2039,7 @@ class PddBrowserMonitor:
         const specCode = codeFromText(jsonText) || (jsonText.match(/"(?:specCode|skuCode|code)"\s*:\s*"([^"]{3,})"/i) || [])[1] || '';
         const price = priceFromText(jsonText) || (jsonText.match(/"(?:price|salePrice|skuPrice)"\s*:\s*"?([0-9]+(?:\.[0-9]{1,2})?)"?/i) || [])[1] || '';
         const specInfo = specInfoFromText(jsonText) || (jsonText.match(/"(?:specName|specInfo|skuName|name)"\s*:\s*"([^"]{1,120})"/i) || [])[1] || '';
-        const image = (jsonText.match(/https?:\\?\/\\?\/[^"',\s]+(?:jpg|jpeg|png|webp)/i) || [])[0] || '';
+        const image = highResImageUrl((jsonText.match(/https?:\\?\/\\?\/[^"',\s]+(?:jpg|jpeg|png|webp)/i) || [])[0] || '');
         if (pushSpec({ spec_info: specInfo, spec_code: specCode, price, image, raw_text: jsonText }, null, jsonText, { source: 'react-json' })) {
           results.push(jsonText.slice(0, 500));
         }
@@ -1313,7 +2061,7 @@ class PddBrowserMonitor:
     };
     const reactDebug = specs.length ? [] : collectReactLikeData();
 
-    const productImages = unique([productCardImage]).slice(0, 1);
+    const productImages = unique([bestProductImage()]).slice(0, 1);
     return {
       product_id: productId,
       title,
@@ -1470,6 +2218,8 @@ class PddBrowserMonitor:
     body_text: bodyText,
     price_links: priceLinks,
     is_goods_list: isGoodsList,
+    is_price_management: isPriceManagement,
+    is_promotion_page: isPromotionPage,
     on_sale_count: onSale.count,
     on_sale_source: onSale.source,
     product_ids: productIds,
@@ -1490,6 +2240,229 @@ class PddBrowserMonitor:
                 return value if isinstance(value, dict) else {"body_text": "", "price_links": []}
         except Exception as exc:
             return {"body_text": f"页面读取失败: {exc}", "price_links": []}
+
+    def _evaluate_promotion_status_page(self, websocket_url):
+        if not websocket_url:
+            return {"ok": False, "status": "未找到可读取的页面", "items": []}
+
+        script = r"""
+(async () => {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const isVisible = node => {
+    if (!node || !node.getBoundingClientRect) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  const digitText = value => {
+    const text = clean(value);
+    const match = text.match(/^\d{6,}$/);
+    return match ? match[0] : '';
+  };
+  const productIdFrom = root => {
+    if (!root) return '';
+    const labeled = clean(root.innerText || root.textContent).match(/(?:商品ID|商品id|商品编号|goods_id|goodsId|ID)[:：]?\s*(\d{6,})/);
+    if (labeled) return labeled[1];
+    const digitNodes = Array.from(root.querySelectorAll('span,a,button,div'))
+      .map(node => ({ node, text: digitText(node.innerText || node.textContent) }))
+      .filter(item => item.text)
+      .sort((a, b) => {
+        const ac = String(a.node.style && a.node.style.cursor || '').includes('pointer') ? 1 : 0;
+        const bc = String(b.node.style && b.node.style.cursor || '').includes('pointer') ? 1 : 0;
+        return bc - ac || b.text.length - a.text.length;
+      });
+    if (digitNodes.length) return digitNodes[0].text;
+    const attrText = [
+      root.getAttribute && root.getAttribute('data-row-key'),
+      root.getAttribute && root.getAttribute('data-id'),
+      root.id,
+      typeof root.className === 'string' ? root.className : ''
+    ].join(' ');
+    const attrMatch = attrText.match(/(\d{6,})/);
+    return attrMatch ? attrMatch[1] : '';
+  };
+  const bidTypeFrom = root => {
+    if (!root) return '';
+    const label = Array.from(root.querySelectorAll('[class*="BidTypeLabel"],div,span'))
+      .map(node => clean(node.innerText || node.textContent))
+      .find(text => /净目标投产比|目标投产比|净成交出价/.test(text));
+    if (label) {
+      if (label.includes('净成交出价')) return '净成交出价';
+      if (label.includes('目标投产比')) return '净目标投产比';
+    }
+    const match = clean(root.innerText || root.textContent).match(/净目标投产比|目标投产比|净成交出价/);
+    if (!match) return '';
+    return match[0].includes('目标投产比') ? '净目标投产比' : match[0];
+  };
+  const bidValueFrom = root => {
+    if (!root) return '';
+    const valueNode = root.querySelector('[data-testid="GoodsTableBidValue"],[class*="BidRow_bidValue"]');
+    const text = clean(valueNode && (valueNode.innerText || valueNode.textContent));
+    if (text) return text;
+    const match = clean(root.innerText || root.textContent).match(/(?:净目标投产比|目标投产比|净成交出价)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    return match ? match[1] : '';
+  };
+  const chooseContainer = switchNode => {
+    let best = switchNode;
+    let bestScore = -1;
+    let node = switchNode;
+    for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
+      const text = clean(node.innerText || node.textContent);
+      let score = 0;
+      if (productIdFrom(node)) score += 20;
+      if (bidTypeFrom(node)) score += 15;
+      if (bidValueFrom(node)) score += 15;
+      if (node.querySelector && node.querySelector('[data-testid^="adStatusSwitch-"],button[role="switch"]')) score += 10;
+      if (/商品|推广|投产|出价/.test(text)) score += 2;
+      score -= depth * 0.2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = node;
+      }
+      if (score >= 50) break;
+    }
+    return best;
+  };
+  const byId = new Map();
+  const debug = [];
+  const rowContainerOf = node => {
+    let current = node;
+    let best = node;
+    let bestScore = -1;
+    for (let depth = 0; current && depth < 12; depth += 1, current = current.parentElement) {
+      const text = clean(current.innerText || current.textContent);
+      let score = 0;
+      if (productIdFrom(current)) score += 20;
+      if (bidTypeFrom(current)) score += 15;
+      if (bidValueFrom(current)) score += 15;
+      if (current.querySelector && current.querySelector('button[role="switch"],[data-testid*="StatusSwitch"],[class*="switch"]')) score += 10;
+      if (/商品|推广|投产|出价/.test(text)) score += 2;
+      if ((current.querySelectorAll && current.querySelectorAll('button,span,div,img,a').length) > 120) score -= 18;
+      score -= depth * 0.15;
+      if (score > bestScore) {
+        bestScore = score;
+        best = current;
+      }
+      if (score >= 50) break;
+    }
+    return best;
+  };
+  const pushItem = (sourceNode, switchNode = null) => {
+    const container = rowContainerOf(sourceNode);
+    const dataTestid = switchNode ? (switchNode.getAttribute('data-testid') || '') : '';
+    const testIdMatch = dataTestid.match(/(?:adStatusSwitch|StatusSwitch)-(\d+)/);
+    const productId = productIdFrom(container) || (testIdMatch ? testIdMatch[1] : '');
+    const bidType = bidTypeFrom(container);
+    const bidValue = bidValueFrom(container);
+    let adEnabled = false;
+    let hasSwitch = false;
+    if (switchNode) {
+      hasSwitch = true;
+      const ariaChecked = switchNode.getAttribute('aria-checked');
+      const className = typeof switchNode.className === 'string' ? switchNode.className : '';
+      adEnabled = ariaChecked === 'true' || /checked/.test(className);
+    } else {
+      const text = clean(container && (container.innerText || container.textContent));
+      adEnabled = /推广中|已开启|启用中|投放中/.test(text) && !/未开启|已暂停|暂停中|关闭/.test(text);
+    }
+    if (!productId && !bidType && !bidValue) return;
+    const item = {
+      product_id: productId,
+      ad_enabled: !!adEnabled,
+      ad_status_text: adEnabled ? '开启' : '关闭',
+      bid_type: bidType,
+      bid_value: bidValue,
+      data_testid: dataTestid,
+      has_switch: hasSwitch,
+      raw_text: clean(container && (container.innerText || container.textContent)).slice(0, 500)
+    };
+    const key = productId || `${dataTestid}-${byId.size}`;
+    byId.set(key, item);
+    debug.push(item);
+  };
+  const collectVisible = () => {
+    const switchNodes = Array.from(document.querySelectorAll('button[role="switch"],[data-testid*="StatusSwitch"],[class*="switch"],[class*="Switch"]'))
+      .filter(node => isVisible(node) && (
+        /StatusSwitch|adStatusSwitch/i.test(String(node.getAttribute('data-testid') || ''))
+        || String(node.getAttribute('role') || '') === 'switch'
+        || /switch/i.test(String(node.className || ''))
+      ));
+    for (const switchNode of switchNodes) {
+      pushItem(switchNode, switchNode);
+    }
+    const bidNodes = Array.from(document.querySelectorAll('[data-testid="GoodsTableBidValue"],[class*="BidRow_bidValue"],[class*="BidTypeLabel"]'))
+      .filter(isVisible);
+    for (const node of bidNodes) {
+      pushItem(node, rowContainerOf(node).querySelector('button[role="switch"],[data-testid*="StatusSwitch"],[class*="switch"],[class*="Switch"]'));
+    }
+  };
+  const scrollables = Array.from(document.querySelectorAll('div,main,section,[class*="table"],[class*="Table"],[class*="list"],[class*="List"],[class*="body"],[class*="Body"]'))
+    .filter(node => {
+      if (!isVisible(node)) return false;
+      const style = window.getComputedStyle(node);
+      return node.scrollHeight > node.clientHeight + 80 && /(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`);
+    })
+    .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+  const scroller = scrollables[0] || document.scrollingElement || document.documentElement || document.body;
+  const setScrollTop = value => {
+    if (scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body) {
+      window.scrollTo(0, value);
+    } else {
+      scroller.scrollTop = value;
+    }
+  };
+  const getScrollTop = () => (
+    scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body
+      ? (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0)
+      : scroller.scrollTop
+  );
+  let maxScroll = Math.max(0, (scroller.scrollHeight || document.body.scrollHeight || 0) - (scroller.clientHeight || window.innerHeight || 0));
+  const originalTop = getScrollTop();
+  const step = Math.max(260, Math.floor((scroller.clientHeight || window.innerHeight || 600) * 0.78));
+  let lastTop = -1;
+  let stableCount = 0;
+  setScrollTop(0);
+  await sleep(350);
+  for (let i = 0; i < 80; i += 1) {
+    collectVisible();
+    const currentTop = getScrollTop();
+    maxScroll = Math.max(0, (scroller.scrollHeight || document.body.scrollHeight || 0) - (scroller.clientHeight || window.innerHeight || 0));
+    if (currentTop >= maxScroll - 4 || Math.abs(currentTop - lastTop) < 4) {
+      stableCount += 1;
+    } else {
+      stableCount = 0;
+    }
+    if (stableCount >= 2) break;
+    lastTop = currentTop;
+    setScrollTop(Math.min(maxScroll, currentTop + step));
+    await sleep(420);
+  }
+  collectVisible();
+  setScrollTop(originalTop);
+  return {
+    ok: true,
+    status: `已识别 ${byId.size} 条推广状态`,
+    title: document.title || '',
+    url: location.href,
+    items: Array.from(byId.values()),
+    debug_items: debug.slice(0, 50),
+    scroll_debug: {
+      scroller_tag: scroller && scroller.tagName || '',
+      max_scroll: maxScroll,
+      collected_debug_count: debug.length
+    },
+    body_sample: clean(document.body && document.body.innerText || '').slice(0, 2000)
+  };
+})()
+"""
+        try:
+            with DevToolsWebSocket(websocket_url, timeout=45) as ws:
+                result = ws.call("Runtime.evaluate", {"expression": script, "returnByValue": True, "awaitPromise": True})
+                value = result.get("result", {}).get("value", {})
+                return value if isinstance(value, dict) else {"ok": False, "status": "推广状态脚本未返回有效结果", "items": []}
+        except Exception as exc:
+            return {"ok": False, "status": f"读取推广状态失败：{exc}", "items": []}
 
     def _evaluate_price_management_page(self, websocket_url):
         if not websocket_url:
@@ -1525,13 +2498,15 @@ class PddBrowserMonitor:
   const discountOf = text => {
     const value = clean(text);
     if (!value || /无优惠|暂无优惠|无商家出资/.test(value)) {
-      return { coupon_amount: '', new_customer_discount: '' };
+      return { coupon_amount: '', new_customer_discount: '', store_full_reduction_amount: '', store_full_reduction_threshold: '', store_full_reduction_text: '' };
     }
+    const storeFullReductionMatch =
+      value.match(/(?:全店满减活动|全店满减|满减)[^0-9]{0,40}满\s*([0-9]+(?:\.[0-9]{1,2})?)\s*减\s*([0-9]+(?:\.[0-9]{1,2})?)/);
     const newCustomerMatch =
       value.match(/(?:新客立减|首件立减)[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
       value.match(/(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?[^0-9]{0,40}(?:新客立减|首件立减)/);
     const couponMatch =
-      /首件立减/.test(value)
+      /首件立减|全店满减活动|全店满减|满减/.test(value)
         ? null
         : (
           value.match(/(?:优惠券|商品立减券|店铺券|立减券)[^0-9￥¥]{0,40}(?:￥|¥)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|块)?/) ||
@@ -1539,7 +2514,10 @@ class PddBrowserMonitor:
         );
     return {
       coupon_amount: couponMatch ? couponMatch[1] : '',
-      new_customer_discount: newCustomerMatch ? newCustomerMatch[1] : ''
+      new_customer_discount: newCustomerMatch ? newCustomerMatch[1] : '',
+      store_full_reduction_amount: storeFullReductionMatch ? storeFullReductionMatch[2] : '',
+      store_full_reduction_threshold: storeFullReductionMatch ? storeFullReductionMatch[1] : '',
+      store_full_reduction_text: storeFullReductionMatch ? `满${storeFullReductionMatch[1]}减${storeFullReductionMatch[2]}` : ''
     };
   };
   const priceAndTagOf = text => {
@@ -1596,10 +2574,7 @@ class PddBrowserMonitor:
       node.scrollIntoView({ block: 'center', inline: 'center' });
     } catch (e) {}
     try {
-      for (const type of ['mouseover', 'mousedown', 'mouseup', 'click']) {
-        node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-      }
-      if (typeof node.click === 'function') node.click();
+      node.click();
       return true;
     } catch (e) {
       return false;
@@ -1638,7 +2613,6 @@ class PddBrowserMonitor:
       try {
         const clickable = node.closest('a,button,[role="button"]') || node;
         fireClick(clickable);
-        fireClick(node);
         await sleep(1600);
         return 1;
       } catch (e) {
@@ -1647,30 +2621,17 @@ class PddBrowserMonitor:
     }
     return 0;
   };
-  const clickCollapseSpecs = async () => {
-    const nodes = Array.from(document.querySelectorAll('button,a,[role="button"],span,div'))
-      .filter(isVisible)
-      .filter(node => /收起/.test(textOf(node)));
-    let clicked = 0;
-    for (const node of nodes.slice(0, 30)) {
-      const clickable = node.closest('a,button,[role="button"]') || node;
-      if (fireClick(clickable) || fireClick(node)) clicked += 1;
-    }
-    if (clicked) await sleep(300);
-    return clicked;
-  };
-
   const scrollables = Array.from(document.querySelectorAll('div,main,section,[class*="table"],[class*="Table"],[class*="list"],[class*="List"]'))
     .filter(node => node.scrollHeight && node.clientHeight && node.scrollHeight > node.clientHeight + 60)
     .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))
-    .slice(0, 5);
+    .slice(0, 1);
   let moreSpecClickCount = 0;
   moreSpecClickCount += await clickExpandAllSpecs();
   await sleep(600);
-  for (let i = 0; i < 7; i += 1) {
+  for (let i = 0; i < 2; i += 1) {
     window.scrollTo(0, document.body.scrollHeight);
     for (const node of scrollables) node.scrollTop = node.scrollHeight;
-    await sleep(420);
+    await sleep(700);
   }
   window.scrollTo(0, 0);
   for (const node of scrollables) node.scrollTop = 0;
@@ -1800,7 +2761,7 @@ class PddBrowserMonitor:
     const result = [];
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i];
-      if (/(优惠券|商品立减券|店铺券|立减券|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(line)) {
+      if (/(优惠券|商品立减券|店铺券|立减券|全店满减活动|全店满减|满减|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(line)) {
         const prev = lines[i - 1] || '';
         result.push(moneyValue(prev) && !/(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动)/.test(prev) ? `${prev} ${line}` : line);
       }
@@ -1825,7 +2786,7 @@ class PddBrowserMonitor:
         if (!isPriceLine(priceLine)) continue;
         if (!/(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动)/.test(tagLine)) continue;
         const priceSource = `${priceLine} ${tagLine}`;
-        const discountSource = /(优惠券|商品立减券|店铺券|立减券|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(discountTextLine)
+        const discountSource = /(优惠券|商品立减券|店铺券|立减券|全店满减活动|全店满减|满减|新客立减|首件立减|无优惠|暂无优惠|无商家出资)/.test(discountTextLine)
           ? `${discountAmountLine} ${discountTextLine}`
           : '';
         const receiptSource = moneyValue(receiptLine) ? receiptLine : '';
@@ -1854,6 +2815,9 @@ class PddBrowserMonitor:
           merchant_discount_text: clean(parsed.discount_source).slice(0, 160),
           coupon_amount: discounts.coupon_amount,
           new_customer_discount: discounts.new_customer_discount,
+          store_full_reduction_amount: discounts.store_full_reduction_amount,
+          store_full_reduction_threshold: discounts.store_full_reduction_threshold,
+          store_full_reduction_text: discounts.store_full_reduction_text,
           final_receipt: finalReceipt,
           raw_text: clean(parsed.raw_text || rowText).slice(0, 500)
         });
@@ -1864,7 +2828,7 @@ class PddBrowserMonitor:
     const specLines = specNameLinesOf(specCellText);
     const beforeCellMoneyValues = moneyValuesOf(beforeCellText);
     const beforeCellIsCombined = beforeCellMoneyValues.length >= 2
-      && /(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动|无优惠|优惠券|新客立减)/.test(beforeCellText);
+      && /(拼单价|限量折扣|大促搜索池|场景专属|首页推荐专区|9块9|搜索池|秒杀|活动价|营销活动|无优惠|优惠券|全店满减活动|全店满减|满减|新客立减)/.test(beforeCellText);
     const operationCellText = /商品预览|商品管理|查看活动价记录|设置红线价|修改满\d+件折扣|价格及优惠详情/.test(receiptCellText)
       ? ''
       : receiptCellText;
@@ -1894,6 +2858,9 @@ class PddBrowserMonitor:
         merchant_discount_text: clean(discountSource).slice(0, 160),
         coupon_amount: discounts.coupon_amount,
         new_customer_discount: discounts.new_customer_discount,
+        store_full_reduction_amount: discounts.store_full_reduction_amount,
+        store_full_reduction_threshold: discounts.store_full_reduction_threshold,
+        store_full_reduction_text: discounts.store_full_reduction_text,
         final_receipt: finalReceipt,
         raw_text: clean(rowText).slice(0, 500)
       });
@@ -1941,6 +2908,9 @@ class PddBrowserMonitor:
         merchant_discount_text: clean(discountText).slice(0, 160),
         coupon_amount: discounts.coupon_amount,
         new_customer_discount: discounts.new_customer_discount,
+        store_full_reduction_amount: discounts.store_full_reduction_amount,
+        store_full_reduction_threshold: discounts.store_full_reduction_threshold,
+        store_full_reduction_text: discounts.store_full_reduction_text,
         final_receipt: finalReceipt,
         raw_text: clean(rowText).slice(0, 500)
       });
@@ -1969,6 +2939,9 @@ class PddBrowserMonitor:
         merchant_discount_text: clean(text).slice(0, 160),
         coupon_amount: discounts.coupon_amount,
         new_customer_discount: discounts.new_customer_discount,
+        store_full_reduction_amount: discounts.store_full_reduction_amount,
+        store_full_reduction_threshold: discounts.store_full_reduction_threshold,
+        store_full_reduction_text: discounts.store_full_reduction_text,
         final_receipt: receiptMatch ? receiptMatch[1] : '',
         raw_text: clean(text).slice(0, 500)
       });
@@ -1976,7 +2949,6 @@ class PddBrowserMonitor:
   }
 
   const items = Array.from(productMap.values()).filter(item => item.specs.length);
-  const collapseClickCount = await clickCollapseSpecs();
   return {
     body_text: bodyText,
     is_price_management: isPriceManagement,
@@ -1987,7 +2959,7 @@ class PddBrowserMonitor:
       header_index: idx,
       scrollable_count: scrollables.length,
       more_spec_click_count: moreSpecClickCount,
-      collapse_spec_click_count: collapseClickCount
+      collapse_spec_click_count: 0
     }
   };
 })()

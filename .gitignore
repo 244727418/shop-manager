@@ -9,6 +9,7 @@ dist/
 
 # Python cache
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.pyd
@@ -27,14 +28,18 @@ venv_package/
 
 # Runtime data and secrets
 manager/cloud_accounts.json
+manager/archive_accounts.json
 manager/**/*.db
+*.db
 manager/**/backup_data.json
 manager/**/cloud_backup_before_upload/
 manager/**/local_backup_before_download/
 manager/**/local_backup_before_upload/
 manager/**/local_current/
 manager/browser_profiles/
+.codex-browser-profile/
 archive/private/
+tmp*/
 *.log
 *.tmp
 *.temp

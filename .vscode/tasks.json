@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run Shop Manager",
+            "label": "Run Shop Manager (no debugger)",
             "type": "shell",
-            "command": "${workspaceFolder}\\venv_package\\Scripts\\python.exe",
+            "command": "D:\\tools\\conda310\\envs\\shop\\python.exe",
             "args": [
                 "${workspaceFolder}\\manager\\shop_manager.py"
             ],
@@ -17,6 +17,11 @@
                 "reveal": "always",
                 "focus": false,
                 "panel": "shared"
+            },
+            "options": {
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                }
             },
             "problemMatcher": []
         }

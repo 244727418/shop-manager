@@ -17,6 +17,11 @@ try:
 except Exception:
     get_column_letter = lambda c: chr(64 + c)
 
+try:
+    from manager.file_dialog_memory import remembered_save_file
+except ImportError:
+    from file_dialog_memory import remembered_save_file
+
 
 class ProfitAnalysisDialog(QDialog):
     """利润分析建议对话框"""
@@ -585,27 +590,6 @@ class ProfitAnalysisDialog(QDialog):
                 common_section = "\n\n【用户-重要运营常识提醒】\n" + "\n".join([f"- {p}" for p in common_prompts])
                 prompt = prompt + common_section
 
-            # 知识库功能已分离为独立项目，移除相关代码
-            # saved_titles = self.db.get_setting("selected_knowledge_titles", "")
-            # if saved_titles:
-            #     title_list = [t.strip() for t in saved_titles.split(",") if t.strip()]
-            #     if title_list:
-            #         knowledge_items = self.db.get_knowledge_items_by_titles(title_list)
-            #         if knowledge_items:
-            #             knowledge_section = "\n\n【本地知识库参考】\n"
-            #             for item in knowledge_items:
-            #                 knowledge_section += f"\n【{item['title']}】\n{item['content']}\n"
-            #             prompt = prompt + knowledge_section
-            # else:
-            #     use_rag = self.db.get_setting("use_rag_retrieval", "1") == "1"
-            #     if use_rag:
-            #         rag_results = self.db.rag_retrieve(prompt[:500], top_k=3)
-            #         if rag_results:
-            #             knowledge_section = "\n\n【本地知识库参考（RAG检索）】\n"
-            #             for item in rag_results:
-            #                 knowledge_section += f"\n【{item['title']}】(相似度:{item['similarity']:.2f})\n{item['content']}\n"
-            #             prompt = prompt + knowledge_section
-
             store_memo = ""
             if self.result_data.get("target_id"):
                 try:
@@ -713,26 +697,26 @@ class ProfitAnalysisDialog(QDialog):
 
 class ProfitCalculatorDialog(QDialog):
     """利润计算器对话框"""
-    def __init__(self, margin_rate, avg_price, target_id=None, target_name="", data_type="product", parent=None, db_manager=None):
-        super().__init__(parent)
+    def __init__(self, margin_rate, avg_price, target_id=None, target_name="", data_type="product", parent=None, db_manager=None, return_rate=0.0, quick_mode=False):
+        super().__init__(None)
+        self.owner = parent
         self.margin_rate = margin_rate
         self.avg_price = avg_price
+        self.return_rate = return_rate
+        self.quick_mode = quick_mode
         self.target_id = target_id
         self.target_name = target_name
         self.data_type = data_type
         self.last_result = None
         self.db = db_manager
         self.setWindowTitle("🧮 利润计算器")
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.resize(700, 650)
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-
-        self._debug_pc_label = QLabel("【板块:利润计算器对话框\n文件:profit.py】推广费/投产比/退货率/毛利率/计算结果")
-        self._debug_pc_label.setStyleSheet("background-color: #FFA07A; color: #000; font-weight: bold; padding: 1px;")
-        self._debug_pc_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._debug_pc_label)
 
         header = QLabel("💰 利润计算器")
         header.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; padding: 10px;")
@@ -756,6 +740,10 @@ class ProfitCalculatorDialog(QDialog):
         input_layout.addWidget(QLabel("退货率 (%):"), 2, 0)
         self.return_rate_input = QLineEdit()
         self.return_rate_input.setPlaceholderText("请输入退货率...")
+        self.return_rate_input.setText(f"{float(self.return_rate or 0):.2f}")
+        self.return_rate_input.setReadOnly(self.quick_mode)
+        if self.quick_mode:
+            self.return_rate_input.setStyleSheet("background-color: #e8f5e9; color: #2e7d32;")
         self.return_rate_input.setFixedWidth(150)
         input_layout.addWidget(self.return_rate_input, 2, 1)
 
@@ -1530,8 +1518,8 @@ class ProfitHistoryDialog(QDialog):
             QMessageBox.warning(self, "提示", "请先选择要导出的记录！")
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "导出数据",
+        file_path, _ = remembered_save_file(
+            self, self.db, "导出数据",
             f"利润记录_{self.target_name}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             "Excel Files (*.xlsx)"
         )

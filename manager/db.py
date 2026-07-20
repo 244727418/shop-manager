@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-数据库与 RAG 层：SafeDatabaseManager。
-负责 SQLite 连接、表结构、迁移、CRUD、知识库与向量检索。
+数据库访问层：SafeDatabaseManager。
+负责 SQLite 连接、表结构、迁移和 CRUD。
 """
 import os
 import sys
@@ -11,6 +11,22 @@ import sqlite3
 import hashlib
 import math
 from datetime import datetime
+
+try:
+    from manager.crash_report import append_exception
+except ImportError:
+    try:
+        from crash_report import append_exception
+    except ImportError:
+        append_exception = None
+
+try:
+    from manager.data_root import DataRootManager
+except ImportError:
+    try:
+        from data_root import DataRootManager
+    except ImportError:
+        DataRootManager = None
 
 
 class SafeDatabaseManager:
@@ -36,26 +52,37 @@ class SafeDatabaseManager:
             "step_fee": 1,
         },
     }
+    COMMON_SETTING_PREFIXES = ("ai_", "quick_hotkey_", "update_")
+    COMMON_SETTING_KEYS = {"auto_start_enabled", "cost_library_mode", "cost_misc_fee", "cost_shipping_rules_json"}
 
     def __init__(self, db_name="shop_manager.db"):
         try:
-            if getattr(sys, 'frozen', False):
-                script_dir = os.path.dirname(sys.executable)
+            if os.path.isabs(str(db_name)):
+                db_path = str(db_name)
+                os.makedirs(os.path.dirname(db_path), exist_ok=True)
             else:
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-            db_path = os.path.join(script_dir, db_name)
+                if getattr(sys, 'frozen', False):
+                    script_dir = os.path.dirname(sys.executable)
+                else:
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                db_path = os.path.join(script_dir, db_name)
             self.db_path = db_path
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA foreign_keys = ON")
             self.cursor = self.conn.cursor()
             self.init_db()
         except Exception as e:
+            if append_exception:
+                append_exception("database initialization", e)
             print(f"数据库初始化失败: {e}")
             raise
 
     def init_db(self):
+        migrated_off_shelf_column = False
         try:
+            self.cursor.execute("DROP TABLE IF EXISTS knowledge_base")
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS stores 
-                                (id INTEGER PRIMARY KEY, name TEXT, sort_order INTEGER, memo TEXT)''')
+                                (id INTEGER PRIMARY KEY, name TEXT, sort_order INTEGER, memo TEXT, store_discount_rules TEXT)''')
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS products 
                                 (id INTEGER PRIMARY KEY, store_id INTEGER, name TEXT, 
                                 url TEXT, image_path TEXT, sort_order INTEGER)''')
@@ -85,6 +112,9 @@ class SafeDatabaseManager:
             if 'sitewide_roi' not in store_columns:
                 self.cursor.execute("ALTER TABLE stores ADD COLUMN sitewide_roi REAL DEFAULT 0")
                 print("已添加sitewide_roi字段到stores表")
+            if 'store_discount_rules' not in store_columns:
+                self.cursor.execute("ALTER TABLE stores ADD COLUMN store_discount_rules TEXT")
+                print("已添加store_discount_rules字段到stores表")
 
             self.cursor.execute("PRAGMA table_info(products)")
             columns = [col[1] for col in self.cursor.fetchall()]
@@ -126,6 +156,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加current_roi字段到products表")
                 except Exception as e:
                     print(f"添加current_roi字段失败: {e}")
+            if 'use_manual_spec_weight' not in columns:
+                try:
+                    self.cursor.execute("ALTER TABLE products ADD COLUMN use_manual_spec_weight INTEGER DEFAULT 0")
+                    print("added use_manual_spec_weight column to products")
+                except Exception as e:
+                    print(f"add use_manual_spec_weight failed: {e}")
             if 'transaction_bid' not in columns:
                 try:
                     self.cursor.execute("ALTER TABLE products ADD COLUMN transaction_bid REAL DEFAULT 0")
@@ -232,6 +268,9 @@ class SafeDatabaseManager:
                     print("已添加archived_at字段到products表")
                 except Exception as e:
                     print(f"添加archived_at字段失败: {e}")
+            if 'is_violation' not in columns:
+                self.cursor.execute("ALTER TABLE products ADD COLUMN is_violation INTEGER DEFAULT 0")
+                print("已添加is_violation字段到products表")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
                                 (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL, test_price REAL,
@@ -387,6 +426,7 @@ class SafeDatabaseManager:
                                 sale_price REAL,
                                 weight_percent REAL,
                                 is_locked INTEGER DEFAULT 0,
+                                is_temporarily_off_shelf INTEGER DEFAULT 0,
                                 spec_image_data BLOB,
                                 FOREIGN KEY (product_id) REFERENCES products (id))''')
 
@@ -404,6 +444,12 @@ class SafeDatabaseManager:
                     print("✅ 已添加spec_image_data字段到product_specs表")
                 except Exception as e:
                     print(f"添加spec_image_data字段失败: {e}")
+            if 'is_temporarily_off_shelf' not in spec_columns:
+                self.cursor.execute(
+                    "ALTER TABLE product_specs ADD COLUMN is_temporarily_off_shelf INTEGER DEFAULT 0"
+                )
+                migrated_off_shelf_column = True
+                print("已添加is_temporarily_off_shelf字段到product_specs表")
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS profit_records 
                                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -471,45 +517,6 @@ class SafeDatabaseManager:
                 created_at TEXT,
                 updated_at TEXT,
                 UNIQUE(store_id))''')
-
-            self.cursor.execute('''CREATE TABLE IF NOT EXISTS knowledge_base (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                is_active INTEGER DEFAULT 1,
-                is_system INTEGER DEFAULT 0,
-                embedding BLOB,
-                created_at TEXT,
-                updated_at TEXT)''')
-
-            self.cursor.execute("PRAGMA table_info(knowledge_base)")
-            kb_columns = [col[1] for col in self.cursor.fetchall()]
-            if 'is_system' not in kb_columns:
-                try:
-                    self.cursor.execute("ALTER TABLE knowledge_base ADD COLUMN is_system INTEGER DEFAULT 0")
-                    print("✅ 已添加is_system字段到knowledge_base表")
-                except Exception as e:
-                    print(f"添加is_system字段失败: {e}")
-
-            if 'embedding' not in kb_columns:
-                try:
-                    self.cursor.execute("ALTER TABLE knowledge_base ADD COLUMN embedding BLOB")
-                    print("✅ 已添加embedding字段到knowledge_base表")
-                except Exception as e:
-                    print(f"添加embedding字段失败: {e}")
-
-            if 'sort_order' not in kb_columns:
-                try:
-                    self.cursor.execute("ALTER TABLE knowledge_base ADD COLUMN sort_order INTEGER DEFAULT 0")
-                    print("✅ 已添加sort_order字段到knowledge_base表")
-                except Exception as e:
-                    print(f"添加sort_order字段失败: {e}")
-
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_kb_file_name ON knowledge_base(file_name)")
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_kb_title ON knowledge_base(title)")
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_kb_file_path ON knowledge_base(file_path)")
             self.conn.commit()
 
             self.cursor.execute("PRAGMA table_info(daily_records)")
@@ -562,17 +569,7 @@ class SafeDatabaseManager:
             self.cursor.execute("PRAGMA table_info(imported_orders)")
             imported_columns = [col[1] for col in self.cursor.fetchall()]
 
-            if 'product_id' in imported_columns:
-                self.cursor.execute(f"PRAGMA table_info(imported_orders)")
-                columns_info = self.cursor.fetchall()
-                for col in columns_info:
-                    if col[1] == 'product_id':
-                        col_type = col[2]
-                        if col_type == 'INTEGER':
-                            print("🔄 检测到 product_id 为 INTEGER，开始迁移为 TEXT...")
-                            self._migrate_imported_orders_product_id_to_text()
-                        break
-            else:
+            if 'product_id' not in imported_columns:
                 try:
                     self.cursor.execute("ALTER TABLE imported_orders ADD COLUMN product_id TEXT")
                     print("✅ 已添加product_id字段到imported_orders表")
@@ -596,6 +593,13 @@ class SafeDatabaseManager:
                     print("✅ 已添加refund_count字段到imported_orders表")
                 except Exception as e:
                     print(f"添加refund_count字段失败: {e}")
+
+            self.cursor.execute("PRAGMA table_info(imported_orders)")
+            imported_info = self.cursor.fetchall()
+            imported_types = {col[1]: str(col[2] or "").upper() for col in imported_info}
+            if imported_types.get('product_id') != 'TEXT':
+                print("🔄 检测到 imported_orders.product_id 不是 TEXT，开始迁移...")
+                self._migrate_imported_orders_product_id_to_text()
 
             # 检查并迁移 import_history.snapshot_data（旧数据格式转换）
             self._migrate_import_history_snapshot_data()
@@ -752,10 +756,74 @@ class SafeDatabaseManager:
                 is_reminded INTEGER DEFAULT 0,
                 created_time TEXT NOT NULL
             )''')
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_tasks_product_status ON daily_tasks(product_id, is_completed)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_reminders_product_status ON task_reminders(product_id, is_reminded)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_reminders_due ON task_reminders(is_reminded, remind_time)")
+            self._validate_required_schema()
             print("✅ 任务提醒表已创建")
 
+            self.conn.commit()
+            if migrated_off_shelf_column:
+                self.repair_missing_promotion_profits()
+            if self.get_setting("garbage_link_detection_v3_rebuilt", "0") != "1":
+                self.reconcile_garbage_link_tasks()
+                self.set_setting("garbage_link_detection_v3_rebuilt", "1")
         except Exception as e:
-            print(f"数据库表创建失败：{e}")
+            self.conn.rollback()
+            raise RuntimeError(f"数据库表创建失败：{e}") from e
+
+    def _validate_required_schema(self):
+        required_columns = {
+            "stores": {
+                "memo", "weight_synced", "image_data", "sitewide_roi", "store_discount_rules",
+            },
+            "products": {
+                "title", "coupon_amount", "new_customer_discount", "store_weight",
+                "store_weight_locked", "current_roi", "use_manual_spec_weight",
+                "transaction_bid", "return_rate", "is_limited_time", "is_marketing",
+                "is_natural_flow", "is_sitewide_managed", "profit_status",
+                "net_break_even_roi", "image_data", "product_category_label",
+                "product_memo", "link_combo_id", "link_type", "roi_input_mode",
+                "is_archived", "archived_at", "is_violation",
+            },
+            "cost_library": {
+                "spec_name", "test_price", "quantity", "sort_order", "source_bg_color",
+                "category_label", "category_color", "product_attribute",
+                "product_attribute_combo_disabled", "product_attribute_is_combo",
+                "manual_sort_order", "product_cost", "unit_weight", "shipping_fee",
+                "misc_fee", "cost_calc_mode",
+            },
+            "product_specs": {"is_locked", "spec_image_data", "is_temporarily_off_shelf"},
+            "daily_records": {"category", "special_info"},
+            "imported_orders": {"product_id", "order_date", "actual_amount", "refund_count"},
+            "profit_records": {
+                "profit_per_transaction", "best_roi", "net_break_even_roi",
+                "net_break_even_125", "net_break_even_value",
+                "net_break_even_125_from_net", "best_roi_from_net",
+                "current_roi_multiple", "ai_analysis",
+            },
+            "promotion_daily_data": {"product_title", "net_profit", "net_margin_rate"},
+        }
+        missing = []
+        for table, expected in required_columns.items():
+            actual = {row[1] for row in self.cursor.execute(f"PRAGMA table_info({table})")}
+            missing.extend(f"{table}.{column}" for column in sorted(expected - actual))
+
+        imported_types = {
+            row[1]: str(row[2] or "").upper()
+            for row in self.cursor.execute("PRAGMA table_info(imported_orders)")
+        }
+        if imported_types.get("product_id") != "TEXT":
+            missing.append("imported_orders.product_id(TEXT)")
+
+        cost_indexes = {
+            row[1] for row in self.cursor.execute("PRAGMA index_list(cost_library)")
+        }
+        if "idx_cost_library_spec_code_unique" not in cost_indexes:
+            missing.append("cost_library.idx_cost_library_spec_code_unique")
+
+        if missing:
+            raise RuntimeError("数据库结构不完整: " + ", ".join(missing))
 
     def _migrate_imported_orders_product_id_to_text(self):
         """迁移 imported_orders.product_id 从 INTEGER (products.id) 改为 TEXT (products.name)
@@ -940,8 +1008,19 @@ class SafeDatabaseManager:
             self.conn.commit()
             return self.cursor
         except Exception as e:
+            self.conn.rollback()
+            if append_exception:
+                append_exception(f"database write: {query[:120]}", e)
             print(f"数据库操作失败: {query}, 错误: {e}")
-            return None
+            raise
+
+    def save_product_weights(self, rows):
+        """Atomically save product weights to avoid partial or repeated commits."""
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE products SET store_weight=?, store_weight_locked=? WHERE id=?",
+                rows,
+            )
 
     def safe_fetchall(self, query, params=()):
         try:
@@ -951,8 +1030,134 @@ class SafeDatabaseManager:
             print(f"数据库查询失败: {query}, 错误: {e}")
             return []
 
+    def close(self):
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def reconcile_garbage_link_tasks(self, store_id=None, imported_at=None):
+        if store_id is None:
+            return sum(
+                self.reconcile_garbage_link_tasks(row[0], imported_at)
+                for row in self.safe_fetchall("SELECT id FROM stores")
+            )
+
+        recent_data = {}
+        rows = self.safe_fetchall(
+            """SELECT product_id, net_orders FROM (
+                   SELECT product_id, net_orders,
+                          ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY record_date DESC) AS recent_rank
+                   FROM promotion_daily_data WHERE store_id=?
+               ) WHERE recent_rank<=2
+               ORDER BY product_id, recent_rank""",
+            (store_id,),
+        )
+        for product_code, net_orders in rows:
+            recent_data.setdefault(str(product_code), []).append(float(net_orders or 0))
+
+        now = datetime.now()
+        created = 0
+        products = self.safe_fetchall(
+            """SELECT id, name, title, COALESCE(is_natural_flow, 0) FROM products
+               WHERE store_id=? AND COALESCE(is_archived, 0)=0
+                 AND COALESCE(is_violation, 0)=0""",
+            (store_id,),
+        )
+        for product_id, product_code, title, is_natural_flow in products:
+            values = recent_data.get(str(product_code or "").strip(), [])
+            is_garbage = (
+                not bool(is_natural_flow)
+                and len(values) == 2
+                and all(value <= 0 for value in values)
+            )
+            task_args = (store_id, product_id)
+            if not is_garbage:
+                self.safe_execute(
+                    "DELETE FROM daily_tasks WHERE store_id=? AND product_id=? AND is_completed=0 AND task_content LIKE '【垃圾链接】%'",
+                    task_args,
+                )
+                continue
+            exists = self.safe_fetchall(
+                "SELECT id FROM daily_tasks WHERE store_id=? AND product_id=? AND task_content LIKE '【垃圾链接】%' LIMIT 1",
+                task_args,
+            )
+            if exists:
+                continue
+            created_time = imported_at or now.strftime("%Y-%m-%d %H:%M:%S")
+            self.safe_execute(
+                """INSERT INTO daily_tasks (store_id, product_id, year, month, day, task_content, created_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (store_id, product_id, now.year, now.month, now.day,
+                 f"【垃圾链接】该链接最近两条推广数据记录净成交笔数均为 0。商品ID：{product_code}；标题：{title or ''}", created_time),
+            )
+            created += 1
+        return created
+
+    @staticmethod
+    def _delete_product_rows(cursor, product_id):
+        row = cursor.execute("SELECT store_id, name FROM products WHERE id=?", (product_id,)).fetchone()
+        if not row:
+            return False
+        store_id, product_code = row
+        for table in ("product_specs", "records", "product_image_history", "daily_tasks", "task_reminders"):
+            cursor.execute(f"DELETE FROM {table} WHERE product_id=?", (product_id,))
+        cursor.execute(
+            "DELETE FROM profit_records WHERE data_type='product' AND target_id=?",
+            (product_id,),
+        )
+        cursor.execute("DELETE FROM imported_orders WHERE store_id=? AND product_id=?", (store_id, product_code))
+        cursor.execute("DELETE FROM promotion_daily_data WHERE store_id=? AND product_id=?", (store_id, product_code))
+        cursor.execute("DELETE FROM products WHERE id=?", (product_id,))
+        return True
+
+    def delete_product_cascade(self, product_id):
+        with self.conn:
+            return self._delete_product_rows(self.conn.cursor(), product_id)
+
+    def delete_store_cascade(self, store_id):
+        with self.conn:
+            cursor = self.conn.cursor()
+            product_ids = [row[0] for row in cursor.execute("SELECT id FROM products WHERE store_id=?", (store_id,))]
+            for product_id in product_ids:
+                self._delete_product_rows(cursor, product_id)
+            for table in (
+                "store_records", "daily_records", "historical_data", "manual_margin_data",
+                "store_temp_images", "promotion_daily_data", "imported_orders", "import_history",
+                "daily_tasks", "task_reminders", "store_prompts",
+            ):
+                cursor.execute(f"DELETE FROM {table} WHERE store_id=?", (store_id,))
+            cursor.execute("DELETE FROM profit_records WHERE data_type='store' AND target_id=?", (store_id,))
+            cursor.execute("DELETE FROM stores WHERE id=?", (store_id,))
+        return True
+
+    def replace_imported_orders(self, store_id, history_row, order_rows):
+        with self.conn:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO import_history
+                    (store_id, import_time, file_name, total_products, total_specs,
+                     total_orders, total_amount, snapshot_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, history_row)
+            cursor.execute("DELETE FROM imported_orders WHERE store_id=?", (store_id,))
+            cursor.executemany("""
+                INSERT INTO imported_orders
+                    (store_id, product_id, spec_code, order_count, import_time,
+                     order_date, actual_amount, refund_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, order_rows)
+
     def get_setting(self, key, default=None):
         try:
+            if self._is_common_setting_key(key):
+                common = self._load_common_settings()
+                if key in common:
+                    return common.get(key, default)
             res = self.safe_fetchall("SELECT value FROM settings WHERE key=?", (key,))
             return res[0][0] if res else default
         except Exception as e:
@@ -961,9 +1166,55 @@ class SafeDatabaseManager:
 
     def set_setting(self, key, value):
         try:
+            if self._is_common_setting_key(key):
+                common = self._load_common_settings()
+                common[key] = str(value)
+                if self._save_common_settings(common):
+                    return
             self.safe_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         except Exception as e:
             print(f"保存设置失败: {e}")
+
+    def _is_common_setting_key(self, key):
+        key = str(key or "")
+        return key in self.COMMON_SETTING_KEYS or any(key.startswith(prefix) for prefix in self.COMMON_SETTING_PREFIXES)
+
+    def _common_settings_path(self):
+        if DataRootManager is None:
+            return None
+        try:
+            manager = DataRootManager()
+            root = manager.get_data_root()
+            if not root:
+                return None
+            manager.ensure_structure(root)
+            return manager.common_settings_path(root)
+        except Exception:
+            return None
+
+    def _load_common_settings(self):
+        path = self._common_settings_path()
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_common_settings(self, data):
+        path = self._common_settings_path()
+        if not path:
+            return False
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data or {}, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"保存通用设置失败: {e}")
+            return False
 
     def get_cost_library_mode(self):
         mode = str(self.get_setting("cost_library_mode", "total") or "total").strip().lower()
@@ -1026,8 +1277,9 @@ class SafeDatabaseManager:
         rules = self.get_cost_shipping_rules()
         for rule in sorted(rules.get("ranges", []), key=lambda item: float(item.get("max") or 0)):
             max_weight = float(rule.get("max") or 0)
-            min_weight = float(rule.get("min") or 0)
-            if weight <= max_weight and weight > min_weight:
+            # Shipping prices are weight ceilings; ignoring a mistyped lower bound
+            # prevents a configured gap from silently producing a zero fee.
+            if max_weight > 0 and weight <= max_weight:
                 return round(float(rule.get("fee") or 0), 2)
         over = rules.get("over", {})
         threshold = float(over.get("threshold") or 0)
@@ -1299,17 +1551,42 @@ class SafeDatabaseManager:
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def get_link_combinations_with_counts(self, store_id=None):
+    def get_link_combinations_with_counts(self, store_id=None, product_code_search=""):
         try:
             store_clause = " AND p.store_id = ?" if store_id is not None else ""
-            params = (store_id,) if store_id is not None else ()
+            params = [store_id] if store_id is not None else []
+            where_clause = ""
+            search_terms = [term.strip().lower() for term in str(product_code_search or "").split() if term.strip()]
+            if search_terms:
+                exists_store_clause = " AND p2.store_id = ?" if store_id is not None else ""
+                where_parts = [
+                    "EXISTS (SELECT 1 FROM products p2 WHERE p2.link_combo_id = lc.id AND COALESCE(p2.is_archived, 0) = 0"
+                    + exists_store_clause
+                ]
+                if store_id is not None:
+                    params.append(store_id)
+                for term in search_terms:
+                    if term in ("无链接类型", "没有链接类型", "空链接类型", "未设置链接类型"):
+                        where_parts.append("AND COALESCE(p2.link_type, '') = ''")
+                    else:
+                        where_parts.append(
+                            "AND (LOWER(COALESCE(p2.name, '')) LIKE ? "
+                            "OR LOWER(COALESCE(p2.title, '')) LIKE ? "
+                            "OR LOWER(COALESCE(p2.link_type, '')) LIKE ? "
+                            "OR LOWER(COALESCE(lc.name, '')) LIKE ?)"
+                        )
+                        params.extend([f"%{term}%"] * 4)
+                where_parts.append(")")
+                where_clause = "WHERE " + " ".join(where_parts)
             return self.safe_fetchall(
                 f"""SELECT lc.id, lc.name, COALESCE(lc.sort_order, 0), COUNT(p.id) AS link_count
                    FROM link_combinations lc
-                   LEFT JOIN products p ON p.link_combo_id = lc.id{store_clause}
+                   LEFT JOIN products p ON p.link_combo_id = lc.id
+                    AND COALESCE(p.is_archived, 0) = 0{store_clause}
+                   {where_clause}
                    GROUP BY lc.id, lc.name, lc.sort_order
                    ORDER BY COALESCE(lc.sort_order, 0), lc.name""",
-                params,
+                tuple(params),
             )
         except Exception as e:
             print(f"读取链接组合失败: {e}")
@@ -1438,6 +1715,342 @@ class SafeDatabaseManager:
             print(f"批量更新链接商品类型失败: {e}")
             return 0
 
+    def calculate_product_gross_margin_metrics(self, product_id):
+        """统一计算链接综合毛利口径：券后价、规格权重、成本库成本。"""
+        result = {
+            "gross_margin_pct": None,
+            "avg_final_price": None,
+            "avg_gross_profit": None,
+            "total_weight": 0.0,
+            "valid_spec_count": 0,
+            "spec_count": 0,
+            "discount_amount": 0.0,
+            "weight_source": "saved",
+            "recognized_order_count": 0.0,
+        }
+        try:
+            product_rows = self.safe_fetchall(
+                "SELECT coupon_amount, new_customer_discount, name, store_id, COALESCE(use_manual_spec_weight, 0) FROM products WHERE id=?",
+                (product_id,),
+            )
+            coupon = float(product_rows[0][0] or 0) if product_rows else 0.0
+            new_customer = float(product_rows[0][1] or 0) if product_rows else 0.0
+            product_code = str(product_rows[0][2] or "") if product_rows else ""
+            store_id = product_rows[0][3] if product_rows else None
+            use_manual_spec_weight = bool(product_rows and product_rows[0][4])
+            discount_amount = max(coupon, new_customer)
+            result["discount_amount"] = discount_amount
+
+            rows = self.safe_fetchall(
+                """SELECT spec_code, sale_price, weight_percent FROM product_specs
+                   WHERE product_id=? AND COALESCE(is_temporarily_off_shelf, 0)=0""",
+                (product_id,),
+            )
+            result["spec_count"] = len(rows)
+            spec_codes = {str(spec_code or "") for spec_code, _sale_price, _weight in rows if spec_code}
+            cost_map = {}
+            if spec_codes:
+                placeholders = ",".join("?" for _ in spec_codes)
+                cost_map = {
+                    str(spec_code): float(cost_price or 0)
+                    for spec_code, cost_price in self.safe_fetchall(
+                        f"SELECT spec_code, cost_price FROM cost_library WHERE spec_code IN ({placeholders})",
+                        tuple(spec_codes),
+                    )
+                }
+            store_discount_rules = self.get_store_discount_rules(store_id) if store_id else []
+            order_weight_map = {}
+            recognized_total_orders = 0.0
+            if product_code and spec_codes:
+                order_rows = self.safe_fetchall(
+                    "SELECT spec_code, SUM(order_count) FROM imported_orders "
+                    "WHERE store_id=? AND product_id=? GROUP BY spec_code",
+                    (store_id, product_code),
+                )
+                for spec_code, order_count in order_rows:
+                    spec_code = str(spec_code or "")
+                    if spec_code not in spec_codes:
+                        continue
+                    try:
+                        order_count = float(order_count or 0)
+                    except (TypeError, ValueError):
+                        order_count = 0.0
+                    if order_count > 0:
+                        order_weight_map[spec_code] = order_count
+                        recognized_total_orders += order_count
+            use_order_weights = recognized_total_orders > 0 and not use_manual_spec_weight
+            total_weighted_margin = 0.0
+            total_weighted_price = 0.0
+            total_weighted_gross_profit = 0.0
+            total_weight = 0.0
+            valid_spec_count = 0
+            for spec_code, sale_price, weight in rows:
+                try:
+                    sale_price = float(sale_price or 0)
+                    if use_order_weights:
+                        weight = (order_weight_map.get(str(spec_code or ""), 0.0) / recognized_total_orders) * 100.0
+                    else:
+                        weight = float(weight or 0)
+                except (TypeError, ValueError):
+                    continue
+                if sale_price <= 0 or weight <= 0:
+                    continue
+                cost = cost_map.get(str(spec_code or ""), 0.0)
+                matching_discounts = [
+                    float(rule.get("discount") or 0)
+                    for rule in store_discount_rules
+                    if sale_price + 1e-9 >= float(rule.get("threshold") or 0)
+                ]
+                store_discount = max(matching_discounts, default=0.0)
+                effective_discount = max(discount_amount, store_discount)
+                result["discount_amount"] = max(float(result.get("discount_amount") or 0), effective_discount)
+                final_price = sale_price - effective_discount
+                if final_price <= 0 or cost <= 0:
+                    continue
+                margin = (final_price - cost) / final_price
+                gross_profit = final_price - cost
+                total_weighted_margin += margin * weight
+                total_weighted_price += final_price * weight
+                total_weighted_gross_profit += gross_profit * weight
+                total_weight += weight
+                valid_spec_count += 1
+
+            result["total_weight"] = total_weight
+            result["valid_spec_count"] = valid_spec_count
+            result["weight_source"] = "orders" if use_order_weights else ("manual" if use_manual_spec_weight else "saved")
+            result["recognized_order_count"] = recognized_total_orders if use_order_weights else 0.0
+            if total_weight > 0:
+                result["gross_margin_pct"] = (total_weighted_margin / total_weight) * 100
+                result["avg_final_price"] = total_weighted_price / total_weight
+                result["avg_gross_profit"] = total_weighted_gross_profit / total_weight
+        except Exception as e:
+            print(f"计算链接综合毛利失败: {e}")
+        return result
+
+    def calculate_promotion_profit_snapshot(self, product_id, net_amount, cost):
+        net_amount = float(net_amount or 0)
+        cost = float(cost or 0)
+        if net_amount <= 0:
+            return -cost, (-100.0 if cost > 0 else 0.0)
+        margin_pct = self.calculate_product_gross_margin_metrics(product_id).get("gross_margin_pct")
+        if margin_pct is None:
+            return None, None
+        net_profit = net_amount * (float(margin_pct) / 100.0) - cost - net_amount * 0.006
+        return net_profit, net_profit / net_amount * 100
+
+    def repair_missing_promotion_profits(self):
+        rows = self.safe_fetchall(
+            """SELECT d.id, p.id, d.net_transaction_amount, d.cost
+               FROM promotion_daily_data d
+               JOIN products p ON p.store_id=d.store_id AND p.name=d.product_id
+               WHERE d.net_profit IS NULL AND d.net_transaction_amount>0"""
+        )
+        updates = []
+        for record_id, product_id, net_amount, cost in rows:
+            net_profit, net_margin_rate = self.calculate_promotion_profit_snapshot(product_id, net_amount, cost)
+            if net_profit is not None:
+                updates.append((net_profit, net_margin_rate, record_id))
+        if updates:
+            with self.conn:
+                self.conn.executemany(
+                    "UPDATE promotion_daily_data SET net_profit=?, net_margin_rate=? WHERE id=?",
+                    updates,
+                )
+        return len(updates)
+
+    def calculate_products_gross_margin_metrics(self, product_ids):
+        """Calculate card margin data in a fixed number of queries."""
+        product_ids = {int(product_id) for product_id in product_ids if product_id is not None}
+        if not product_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in product_ids)
+        product_rows = self.safe_fetchall(
+            f"SELECT id, coupon_amount, new_customer_discount, name, store_id, "
+            f"COALESCE(use_manual_spec_weight, 0) FROM products WHERE id IN ({placeholders})",
+            tuple(product_ids),
+        )
+        products = {row[0]: row[1:] for row in product_rows}
+        specs_by_product = {product_id: [] for product_id in products}
+        for product_id, spec_code, sale_price, weight in self.safe_fetchall(
+            f"SELECT product_id, spec_code, sale_price, weight_percent "
+            f"FROM product_specs WHERE product_id IN ({placeholders}) "
+            "AND COALESCE(is_temporarily_off_shelf, 0)=0",
+            tuple(product_ids),
+        ):
+            if product_id in specs_by_product:
+                specs_by_product[product_id].append((spec_code, sale_price, weight))
+
+        needed_spec_codes = {
+            str(spec_code or "")
+            for rows in specs_by_product.values()
+            for spec_code, _sale_price, _weight in rows
+            if spec_code
+        }
+        spec_placeholders = ",".join("?" for _ in needed_spec_codes)
+        cost_map = {
+            str(spec_code): float(cost_price or 0)
+            for spec_code, cost_price in (
+                self.safe_fetchall(
+                    f"SELECT spec_code, cost_price FROM cost_library WHERE spec_code IN ({spec_placeholders})",
+                    tuple(needed_spec_codes),
+                )
+                if needed_spec_codes else []
+            )
+        }
+        store_rules = {
+            store_id: self.parse_store_discount_rules(rules)
+            for store_id, rules in self.safe_fetchall("SELECT id, store_discount_rules FROM stores")
+        }
+        product_keys = {
+            (store_id, str(product_code or ""))
+            for _product_id, (_coupon, _new_customer, product_code, store_id, _manual) in products.items()
+        }
+        store_ids = {store_id for store_id, _product_code in product_keys}
+        store_placeholders = ",".join("?" for _ in store_ids)
+        order_weights = {}
+        if store_ids:
+            for store_id, product_code, spec_code, order_count in self.safe_fetchall(
+                "SELECT store_id, product_id, spec_code, SUM(order_count) "
+                f"FROM imported_orders WHERE store_id IN ({store_placeholders}) GROUP BY store_id, product_id, spec_code",
+                tuple(store_ids),
+            ):
+                key = (store_id, str(product_code or ""))
+                if key in product_keys:
+                    order_weights[(store_id, key[1], str(spec_code or ""))] = float(order_count or 0)
+
+        results = {}
+        for product_id, (coupon, new_customer, product_code, store_id, manual_weight) in products.items():
+            rows = specs_by_product.get(product_id, [])
+            result = {
+                "gross_margin_pct": None, "avg_final_price": None, "avg_gross_profit": None,
+                "total_weight": 0.0, "valid_spec_count": 0, "spec_count": len(rows),
+                "discount_amount": 0.0,
+                "weight_source": "saved", "recognized_order_count": 0.0,
+            }
+            coupon = float(coupon or 0)
+            new_customer = float(new_customer or 0)
+            discount_amount = max(coupon, new_customer)
+            result["discount_amount"] = discount_amount
+            spec_codes = {str(row[0] or "") for row in rows if row[0]}
+            weights = {
+                code: order_weights.get((store_id, str(product_code or ""), code), 0.0)
+                for code in spec_codes
+            }
+            recognized_orders = sum(value for value in weights.values() if value > 0)
+            use_order_weights = recognized_orders > 0 and not manual_weight
+            total_margin = total_price = total_profit = total_weight = 0.0
+            valid_count = 0
+            for spec_code, sale_price, saved_weight in rows:
+                try:
+                    sale_price = float(sale_price or 0)
+                    weight = (
+                        weights.get(str(spec_code or ""), 0.0) / recognized_orders * 100.0
+                        if use_order_weights else float(saved_weight or 0)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if sale_price <= 0 or weight <= 0:
+                    continue
+                cost = cost_map.get(str(spec_code or ""), 0.0)
+                store_discount = max(
+                    (
+                        float(rule.get("discount") or 0)
+                        for rule in store_rules.get(store_id, [])
+                        if sale_price + 1e-9 >= float(rule.get("threshold") or 0)
+                    ),
+                    default=0.0,
+                )
+                effective_discount = max(discount_amount, store_discount)
+                result["discount_amount"] = max(result["discount_amount"], effective_discount)
+                final_price = sale_price - effective_discount
+                if final_price <= 0 or cost <= 0:
+                    continue
+                gross_profit = final_price - cost
+                total_margin += gross_profit / final_price * weight
+                total_price += final_price * weight
+                total_profit += gross_profit * weight
+                total_weight += weight
+                valid_count += 1
+            result.update({
+                "total_weight": total_weight,
+                "valid_spec_count": valid_count,
+                "weight_source": "orders" if use_order_weights else ("manual" if manual_weight else "saved"),
+                "recognized_order_count": recognized_orders if use_order_weights else 0.0,
+            })
+            if total_weight > 0:
+                result.update({
+                    "gross_margin_pct": total_margin / total_weight * 100,
+                    "avg_final_price": total_price / total_weight,
+                    "avg_gross_profit": total_profit / total_weight,
+                })
+            results[product_id] = result
+        return results
+
+    def parse_store_discount_rules(self, value):
+        """解析店铺满减梯度，返回按门槛升序的 [{'threshold': x, 'discount': y}]。"""
+        if not value:
+            return []
+        try:
+            raw_rules = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            return []
+        rules = []
+        if not isinstance(raw_rules, list):
+            return rules
+        for item in raw_rules:
+            if not isinstance(item, dict):
+                continue
+            try:
+                threshold = float(item.get("threshold") or 0)
+                discount = float(item.get("discount") or 0)
+            except (TypeError, ValueError):
+                continue
+            if threshold > 0 and discount > 0:
+                rules.append({"threshold": threshold, "discount": discount})
+        rules.sort(key=lambda row: (row["threshold"], row["discount"]))
+        return rules
+
+    def get_store_discount_rules(self, store_id):
+        rows = self.safe_fetchall("SELECT store_discount_rules FROM stores WHERE id=?", (store_id,))
+        return self.parse_store_discount_rules(rows[0][0] if rows else "")
+
+    def save_store_discount_rules(self, store_id, rules):
+        clean_rules = self.parse_store_discount_rules(rules)
+        self.safe_execute(
+            "UPDATE stores SET store_discount_rules=? WHERE id=?",
+            (json.dumps(clean_rules, ensure_ascii=False), store_id),
+        )
+        return clean_rules
+
+    def calculate_store_discount(self, store_id, amount):
+        """按商品/规格价格命中店铺满减梯度，取满足门槛的最高减免。"""
+        try:
+            amount = float(amount or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0:
+            return 0.0, None
+        matched = None
+        for rule in self.get_store_discount_rules(store_id):
+            if amount + 1e-9 >= float(rule.get("threshold") or 0):
+                if matched is None or float(rule.get("discount") or 0) >= float(matched.get("discount") or 0):
+                    matched = rule
+        return (float(matched.get("discount") or 0), matched) if matched else (0.0, None)
+
+    def format_store_discount_rules(self, store_id):
+        rules = self.get_store_discount_rules(store_id)
+        if not rules:
+            return "未设置"
+        parts = []
+        for rule in rules:
+            threshold = float(rule.get("threshold") or 0)
+            discount = float(rule.get("discount") or 0)
+            threshold_text = f"{threshold:.2f}".rstrip("0").rstrip(".")
+            discount_text = f"{discount:.2f}".rstrip("0").rstrip(".")
+            parts.append(f"满{threshold_text}减{discount_text}")
+        return "；".join(parts)
+
     def get_all_prompts(self):
         try:
             return self.safe_fetchall("SELECT id, name, content, is_active, is_system FROM ai_prompts ORDER BY is_system DESC, id ASC")
@@ -1518,367 +2131,6 @@ class SafeDatabaseManager:
             self.safe_execute("UPDATE ai_common_prompts SET is_active=? WHERE id=?", (1 if is_active else 0, prompt_id))
         except Exception as e:
             print(f"切换通用提示词状态失败: {e}")
-
-    def parse_knowledge_file(self, file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            knowledge_items = []
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                # 查找【标题】
-                if line.startswith("【") and line.endswith("】") and len(line) > 2:
-                    title = line[1:-1]  # 去掉【】
-                    # 下一行是内容
-                    i += 1
-                    content_lines = []
-                    while i < len(lines):
-                        next_line = lines[i]
-                        # 如果遇到下一个【标题】，停止
-                        if next_line.strip().startswith("【") and next_line.strip().endswith("】"):
-                            break
-                        content_lines.append(next_line)
-                        i += 1
-                    content = ''.join(content_lines).strip()
-                    if title and content:
-                        knowledge_items.append({'title': title, 'content': content})
-                else:
-                    i += 1
-            
-            # 如果没有解析到新格式，尝试旧格式兼容
-            if not knowledge_items:
-                content = ''.join(lines)
-                # 旧格式1: 【标题】内容（同一行）
-                pattern1 = r'【([^】]+)】([^\n]*)'
-                matches1 = re.findall(pattern1, content)
-                for title, item_content in matches1:
-                    title = title.strip()
-                    item_content = item_content.strip()
-                    if title and item_content:
-                        knowledge_items.append({'title': title, 'content': item_content})
-            
-            return knowledge_items
-        except Exception as e:
-            print(f"解析知识库文件失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-
-    def import_knowledge_file(self, file_path, is_system=False, skip_embedding=False, check_duplicates=True):
-        try:
-            file_name = os.path.basename(file_path)
-            knowledge_items = self.parse_knowledge_file(file_path)
-            if not knowledge_items:
-                return False, "未找到有效的知识条目，请检查文件格式（需使用【标题】格式）"
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # 只有在不跳过时才初始化模型和计算embedding
-            embedding = None
-            if not skip_embedding:
-                if not hasattr(self, 'rag_model') or self.rag_model is None:
-                    self.init_rag_model()
-            
-            imported_count = 0
-            updated_count = 0
-            skipped_count = 0
-            
-            # 记录顺序
-            for sort_idx, item in enumerate(knowledge_items):
-                title = item['title'].strip()
-                content = item['content'].strip()
-                
-                if not title or not content:
-                    continue
-                
-                if not skip_embedding and self.rag_model:
-                    text = f"{title}: {content}"
-                    embedding = self.get_embedding(text)
-                
-                # 1. 检查同一文件中是否存在相同标题
-                existing_same_file = self.safe_fetchall(
-                    "SELECT id, content FROM knowledge_base WHERE file_path=? AND title=?",
-                    (file_path, title)
-                )
-                
-                if existing_same_file:
-                    # 同一文件中存在，更新内容
-                    existing_id = existing_same_file[0][0]
-                    existing_content = existing_same_file[0][1]
-                    if existing_content != content:
-                        if embedding:
-                            self.safe_execute(
-                                "UPDATE knowledge_base SET content=?, embedding=?, updated_at=?, sort_order=? WHERE id=?",
-                                (content, embedding, now, sort_idx, existing_id)
-                            )
-                        else:
-                            self.safe_execute(
-                                "UPDATE knowledge_base SET content=?, updated_at=?, sort_order=? WHERE id=?",
-                                (content, now, sort_idx, existing_id)
-                            )
-                        updated_count += 1
-                    else:
-                        skipped_count += 1
-                    continue
-                
-                # 2. 如果启用全局重复检测，检查其他文件是否已存在相同内容
-                if check_duplicates:
-                    # 检查全局标题+内容重复
-                    existing_global = self.safe_fetchall(
-                        "SELECT id, file_path, file_name FROM knowledge_base WHERE title=? AND content=?",
-                        (title, content)
-                    )
-                    if existing_global:
-                        # 全局已存在相同内容，跳过
-                        skipped_count += 1
-                        continue
-                
-                # 3. 插入新记录
-                if embedding:
-                    self.safe_execute(
-                        "INSERT INTO knowledge_base (file_path, file_name, title, content, is_active, is_system, embedding, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
-                        (file_path, file_name, title, content, 1 if is_system else 0, embedding, now, now, sort_idx)
-                    )
-                else:
-                    self.safe_execute(
-                        "INSERT INTO knowledge_base (file_path, file_name, title, content, is_active, is_system, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
-                        (file_path, file_name, title, content, 1 if is_system else 0, now, now, sort_idx)
-                    )
-                imported_count += 1
-            
-            return True, f"导入完成: 新增 {imported_count} 条, 更新 {updated_count} 条, 跳过重复 {skipped_count} 条"
-        except Exception as e:
-            return False, f"导入知识库失败: {e}"
-
-    def load_system_knowledge_base(self, script_dir):
-        system_file = os.path.join(script_dir, "knowledge_base.txt")
-        if os.path.exists(system_file):
-            print(f"发现系统知识库文件: {system_file}")
-            self.safe_execute("DELETE FROM knowledge_base WHERE is_system=1")
-            self.conn.commit()
-            print("已清除旧系统知识库，重新导入...")
-            success, msg = self.import_knowledge_file(system_file, is_system=True)
-            self.conn.commit()
-            if success:
-                print(f"系统知识库导入成功: {msg}")
-            return success, msg
-        return False, "未找到系统知识库文件"
-
-    def get_all_knowledge_items(self):
-        try:
-            return self.safe_fetchall("SELECT id, file_path, file_name, title, content, is_active, is_system FROM knowledge_base ORDER BY file_name, sort_order, id")
-        except Exception as e:
-            print(f"获取知识库失败: {e}")
-            return []
-
-    def get_knowledge_items_by_file(self, file_name):
-        try:
-            return self.safe_fetchall(
-                "SELECT id, file_path, file_name, title, content, is_active, is_system FROM knowledge_base WHERE file_name=? ORDER BY sort_order, id",
-                (file_name,)
-            )
-        except Exception as e:
-            print(f"按文件名获取知识库失败: {e}")
-            return []
-
-    def get_active_knowledge_items(self):
-        try:
-            rows = self.safe_fetchall("SELECT title, content FROM knowledge_base ORDER BY file_name, title")
-            return [{'title': row[0], 'content': row[1]} for row in rows]
-        except Exception as e:
-            print(f"获取知识库失败: {e}")
-            return []
-
-    def get_knowledge_items_by_titles(self, titles):
-        if not titles:
-            return []
-        try:
-            placeholders = ','.join(['?'] * len(titles))
-            rows = self.safe_fetchall(
-                f"SELECT title, content FROM knowledge_base WHERE title IN ({placeholders})",
-                titles
-            )
-            return [{'title': row[0], 'content': row[1]} for row in rows]
-        except Exception as e:
-            print(f"获取知识库失败: {e}")
-            return []
-
-    def toggle_knowledge_item(self, item_id, is_active):
-        try:
-            self.safe_execute("UPDATE knowledge_base SET is_active=? WHERE id=?", (1 if is_active else 0, item_id))
-        except Exception as e:
-            print(f"切换知识库状态失败: {e}")
-
-    def delete_knowledge_item(self, item_id):
-        try:
-            self.safe_execute("DELETE FROM knowledge_base WHERE id=?", (item_id,))
-        except Exception as e:
-            print(f"删除知识库失败: {e}")
-
-    def update_knowledge_content(self, item_id, content):
-        try:
-            self.safe_execute("UPDATE knowledge_base SET content=? WHERE id=?", (content, item_id))
-            self.conn.commit()
-        except Exception as e:
-            print(f"更新知识库内容失败: {e}")
-
-    def delete_knowledge_by_file(self, file_path):
-        try:
-            self.safe_execute("DELETE FROM knowledge_base WHERE file_path=?", (file_path,))
-        except Exception as e:
-            print(f"删除知识库文件失败: {e}")
-
-    def get_unique_files(self):
-        try:
-            return self.safe_fetchall("SELECT DISTINCT file_path, file_name, is_system FROM (SELECT file_path, file_name, is_system FROM knowledge_base) ORDER BY is_system DESC, file_name")
-        except Exception as e:
-            print(f"获取知识库文件列表失败: {e}")
-            return []
-
-    def init_rag_model(self):
-        if getattr(self, '_rag_model_initialized', False):
-            return getattr(self, '_rag_model_loaded', False)
-        
-        self._rag_model_initialized = True
-        self._rag_model_loaded = False
-        self._rag_model_info = "未加载"
-        
-        # 检查模型缓存标记（避免重复加载）
-        import os
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        cache_marker = os.path.join(base_dir, ".rag_model_loaded.marker")
-        
-        # 如果缓存标记存在，说明模型已加载，跳过
-        if os.path.exists(cache_marker):
-            self._rag_model_loaded = True
-            self._rag_model_info = "SentenceTransformer (已缓存，跳过加载)"
-            print("[INFO] RAG模型已缓存，跳过加载")
-            return True
-        
-        possible_paths = [
-            os.path.join(base_dir, "sentence-transformers", "paraphrase-multilingual-MiniLM-L12-v2"),
-            os.path.join(base_dir, "minilm_model"),
-        ]
-        print(f"[DEBUG] Model search base dir: {base_dir}")
-        print(f"[DEBUG] Model search paths: {possible_paths}")
-        model_path = None
-        for path in possible_paths:
-            normalized = os.path.normpath(path)
-            if os.path.exists(normalized) and os.path.isdir(normalized):
-                model_path = normalized
-                break
-        try:
-            from sentence_transformers import SentenceTransformer
-            if model_path:
-                print(f"[INFO] Loading model from local: {model_path}")
-                self.rag_model = SentenceTransformer(model_path)
-                self.rag_type = "sentence_transformers"
-                self._rag_model_info = f"SentenceTransformer (本地模型: {model_path})"
-                print("[OK] RAG model loaded successfully (SentenceTransformer - Local Model)")
-                self._rag_model_loaded = True
-                # 创建缓存标记
-                try:
-                    with open(cache_marker, 'w') as f:
-                        f.write("model loaded")
-                except:
-                    pass
-                return True
-            raise Exception("Local model not found")
-        except Exception as e1:
-            print(f"[WARN] SentenceTransformer load failed: {e1}")
-            print("[INFO] Falling back to TF-IDF vectorizer")
-            try:
-                from sklearn.feature_extraction.text import TfidfVectorizer
-                self.rag_model = TfidfVectorizer(max_features=384, ngram_range=(1, 2))
-                self.rag_type = "tfidf"
-                self._rag_model_info = "TF-IDF (sklearn)"
-                self.rag_embeddings = {}
-                self.rag_item_ids = []
-                print("[OK] RAG model loaded successfully (TF-IDF)")
-                self._rag_model_loaded = True
-                return True
-            except Exception as e2:
-                print(f"❌ TF-IDF加载失败: {e2}")
-                print("💡 解决方案: pip install scikit-learn")
-                self.rag_model = None
-                self._rag_model_info = "加载失败"
-                self._rag_model_loaded = False
-                return False
-
-    def get_rag_model_info(self):
-        if hasattr(self, '_rag_model_info'):
-            return self._rag_model_info
-        return "未加载"
-
-    def get_embedding(self, text):
-        if not hasattr(self, 'rag_model') or self.rag_model is None:
-            self.init_rag_model()
-        if self.rag_model is None:
-            return None
-        try:
-            if self.rag_type == "sentence_transformers":
-                embedding = self.rag_model.encode(text, convert_to_numpy=True)
-                return embedding.tobytes()
-            emb = self.rag_model.fit_transform([text]).toarray()[0]
-            return emb.tobytes()
-        except Exception as e:
-            print(f"向量化失败: {e}")
-            return None
-
-    def compute_similarity(self, emb1_bytes, emb2_bytes):
-        import numpy as np
-        emb1 = np.frombuffer(emb1_bytes, dtype=np.float32)
-        emb2 = np.frombuffer(emb2_bytes, dtype=np.float32)
-        if len(emb1) != len(emb2):
-            return 0
-        emb1 = emb1 / (np.linalg.norm(emb1) + 1e-8)
-        emb2 = emb2 / (np.linalg.norm(emb2) + 1e-8)
-        return np.dot(emb1, emb2)
-
-    def update_knowledge_embeddings(self):
-        if not hasattr(self, 'rag_model') or self.rag_model is None:
-            self.init_rag_model()
-        if self.rag_model is None:
-            return False, "RAG模型未初始化"
-        try:
-            items = self.safe_fetchall("SELECT id, title, content FROM knowledge_base")
-            updated = 0
-            for item_id, title, content in items:
-                text = f"{title}: {content}"
-                emb = self.get_embedding(text)
-                if emb:
-                    self.safe_execute("UPDATE knowledge_base SET embedding=? WHERE id=?", (emb, item_id))
-                    updated += 1
-            return True, f"已更新 {updated} 条知识的向量化"
-        except Exception as e:
-            return False, f"向量化失败: {e}"
-
-    def rag_retrieve(self, query, top_k=3):
-        if not hasattr(self, 'rag_model') or self.rag_model is None:
-            self.init_rag_model()
-        if self.rag_model is None:
-            return []
-        try:
-            query_emb = self.get_embedding(query)
-            if query_emb is None:
-                return []
-            items = self.safe_fetchall(
-                "SELECT id, title, content, embedding FROM knowledge_base WHERE embedding IS NOT NULL"
-            )
-            results = []
-            for item_id, title, content, emb_bytes in items:
-                if emb_bytes:
-                    similarity = self.compute_similarity(query_emb, emb_bytes)
-                    results.append({'id': item_id, 'title': title, 'content': content, 'similarity': similarity})
-            results.sort(key=lambda x: x['similarity'], reverse=True)
-            return results[:top_k]
-        except Exception as e:
-            print(f"RAG检索失败: {e}")
-            return []
-
     def save_daily_record(self, store_id, record_date, category, special_info, memo):
         try:
             existing = self.safe_fetchall(
@@ -1994,18 +2246,19 @@ class SafeDatabaseManager:
     def calculate_profit_label_from_db(self, product_id):
         try:
             specs = self.safe_fetchall(
-                "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?",
+                """SELECT spec_code, sale_price, weight_percent FROM product_specs
+                   WHERE product_id=? AND COALESCE(is_temporarily_off_shelf, 0)=0""",
                 (product_id,)
             )
             if not specs:
                 return 0
             prod_res = self.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, store_id FROM products WHERE id=?",
                 (product_id,)
             )
             coupon = prod_res[0][0] or 0 if prod_res else 0
             new_customer = prod_res[0][1] or 0 if prod_res else 0
-            max_discount = max(coupon, new_customer)
+            store_id = prod_res[0][2] if prod_res else None
             total_weight = 0
             total_profit = 0
             total_final_price = 0
@@ -2015,7 +2268,8 @@ class SafeDatabaseManager:
                 weight = weight or 0
                 cost_res = self.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
                 cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
-                final_price = sale_price - max_discount
+                store_discount, _rule = self.calculate_store_discount(store_id, sale_price) if store_id else (0.0, None)
+                final_price = sale_price - max(coupon, new_customer, store_discount)
                 if final_price > 0:
                     profit = final_price - cost
                     total_profit += profit * weight

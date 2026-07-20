@@ -4,19 +4,40 @@ import os
 import json
 import time
 import re
+import hashlib
+import threading
+import traceback
 from io import BytesIO
-from datetime import datetime
-from PyQt5.QtWidgets import QHeaderView, QAbstractItemView
+from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QTableWidget, QTableWidgetItem,
     QWidget, QLineEdit, QPushButton, QMessageBox, QMenu, QAction,
     QAbstractItemView, QFileDialog, QComboBox, QScrollArea, QHeaderView,
-    QApplication, QPlainTextEdit, QProgressDialog, QCheckBox
+    QApplication, QPlainTextEdit, QProgressDialog, QCheckBox, QToolTip,
+    QListWidget, QListWidgetItem, QDialogButtonBox, QInputDialog
 )
-from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice, QObject, QThread
-from PyQt5.QtGui import QColor, QPixmap, QDoubleValidator, QFont
-from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
+from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, QEasingCurve, QRect, QTimer, pyqtSignal, QByteArray, QBuffer, QIODevice, QObject, QThread, QSize, QEventLoop
+from PyQt5.QtGui import QColor, QCursor, QPixmap, QDoubleValidator, QFont
+from PyQt5.QtWidgets import QGraphicsOpacityEffect
 from PyQt5.QtGui import QClipboard
+
+try:
+    from manager.crash_report import append_event
+except ImportError:
+    try:
+        from crash_report import append_event
+    except ImportError:
+        append_event = None
+
+try:
+    from manager.window_icons import apply_window_icon
+except ImportError:
+    from window_icons import apply_window_icon
+
+try:
+    from manager.file_dialog_memory import remembered_existing_directory, remembered_open_file, remembered_save_file
+except ImportError:
+    from file_dialog_memory import remembered_existing_directory, remembered_open_file, remembered_save_file
 
 try:
     from manager.pdd_browser_monitor import BrowserMonitorError, PddBrowserMonitor
@@ -32,6 +53,38 @@ try:
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
+
+
+def _price_match_summary_html(
+    item_count,
+    matched_count,
+    unmatched_count,
+    spec_count,
+    price_count,
+    marketing_count,
+    product_count,
+):
+    if item_count and not unmatched_count:
+        return '<span style="color:#27ae60;">完全匹配</span>'
+    if not item_count:
+        return '<span style="color:#c0392b;">未抓取到链接</span>'
+
+    parts = []
+    if matched_count:
+        parts.append(f'<span style="color:#27ae60;">匹配 {matched_count}</span>')
+    parts.append(f'<span style="color:#c0392b;">未匹配 {unmatched_count}</span>')
+    reasons = [
+        ("规格", spec_count),
+        ("价格", price_count),
+        ("活动/营销", marketing_count),
+        ("商品ID", product_count),
+    ]
+    parts.extend(
+        f'<span style="color:#c0392b;">{label} {count}</span>'
+        for label, count in reasons
+        if count
+    )
+    return "　".join(parts)
 
 
 class StoreAiReportWorker(QObject):
@@ -97,12 +150,14 @@ class StoreAiReportWorker(QObject):
 
 
 class PddUnmatchedTaskWindow(QDialog):
-    """独立显示价格管理未匹配链接，用户可手动标记已处理。"""
+    """独立显示价格管理未匹配规格链接，用户可手动标记已处理。"""
+
+    open_code_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(None)
         self.records = {}
-        self.setWindowTitle("价格管理未匹配链接")
+        self.setWindowTitle("未匹配规格链接")
         self.setWindowFlags(
             Qt.Window
             | Qt.WindowMinimizeButtonHint
@@ -110,23 +165,27 @@ class PddUnmatchedTaskWindow(QDialog):
             | Qt.WindowCloseButtonHint
         )
         self.setWindowModality(Qt.NonModal)
-        self.resize(620, 360)
+        self.resize(740, 360)
 
         layout = QVBoxLayout(self)
-        self.lbl_summary = QLabel("未匹配链接 0 个")
+        self.lbl_summary = QLabel("未匹配规格链接 0 个")
         self.lbl_summary.setStyleSheet("font-size: 12px; color: #555; padding: 4px 0;")
         layout.addWidget(self.lbl_summary)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["完成", "商品ID", "未匹配原因", "商品标题"])
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["完成", "商品ID", "未匹配原因", "商品标题", "抓取添加编码"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setStyleSheet("QTableWidget::item:focus { outline: none; }")
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 64)
         self.table.setColumnWidth(1, 150)
         self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(4, 100)
         self.table.cellClicked.connect(self._handle_cell_clicked)
         layout.addWidget(self.table)
 
@@ -187,7 +246,12 @@ class PddUnmatchedTaskWindow(QDialog):
                     item.setForeground(QColor("#95a5a6"))
                     item.setBackground(QColor("#f2f3f4"))
                 self.table.setItem(row_index, col_offset, item)
-        self.lbl_summary.setText(f"未匹配链接 {len(records)} 个，已手动完成 {done_count} 个")
+            match_button = QPushButton("抓取添加编码")
+            match_button.setStyleSheet("QPushButton { padding: 1px; }")
+            match_button.setEnabled(not done and any("规格" in reason for reason in record.get("reasons") or []))
+            match_button.clicked.connect(lambda _checked=False, pid=product_id: self.open_code_requested.emit(pid))
+            self.table.setCellWidget(row_index, 4, match_button)
+        self.lbl_summary.setText(f"未匹配规格链接 {len(records)} 个，已手动完成 {done_count} 个")
 
     def mark_done(self, product_id):
         product_id = str(product_id or "").strip()
@@ -208,7 +272,22 @@ class PddUnmatchedTaskWindow(QDialog):
 class PddProductMatchDialog(QDialog):
     """拼多多商品列表 ID 抓取与本地店铺商品匹配测试窗口。"""
 
-    def __init__(self, db, monitor, default_store_id=None, parent=None, mode="combined", store_id_provider=None, owner=None, initial_product_id="", auto_search=False):
+    link_saved = pyqtSignal(str)
+    auto_code_search_finished = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        db,
+        monitor,
+        default_store_id=None,
+        parent=None,
+        mode="combined",
+        store_id_provider=None,
+        owner=None,
+        initial_product_id="",
+        auto_search=False,
+        unmatched_records_provider=None,
+    ):
         super().__init__(parent)
         self.db = db
         self.monitor = monitor
@@ -218,12 +297,16 @@ class PddProductMatchDialog(QDialog):
         self.owner = owner or parent
         self.initial_product_id = str(initial_product_id or "").strip()
         self.auto_search = bool(auto_search)
+        self.unmatched_records_provider = unmatched_records_provider
+        self._auto_code_search_running = False
         self.missing_ids = []
         self.last_debug_info = {}
         self.last_product_id = ""
         self.last_title = ""
         self.last_product_images = []
+        self.last_product_image_data = None
         self.last_specs = []
+        self.last_image_download_error = ""
         self.last_price_management_info = {}
         self.price_sync_rows = {}
         self.price_result_cards = {}
@@ -232,6 +315,7 @@ class PddProductMatchDialog(QDialog):
         self.price_unmatched_records = {}
         self.price_current_page_matched_product_ids = []
         self.unmatched_task_window = None
+        self.unmatched_code_dialog = None
         self.setWindowTitle("拼多多链接抓取")
         if self.mode in ("code", "price"):
             self.setWindowFlags(
@@ -241,10 +325,11 @@ class PddProductMatchDialog(QDialog):
                 | Qt.WindowCloseButtonHint
             )
             self.setWindowModality(Qt.NonModal)
-        self.resize(1180, 680)
+        self.resize(1280 if self.mode == "price" else 1180, 680)
         self.init_ui()
         self.load_stores()
         self.apply_mode_layout()
+        self.auto_code_search_finished.connect(self._finish_initial_code_search)
         if self.mode == "price" and self.initial_product_id and self.auto_search:
             QTimer.singleShot(300, self._auto_search_initial_price_product)
 
@@ -286,6 +371,25 @@ class PddProductMatchDialog(QDialog):
             "QPushButton:disabled { background-color: #bdc3c7; }"
         )
         top_layout.addWidget(self.btn_scan_price)
+
+        self.btn_refresh_price_match = QPushButton("刷新匹配状态")
+        self.btn_refresh_price_match.clicked.connect(self.refresh_all_price_management_matches)
+        self.btn_refresh_price_match.setVisible(False)
+        self.btn_refresh_price_match.setEnabled(False)
+        self.btn_refresh_price_match.setStyleSheet(
+            "QPushButton { background-color: #16a085; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #138d75; }"
+            "QPushButton:disabled { background-color: #bdc3c7; }"
+        )
+        self.btn_sync_all_price = QPushButton("一键同步所有未匹配价格和促销")
+        self.btn_sync_all_price.clicked.connect(self.sync_all_price_management_products)
+        self.btn_sync_all_price.setVisible(False)
+        self.btn_sync_all_price.setEnabled(False)
+        self.btn_sync_all_price.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #229954; }"
+            "QPushButton:disabled { background-color: #bdc3c7; }"
+        )
         top_layout.addStretch()
         layout.addWidget(self.top_widget)
 
@@ -293,6 +397,17 @@ class PddProductMatchDialog(QDialog):
         self.lbl_summary.setWordWrap(True)
         self.lbl_summary.setStyleSheet("color: #555; font-size: 12px; padding: 6px 0;")
         layout.addWidget(self.lbl_summary)
+
+        self.unmatched_specs_widget = QWidget()
+        unmatched_specs_layout = QHBoxLayout(self.unmatched_specs_widget)
+        unmatched_specs_layout.setContentsMargins(0, 0, 0, 0)
+        self.lbl_unmatched_specs = QLabel("未匹配规格链接ID：无")
+        self.lbl_unmatched_specs.setWordWrap(True)
+        self.lbl_unmatched_specs.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_unmatched_specs.setStyleSheet("color: #8e44ad; font-size: 12px; padding: 2px 0;")
+        unmatched_specs_layout.addWidget(self.lbl_unmatched_specs, 1)
+        self.unmatched_specs_widget.setVisible(False)
+        layout.addWidget(self.unmatched_specs_widget)
 
         self.start_widget = QWidget()
         start_layout = QHBoxLayout(self.start_widget)
@@ -305,6 +420,8 @@ class PddProductMatchDialog(QDialog):
             "QPushButton:disabled { background-color: #bdc3c7; }"
         )
         start_layout.addWidget(self.btn_start_scan)
+        start_layout.addWidget(self.btn_refresh_price_match)
+        start_layout.addWidget(self.btn_sync_all_price)
         start_layout.addStretch()
         self.start_widget.setVisible(False)
         layout.addWidget(self.start_widget)
@@ -341,6 +458,12 @@ class PddProductMatchDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["规格图", "规格信息", "规格编码", "价格", "商品匹配", "软件规格", "原始文本"])
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setStyleSheet(
+            "QTableWidget::item { color: #000; font-weight: normal; }"
+            "QTableWidget::item:selected { color: #000; font-weight: normal; background-color: #dbeafe; outline: none; }"
+            "QTableWidget::item:focus { outline: none; border: none; }"
+        )
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_code_table_context_menu)
         self.table.verticalHeader().setVisible(False)
@@ -374,6 +497,10 @@ class PddProductMatchDialog(QDialog):
             "QPushButton { background-color: #27ae60; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }"
             "QPushButton:hover { background-color: #229954; }"
         )
+        self.chk_include_product_image = QCheckBox("包含主图")
+        self.chk_include_product_image.setChecked(True)
+        self.chk_include_product_image.setToolTip("取消勾选后，创建/覆盖时不写入商品主图，保留软件里已有或手动上传的主图。")
+        bottom_layout.addWidget(self.chk_include_product_image)
         bottom_layout.addWidget(self.btn_save_to_store)
         self.btn_overwrite_without_price = QPushButton("覆盖除价格之外的信息到软件")
         self.btn_overwrite_without_price.clicked.connect(self.overwrite_current_link_without_price)
@@ -389,7 +516,7 @@ class PddProductMatchDialog(QDialog):
         self.btn_copy_debug = QPushButton("复制调试JSON")
         self.btn_copy_debug.clicked.connect(self.copy_debug_json)
         bottom_layout.addWidget(self.btn_copy_debug)
-        self.btn_copy_unmatched_specs = QPushButton("一键生成未匹配窗口")
+        self.btn_copy_unmatched_specs = QPushButton("未匹配规格链接")
         self.btn_copy_unmatched_specs.clicked.connect(self.show_unmatched_task_window)
         self.btn_copy_unmatched_specs.setVisible(False)
         self.btn_copy_unmatched_specs.setEnabled(False)
@@ -401,15 +528,31 @@ class PddProductMatchDialog(QDialog):
         layout.addWidget(bottom)
 
     def load_stores(self):
-        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
         self.combo_store.clear()
+        fixed_store_id = self.default_store_id
+        if self.store_id_provider:
+            try:
+                provider_store_id = self.store_id_provider()
+                if provider_store_id:
+                    fixed_store_id = provider_store_id
+            except Exception:
+                pass
+
+        if fixed_store_id is not None:
+            rows = self.db.safe_fetchall("SELECT id, name FROM stores WHERE id=?", (fixed_store_id,))
+            if rows:
+                store_id, store_name = rows[0]
+                self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
+            else:
+                self.combo_store.addItem(f"店铺{fixed_store_id}", int(fixed_store_id))
+            self.combo_store.setEnabled(False)
+            self.combo_store.setToolTip("已固定为当前打开窗口所属店铺，不能在此切换店铺。")
+            return
+
+        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
         for store_id, store_name in rows:
             self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
-        if self.default_store_id is not None:
-            for i in range(self.combo_store.count()):
-                if self.combo_store.itemData(i) == self.default_store_id:
-                    self.combo_store.setCurrentIndex(i)
-                    break
+        self.combo_store.setEnabled(True)
 
     def current_store_id(self):
         if self.store_id_provider:
@@ -434,21 +577,34 @@ class PddProductMatchDialog(QDialog):
             self.top_widget.hide()
             self.start_widget.show()
             self.btn_scan_price.hide()
+            self.btn_refresh_price_match.hide()
+            self.btn_sync_all_price.hide()
             self.btn_copy_unmatched_specs.hide()
             self.btn_save_to_store.show()
             self.btn_overwrite_without_price.show()
             self.btn_open_current_spec.show()
+            if hasattr(self, "chk_include_product_image"):
+                self.chk_include_product_image.show()
             self._set_code_table_mode()
+            self._refresh_unmatched_spec_ids_panel()
             self.lbl_summary.setText("已打开抓取添加编码界面窗口。请确认浏览器停在添加/编辑编码界面后，点击“开始抓取”。")
         elif self.mode == "price":
             self.setWindowTitle("抓取价格管理")
-            self.resize(1180, 720)
+            self.resize(1380, 720)
             self.top_widget.hide()
             self.start_widget.show()
             self.btn_save_to_store.hide()
             self.btn_overwrite_without_price.hide()
             self.btn_open_current_spec.hide()
+            self.btn_refresh_price_match.show()
+            self.btn_refresh_price_match.setEnabled(False)
+            self.btn_sync_all_price.show()
+            self.btn_sync_all_price.setEnabled(False)
+            if hasattr(self, "chk_include_product_image"):
+                self.chk_include_product_image.hide()
             self._set_price_table_mode()
+            if hasattr(self, "unmatched_specs_widget"):
+                self.unmatched_specs_widget.hide()
             if self.initial_product_id and self.auto_search:
                 self.lbl_summary.setText(
                     f"已打开抓取价格管理窗口。将尝试搜索商品ID {self.initial_product_id}，请确认页面结果后点击“开始抓取”。"
@@ -472,6 +628,43 @@ class PddProductMatchDialog(QDialog):
         if not status:
             status = f"已尝试搜索商品ID {product_id}"
         self.lbl_summary.setText(f"{status}。请确认价格管理页面结果后，点击“开始抓取”。")
+
+    def start_initial_code_search(self, product_id):
+        product_id = str(product_id or "").strip()
+        if not product_id:
+            return
+        QApplication.clipboard().setText(product_id)
+        self.initial_product_id = product_id
+        if self._auto_code_search_running:
+            return
+        self._auto_code_search_running = True
+        store_id = self.current_store_id()
+        store_name = self.combo_store.currentText().strip()
+        self.lbl_summary.setText(f"商品ID {product_id} 已复制，正在打开商品列表并自动搜索...")
+        threading.Thread(
+            target=self._run_initial_code_search,
+            args=(product_id, store_id, store_name),
+            daemon=True,
+        ).start()
+
+    def _run_initial_code_search(self, product_id, store_id, store_name):
+        try:
+            result = self.monitor.open_goods_list_and_search_product(
+                product_id,
+                expected_store_name=store_name,
+                store_id=store_id,
+            )
+        except Exception as e:
+            result = {"ok": False, "status": f"自动搜索失败：{e}"}
+        try:
+            self.auto_code_search_finished.emit(result if isinstance(result, dict) else {})
+        except RuntimeError:
+            pass
+
+    def _finish_initial_code_search(self, result):
+        self._auto_code_search_running = False
+        status = str((result or {}).get("status") or "未能自动搜索商品ID").strip()
+        self.lbl_summary.setText(status)
 
     def start_current_mode_scan(self):
         if self.mode == "price":
@@ -557,6 +750,7 @@ class PddProductMatchDialog(QDialog):
 
     def _normalize_spec_name_for_match(self, value):
         text = str(value or "").strip()
+        text = re.sub(r"\s*-\s*", " ", text)
         text = text.replace(" ", "").replace("\u3000", "")
         text = text.replace("丨", "|")
         return text
@@ -613,6 +807,7 @@ class PddProductMatchDialog(QDialog):
         return [best_by_key[key] for key in order]
 
     def _set_product_image_previews(self, image_urls):
+        self.last_product_image_data = None
         while self.product_images_layout.count():
             item = self.product_images_layout.takeAt(0)
             widget = item.widget()
@@ -632,17 +827,14 @@ class PddProductMatchDialog(QDialog):
             label.setFixedSize(88, 88)
             label.setToolTip(image_url)
             pixmap = QPixmap()
-            try:
-                import requests
-                response = requests.get(image_url, timeout=3)
-                if response.status_code == 200:
-                    pixmap.loadFromData(response.content)
-            except Exception:
-                pixmap = QPixmap()
+            image_data = self._download_image_bytes(self._preview_image_url(image_url), timeout=3)
+            if image_data:
+                self.last_product_image_data = image_data
+                pixmap.loadFromData(image_data)
             if not pixmap.isNull():
                 label.setPixmap(pixmap.scaled(88, 88, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                label.setText("图")
+                label.setText("加载失败")
             self.product_images_layout.addWidget(label, 0, Qt.AlignCenter)
 
     def _set_image_preview_cell(self, row, col, image_url):
@@ -659,23 +851,21 @@ class PddProductMatchDialog(QDialog):
         label.setFixedSize(54, 54)
         label.setToolTip(image_url)
         pixmap = QPixmap()
-        try:
-            import requests
-            response = requests.get(image_url, timeout=3)
-            if response.status_code == 200:
-                pixmap.loadFromData(response.content)
-        except Exception:
-            pixmap = QPixmap()
+        image_data = self._download_image_bytes(self._preview_image_url(image_url), timeout=3)
+        if image_data:
+            pixmap.loadFromData(image_data)
 
         if not pixmap.isNull():
             label.setPixmap(pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.table.setCellWidget(row, col, label)
             self.table.setRowHeight(row, 58)
         else:
-            short_url = image_url[:80] + ("..." if len(image_url) > 80 else "")
-            item = QTableWidgetItem(short_url)
+            item = QTableWidgetItem("加载失败")
             item.setTextAlignment(Qt.AlignCenter)
-            item.setToolTip(image_url)
+            item.setToolTip(
+                f"{image_url}\n\n{self.last_image_download_error}"
+                if self.last_image_download_error else image_url
+            )
             item.setData(Qt.UserRole, image_url)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, col, item)
@@ -748,17 +938,31 @@ class PddProductMatchDialog(QDialog):
         self._sync_code_table_specs_to_state()
         self.lbl_summary.setText(f"已删除 1 行规格，当前界面剩余 {self.table.rowCount()} 行。保存/覆盖将使用当前界面内容。")
 
-    def _download_image_bytes(self, image_url):
+    def _preview_image_url(self, image_url):
+        return re.sub(r"imageView2/2/w/\d+(?:/q/\d+)?", "imageView2/2/w/200/q/50", str(image_url or "").strip())
+
+    def _download_image_bytes(self, image_url, timeout=5):
         image_url = str(image_url or "").strip()
+        self.last_image_download_error = ""
         if not image_url:
             return None
         try:
             import requests
-            response = requests.get(image_url, timeout=5)
-            if response.status_code == 200 and response.content:
+            response = requests.get(
+                image_url,
+                timeout=timeout,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://mms.pinduoduo.com/",
+                },
+            )
+            response.raise_for_status()
+            if response.content:
                 return response.content
-        except Exception:
-            return None
+            self.last_image_download_error = "empty response body"
+        except Exception as e:
+            self.last_image_download_error = f"{type(e).__name__}: {e}"
+            print(f"image download failed {image_url}: {self.last_image_download_error}")
         return None
 
     def _parse_price_value(self, value):
@@ -803,6 +1007,11 @@ class PddProductMatchDialog(QDialog):
         if hasattr(self, "btn_copy_unmatched_specs"):
             self.btn_copy_unmatched_specs.setVisible(False)
             self.btn_copy_unmatched_specs.setEnabled(False)
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setVisible(False)
+            self.btn_sync_all_price.setEnabled(False)
+        if hasattr(self, "chk_include_product_image"):
+            self.chk_include_product_image.setVisible(True)
         self.price_scroll_area.setVisible(False)
         self.table.setVisible(True)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -827,6 +1036,11 @@ class PddProductMatchDialog(QDialog):
         if hasattr(self, "btn_copy_unmatched_specs"):
             self.btn_copy_unmatched_specs.setVisible(True)
             self.btn_copy_unmatched_specs.setEnabled(False)
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setVisible(True)
+            self.btn_sync_all_price.setEnabled(False)
+        if hasattr(self, "chk_include_product_image"):
+            self.chk_include_product_image.setVisible(False)
         self.lbl_pdd_product_title.setText("价格管理: --")
         self.lbl_software_product_title.setText("匹配结果: --")
         self._set_product_image_previews([])
@@ -845,6 +1059,10 @@ class PddProductMatchDialog(QDialog):
         self.price_current_page_matched_product_ids = []
         if hasattr(self, "btn_copy_unmatched_specs"):
             self.btn_copy_unmatched_specs.setEnabled(False)
+        if hasattr(self, "btn_refresh_price_match"):
+            self.btn_refresh_price_match.setEnabled(False)
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setEnabled(False)
         while self.price_scroll_layout.count():
             item = self.price_scroll_layout.takeAt(0)
             widget = item.widget()
@@ -875,13 +1093,9 @@ class PddProductMatchDialog(QDialog):
         pixmap = QPixmap()
         image_url = str(image_url or "").strip()
         if image_url:
-            try:
-                import requests
-                response = requests.get(image_url, timeout=3)
-                if response.status_code == 200 and response.content:
-                    pixmap.loadFromData(response.content)
-            except Exception:
-                pixmap = QPixmap()
+            downloaded = self._download_image_bytes(image_url, timeout=3)
+            if downloaded:
+                pixmap.loadFromData(downloaded)
         if pixmap.isNull() and image_data:
             try:
                 pixmap.loadFromData(image_data)
@@ -891,7 +1105,8 @@ class PddProductMatchDialog(QDialog):
             label.setText("无图")
             label.setAlignment(Qt.AlignCenter)
             return
-        label.setPixmap(pixmap.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        target_size = max(24, min(label.width() or 64, label.height() or 64) - 6)
+        label.setPixmap(pixmap.scaled(target_size, target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         label.setAlignment(Qt.AlignCenter)
 
     def _copy_price_product_id(self, product_id):
@@ -906,25 +1121,20 @@ class PddProductMatchDialog(QDialog):
             "QWidget#priceCard { background-color: #ffffff; border: 1px solid #dfe6e9; border-radius: 6px; }"
         )
         card.setObjectName("priceCard")
-        card_layout = QHBoxLayout(card)
+        card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(10, 10, 10, 10)
-        card_layout.setSpacing(12)
-
-        image_label = QLabel()
-        image_label.setFixedSize(104, 104)
-        image_label.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dfe6e9; border-radius: 4px; color: #95a5a6;")
-        self._set_price_card_image(image_label, item.get("image"), local_product.get("image_data"))
-        card_layout.addWidget(image_label, 0, Qt.AlignTop)
-
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        card_layout.setSpacing(6)
 
         top = QWidget()
         top_layout = QHBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(8)
+
+        image_label = QLabel()
+        image_label.setFixedSize(58, 58)
+        image_label.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dfe6e9; border-radius: 4px; color: #95a5a6;")
+        self._set_price_card_image(image_label, item.get("image"), local_product.get("image_data"))
+        top_layout.addWidget(image_label, 0, Qt.AlignVCenter)
 
         id_btn = QPushButton(f"商品ID: {product_id}")
         id_btn.setToolTip("单击复制商品ID")
@@ -971,23 +1181,34 @@ class PddProductMatchDialog(QDialog):
         )
         edit_btn.clicked.connect(lambda _checked=False, pid=product_id: self.open_price_product_spec_dialog(pid))
         action_layout.addWidget(edit_btn)
+        code_btn = QPushButton("抓取添加编码")
+        code_btn.setEnabled(bool(self._price_compare_categories(compare).get("spec")))
+        code_btn.setToolTip("仅打开抓取添加编码窗口，不自动搜索商品列表。")
+        code_btn.setStyleSheet(
+            "QPushButton { background-color: #f39c12; color: white; border: none; padding: 1px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #d68910; }"
+            "QPushButton:disabled { background-color: #bdc3c7; color: #666; }"
+        )
+        code_btn.clicked.connect(lambda _checked=False, pid=product_id: self.open_unmatched_code_match(pid))
+        action_layout.addWidget(code_btn)
         top_layout.addWidget(action_widget, 0)
-        right_layout.addWidget(top)
+        card_layout.addWidget(top)
 
         title_label = QLabel(item.get("title") or local_product.get("title") or "--")
         title_label.setWordWrap(True)
-        title_label.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 2px 0;")
-        right_layout.addWidget(title_label)
+        title_label.setStyleSheet("font-size: 13px; color: #2c3e50; padding: 0;")
+        card_layout.addWidget(title_label)
 
         spec_table = QTableWidget()
-        spec_table.setColumnCount(9)
-        spec_table.setHorizontalHeaderLabels(["规格名称", "软件价格", "券前价", "价格标签", "优惠券", "新客立减", "软件券后价", "单件预估实收", "匹配状态"])
+        spec_table.setColumnCount(10)
+        spec_table.setHorizontalHeaderLabels(["规格名称", "软件价格", "抓取价格", "价格标签", "优惠券", "新客立减", "店铺满减", "软件券后价", "抓取实收价格", "匹配状态"])
         spec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         spec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        spec_table.setWordWrap(True)
         spec_table.verticalHeader().setVisible(False)
         spec_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         spec_table.horizontalHeader().setStretchLastSection(True)
-        widths = [360, 80, 80, 100, 80, 90, 95, 110, 220]
+        widths = [280, 76, 76, 92, 76, 84, 92, 88, 104, 210]
         for col, width in enumerate(widths):
             spec_table.setColumnWidth(col, width)
         rows = compare.get("rows") or []
@@ -1002,26 +1223,25 @@ class PddProductMatchDialog(QDialog):
                 row_data.get("price_tag") or row_data.get("price_tag_type") or "--",
                 self._fmt_money(row_data.get("coupon_amount")),
                 self._fmt_money(row_data.get("new_customer_discount")),
+                row_data.get("store_full_reduction_text") or "--",
                 self._fmt_money(row_data.get("local_final_price")),
                 self._fmt_money(row_data.get("final_receipt")),
                 row_data.get("status", ""),
             ]
             for col, value in enumerate(values):
                 table_item = QTableWidgetItem(str(value))
-                table_item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col in (0, 8) else Qt.AlignCenter))
-                if col in (0, 8):
+                table_item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col in (0, 9) else Qt.AlignCenter))
+                if col in (0, 9):
                     table_item.setFlags(table_item.flags() | Qt.ItemIsEnabled)
                     table_item.setToolTip(str(value))
-                if col == 8:
+                if col == 9:
                     table_item.setForeground(QColor("#27ae60" if value == "匹配" else "#e74c3c"))
                 spec_table.setItem(row_index, col, table_item)
         spec_table.resizeRowsToContents()
         header_height = spec_table.horizontalHeader().sizeHint().height()
         rows_height = sum(spec_table.rowHeight(i) for i in range(spec_table.rowCount()))
         spec_table.setFixedHeight(header_height + rows_height + 8)
-        right_layout.addWidget(spec_table)
-
-        card_layout.addWidget(right, 1)
+        card_layout.addWidget(spec_table)
         if insert_at is None:
             insert_at = max(0, self.price_scroll_layout.count() - 1)
         self.price_scroll_layout.insertWidget(insert_at, card)
@@ -1031,16 +1251,21 @@ class PddProductMatchDialog(QDialog):
     def _product_discount_target(self, item):
         coupon_values = []
         new_customer_values = []
+        store_full_reduction_values = []
         for spec in item.get("specs") or []:
             coupon = self._parse_price_value(spec.get("coupon_amount"))
             new_customer = self._parse_price_value(spec.get("new_customer_discount"))
+            store_full_reduction = self._parse_price_value(spec.get("store_full_reduction_amount"))
             if coupon is not None:
                 coupon_values.append(coupon)
             if new_customer is not None:
                 new_customer_values.append(new_customer)
+            if store_full_reduction is not None:
+                store_full_reduction_values.append(store_full_reduction)
         return {
             "coupon_amount": max(coupon_values) if coupon_values else 0.0,
             "new_customer_discount": max(new_customer_values) if new_customer_values else 0.0,
+            "store_full_reduction_amount": max(store_full_reduction_values) if store_full_reduction_values else 0.0,
         }
 
     def _product_tag_target(self, item):
@@ -1076,13 +1301,22 @@ class PddProductMatchDialog(QDialog):
             local_spec = local_specs.get(spec_name) or local_specs.get(self._normalize_spec_name_for_match(spec_name))
             before_price = self._parse_price_value(spec.get("before_price"))
             final_receipt = self._parse_price_value(spec.get("final_receipt"))
+            store_full_reduction_amount = self._parse_price_value(spec.get("store_full_reduction_amount")) or 0.0
+            store_full_reduction_threshold = self._parse_price_value(spec.get("store_full_reduction_threshold"))
+            effective_store_full_reduction = store_full_reduction_amount
+            if store_full_reduction_threshold is not None and before_price is not None and before_price < store_full_reduction_threshold:
+                effective_store_full_reduction = 0.0
             status_parts = []
             row_can_sync = True
             row_matched = True
             local_sale_price = local_spec.get("sale_price") if local_spec else None
             local_final_price = None
             if local_sale_price is not None:
-                local_final_price = local_sale_price - max(float(local_coupon or 0), float(local_new_customer or 0))
+                local_final_price = local_sale_price - max(
+                    float(local_coupon or 0),
+                    float(local_new_customer or 0),
+                    float(effective_store_full_reduction or 0),
+                )
 
             if not local_spec:
                 status_parts.append("规格不匹配")
@@ -1134,6 +1368,9 @@ class PddProductMatchDialog(QDialog):
                 "price_tag_type": spec.get("price_tag_type", ""),
                 "coupon_amount": target_discount["coupon_amount"],
                 "new_customer_discount": target_discount["new_customer_discount"],
+                "store_full_reduction_amount": store_full_reduction_amount,
+                "store_full_reduction_threshold": store_full_reduction_threshold,
+                "store_full_reduction_text": spec.get("store_full_reduction_text") or "",
                 "local_final_price": local_final_price,
                 "final_receipt": final_receipt,
                 "status": "匹配" if row_matched else "不匹配：" + "、".join(status_parts),
@@ -1176,6 +1413,37 @@ class PddProductMatchDialog(QDialog):
             reasons.append("活动/营销工具未匹配")
         return reasons or ["未匹配"]
 
+    def _is_spec_unmatched_record(self, record):
+        return any("规格" in str(reason) for reason in (record or {}).get("reasons") or [])
+
+    def _spec_unmatched_records(self):
+        return [
+            record for record in (self.price_unmatched_records or {}).values()
+            if self._is_spec_unmatched_record(record)
+        ]
+
+    def _provided_spec_unmatched_records(self):
+        provider = getattr(self, "unmatched_records_provider", None)
+        records = provider() if callable(provider) else []
+        if isinstance(records, dict):
+            records = records.values()
+        return [record for record in (records or []) if self._is_spec_unmatched_record(record)]
+
+    def _refresh_unmatched_spec_ids_panel(self):
+        if not hasattr(self, "unmatched_specs_widget"):
+            return
+        records = self._provided_spec_unmatched_records()
+        ids = []
+        for record in records:
+            product_id = str((record or {}).get("product_id") or "").strip()
+            if product_id and product_id not in ids:
+                ids.append(product_id)
+        self._code_unmatched_spec_ids = ids
+        visible = self.mode == "code" and bool(ids)
+        self.unmatched_specs_widget.setVisible(visible)
+        if visible:
+            self.lbl_unmatched_specs.setText("已记录未匹配规格ID：" + "、".join(ids))
+
     def _sort_records_by_time(self, records):
         def key(record):
             text = str(record.get("time", "") if isinstance(record, dict) else "")
@@ -1187,6 +1455,10 @@ class PddProductMatchDialog(QDialog):
         return sorted(records or [], key=key)
 
     def _record_product_operation(self, product_db_id, text, metric, old="", new="", change_type="pdd_sync"):
+        main_app = getattr(self.owner, "main_app", None) or self.owner
+        if main_app is not None and hasattr(main_app, "record_product_operation"):
+            main_app.record_product_operation(product_db_id, text, metric, old, new, change_type)
+            return
         now = datetime.now()
         time_str = now.strftime("%H:%M")
         rows = self.db.safe_fetchall(
@@ -1219,32 +1491,28 @@ class PddProductMatchDialog(QDialog):
             (product_db_id, now.year, now.month, now.day, json.dumps(records, ensure_ascii=False)),
         )
 
-    def _record_store_link_change(self, store_id, action, product_id, product_title):
-        now = datetime.now()
-        time_str = now.strftime("%H:%M")
-        action_text = "链接上架" if action == "add" else "链接覆盖"
-        product_id = str(product_id or "").strip()
-        product_title = str(product_title or "").strip()
-        records = self.db.get_store_record(store_id, now.year, now.month, now.day)
-        if not isinstance(records, list):
-            records = []
-        records.append({
-            "time": time_str,
-            "text": f"【{action_text}】商品ID：{product_id}｜标题：{product_title}",
-            "type": "link_change",
-            "action": action,
-            "product_id": product_id,
-            "product_title": product_title,
-        })
-        self.db.save_store_record(store_id, now.year, now.month, now.day, records)
-
     def _execute_required(self, query, params=()):
         cursor = self.db.safe_execute(query, params)
         if cursor is None:
             raise RuntimeError(f"数据库写入失败：{query[:80]}")
         return cursor
 
-    def _refresh_store_margin_after_link_write(self):
+    def _autosave_archive_after_link_write(self):
+        try:
+            self.db.conn.commit()
+        except Exception as e:
+            print(f"link write commit failed: {e}")
+
+        candidates = [self.owner, self.parent(), getattr(self.owner, "main_app", None)]
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "autosave_current_archive"):
+                ok, result = candidate.autosave_current_archive()
+                if not ok:
+                    print(f"link write archive autosave failed: {result}")
+                return ok
+        return True
+
+    def _refresh_store_margin_after_link_write(self, product_db_id=None, created=False):
         targets = []
 
         def add_target(obj):
@@ -1263,20 +1531,31 @@ class PddProductMatchDialog(QDialog):
                 add_target(store_dialogs.get(store_id))
 
         for target in targets:
-            for method_name in (
-                "load_specs",
-                "load_products",
-                "update_compare_columns",
-                "update_product_avg_price",
-                "calculate_total_margin",
-                "delayed_refresh",
-                "force_refresh_frozen_table",
-            ):
+            schedule = getattr(target, "schedule_pdd_link_refresh", None)
+            if callable(schedule):
+                schedule(store_id, product_db_id, created=created)
+                continue
+            for method_name in ("load_specs", "load_products", "force_refresh_frozen_table"):
                 method = getattr(target, method_name, None)
                 if callable(method):
                     method()
-            if hasattr(target, "load_data_safe"):
-                target.load_data_safe()
+                    break
+
+    def _refresh_after_price_sync(self, product_id=None, product_db_id=None):
+        if product_db_id is None and product_id is not None:
+            rows = (self.price_sync_rows.get(str(product_id)) or {}).get("rows") or []
+            product_db_id = rows[0].get("product_db_id") if rows else None
+        if callable(append_event):
+            append_event(f"pdd_price_sync:refresh product_id={product_id} product_db_id={product_db_id}")
+        if isinstance(product_db_id, (list, tuple, set)):
+            for db_id in product_db_id:
+                self._refresh_store_margin_after_link_write(db_id)
+        else:
+            self._refresh_store_margin_after_link_write(product_db_id)
+        if product_id is None:
+            self.refresh_all_price_management_matches()
+        else:
+            self.refresh_price_management_product(product_id)
 
     def _refresh_code_table_match_status(self):
         if self.mode != "code" or not self.table.isVisible():
@@ -1362,10 +1641,16 @@ class PddProductMatchDialog(QDialog):
             is_update = bool(existing)
             product_db_id = existing[0] if existing else None
             old_title = existing[1] if existing else ""
-            product_image_data = self._download_image_bytes((self.last_product_images or [""])[0])
+            include_product_image = self.chk_include_product_image.isChecked() if hasattr(self, "chk_include_product_image") else True
+            product_image_data = (
+                self.last_product_image_data
+                or self._download_image_bytes((self.last_product_images or [""])[0])
+            ) if include_product_image else None
+            if include_product_image and not product_image_data:
+                raise RuntimeError(f"主图下载失败：{self.last_image_download_error or '未抓取到主图'}")
 
             if is_update:
-                if product_image_data:
+                if include_product_image and product_image_data:
                     self._execute_required(
                         "UPDATE products SET title=?, image_data=? WHERE id=?",
                         (title, product_image_data, product_db_id),
@@ -1452,28 +1737,30 @@ class PddProductMatchDialog(QDialog):
                     spec_image_data = self._download_image_bytes(spec.get("image", ""))
                     self._execute_required(
                         "INSERT INTO product_specs (product_id, spec_name, spec_code, sale_price, weight_percent, spec_image_data) VALUES (?, ?, ?, ?, ?, ?)",
-                        (product_db_id, spec_name or spec_code, spec_code, sale_price, default_weight, spec_image_data),
+                    (product_db_id, spec_name or spec_code, spec_code, sale_price, default_weight, spec_image_data),
                     )
 
             action_text = "覆盖链接" if is_update else "新建链接"
+            image_text = "包含主图" if include_product_image else "不包含主图"
             self._record_product_operation(
                 product_db_id,
-                f"拼多多抓取{action_text}：商品ID {product_id}，标题：{title}，规格 {len(specs)} 个",
+                f"拼多多抓取{action_text}：商品ID {product_id}，标题：{title}，规格 {len(specs)} 个，{image_text}",
                 metric=action_text,
                 old=old_title if is_update else "",
                 new=title,
                 change_type="pdd_link_sync",
             )
-            self._record_store_link_change(store_id, "update" if is_update else "add", product_id, title)
+            self._autosave_archive_after_link_write()
 
-            self._refresh_store_margin_after_link_write()
             if hasattr(self, "btn_open_current_spec"):
                 self.btn_open_current_spec.setEnabled(True)
             self.lbl_summary.setText(
-                f"已按当前界面内容{'覆盖' if is_update else '创建'}本店铺链接：{product_id}，规格 {len(specs)} 个。"
+                f"已按当前界面内容{'覆盖' if is_update else '创建'}本店铺链接：{product_id}，规格 {len(specs)} 个，{image_text}。"
             )
             self._refresh_code_table_match_status()
             QMessageBox.information(self, "写入完成", f"已{'覆盖' if is_update else '创建'}本店铺链接：{product_id}\n规格：{len(specs)} 个")
+            self.link_saved.emit(product_id)
+            QTimer.singleShot(0, lambda pid=product_db_id, created=not is_update: self._refresh_store_margin_after_link_write(pid, created))
         except Exception as e:
             QMessageBox.warning(self, "写入失败", f"创建/覆盖链接失败：{e}")
 
@@ -1504,8 +1791,14 @@ class PddProductMatchDialog(QDialog):
 
         product_db_id, old_title = rows[0]
         try:
-            product_image_data = self._download_image_bytes((self.last_product_images or [""])[0])
-            if product_image_data:
+            include_product_image = self.chk_include_product_image.isChecked() if hasattr(self, "chk_include_product_image") else True
+            product_image_data = (
+                self.last_product_image_data
+                or self._download_image_bytes((self.last_product_images or [""])[0])
+            ) if include_product_image else None
+            if include_product_image and not product_image_data:
+                raise RuntimeError(f"主图下载失败：{self.last_image_download_error or '未抓取到主图'}")
+            if include_product_image and product_image_data:
                 self.db.safe_execute(
                     "UPDATE products SET title=?, image_data=? WHERE id=?",
                     (title, product_image_data, product_db_id),
@@ -1567,23 +1860,22 @@ class PddProductMatchDialog(QDialog):
                 if spec_id not in kept_ids:
                     self.db.safe_execute("DELETE FROM product_specs WHERE id=?", (spec_id,))
 
+            image_text = "包含主图" if include_product_image else "不包含主图"
             self._record_product_operation(
                 product_db_id,
-                f"拼多多覆盖非价格信息：商品ID {product_id}，标题：{title}，规格 {len(kept_ids)} 个，价格保持不变",
+                f"拼多多覆盖非价格信息：商品ID {product_id}，标题：{title}，规格 {len(kept_ids)} 个，价格保持不变，{image_text}",
                 metric="覆盖非价格信息",
                 old=old_title,
                 new=title,
                 change_type="pdd_link_non_price_sync",
             )
-            parent = self.owner or self.parent()
-            if parent and hasattr(parent, "load_products"):
-                parent.load_products()
-            self._refresh_store_margin_after_link_write()
             self.lbl_summary.setText(
-                f"已按当前界面内容覆盖商品 {product_id} 的非价格信息，规格 {len(kept_ids)} 个。"
+                f"已按当前界面内容覆盖商品 {product_id} 的非价格信息，规格 {len(kept_ids)} 个，{image_text}。"
             )
             self._refresh_code_table_match_status()
-            QMessageBox.information(self, "覆盖完成", f"已覆盖商品 {product_id} 的非价格信息。\n规格：{len(kept_ids)} 个\n已有规格价格保持不变；新增规格价格为 0。")
+            QMessageBox.information(self, "覆盖完成", f"已覆盖商品 {product_id} 的非价格信息。\n规格：{len(kept_ids)} 个\n{image_text}\n已有规格价格保持不变；新增规格价格为 0。")
+            self.link_saved.emit(product_id)
+            QTimer.singleShot(0, lambda pid=product_db_id: self._refresh_store_margin_after_link_write(pid))
         except Exception as e:
             QMessageBox.warning(self, "覆盖失败", f"覆盖除价格之外的信息失败：{e}")
 
@@ -1613,6 +1905,7 @@ class PddProductMatchDialog(QDialog):
             return
 
         self._set_code_table_mode()
+        self._refresh_unmatched_spec_ids_panel()
         self._set_scan_controls_enabled(False)
         QApplication.processEvents()
         try:
@@ -1681,6 +1974,7 @@ class PddProductMatchDialog(QDialog):
             f"规格匹配 {matched_specs}/{len(specs)}。"
         )
         self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+        self._refresh_unmatched_spec_ids_panel()
         if hasattr(self, "btn_open_current_spec"):
             self.btn_open_current_spec.setEnabled(bool(product_match))
 
@@ -1792,32 +2086,56 @@ class PddProductMatchDialog(QDialog):
 
         self.price_unmatched_spec_product_ids = sorted(set(self.price_unmatched_spec_product_ids), key=self.price_unmatched_spec_product_ids.index)
         if hasattr(self, "btn_copy_unmatched_specs"):
-            self.btn_copy_unmatched_specs.setEnabled(True)
+            self.btn_copy_unmatched_specs.setEnabled(bool(self._spec_unmatched_records()))
+        if hasattr(self, "btn_refresh_price_match"):
+            self.btn_refresh_price_match.setEnabled(bool(self.price_result_items))
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setEnabled(any(compare.get("can_sync") for compare in (self.price_sync_rows or {}).values()))
+        self.lbl_summary.setStyleSheet("font-size: 20px; font-weight: bold; padding: 6px 0;")
         self.lbl_summary.setText(
-            f"价格管理抓取完成：当前抓取链接 {len(items)} 个，商品ID匹配 {len(matched_items)} 个，完全匹配 {full_matched_count} 个，"
-            f"总未匹配 {total_unmatched_count} 个；未匹配规格 {spec_unmatched_count} 个，未匹配价格 {price_unmatched_count} 个，"
-            f"未匹配活动/营销工具 {marketing_unmatched_count} 个，商品ID未匹配 {product_unmatched_count} 个。"
+            _price_match_summary_html(
+                len(items),
+                full_matched_count,
+                total_unmatched_count,
+                spec_unmatched_count,
+                price_unmatched_count,
+                marketing_unmatched_count,
+                product_unmatched_count,
+            )
         )
         self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+        if self.unmatched_task_window is not None:
+            self.unmatched_task_window.remove_product_ids(self.price_current_page_matched_product_ids)
+            self.unmatched_task_window.upsert_records(self._spec_unmatched_records())
+        if self.unmatched_code_dialog is not None:
+            self.unmatched_code_dialog._refresh_unmatched_spec_ids_panel()
 
         if not display_rows:
             QMessageBox.information(self, "没有可展示的匹配链接", "已抓到价格管理页面，但没有商品ID能匹配当前软件店铺，或没有识别到规格价格。")
 
-    def sync_price_management_product(self, product_id):
+    def sync_price_management_product(self, product_id, show_message=True, refresh_after=True):
         product_id = str(product_id or "").strip()
         compare = self.price_sync_rows.get(product_id)
         if not compare:
-            QMessageBox.warning(self, "提示", "当前链接没有可同步的价格管理抓取结果。")
-            return
+            message = "当前链接没有可同步的价格管理抓取结果。"
+            if show_message:
+                QMessageBox.warning(self, "提示", message)
+            return False, message
         if not compare.get("can_sync"):
-            QMessageBox.information(self, "无需同步", "该链接已匹配，或存在规格名称不一致/缺少关键价格字段，不能同步。")
-            return
+            message = "该链接已匹配，或存在规格名称不一致/缺少关键价格字段，不能同步。"
+            if show_message:
+                QMessageBox.information(self, "无需同步", message)
+            return False, message
 
         rows = compare.get("rows") or []
         product_db_id = rows[0].get("product_db_id") if rows else None
         if not product_db_id:
-            QMessageBox.warning(self, "提示", "没有找到软件商品，不能同步。")
-            return
+            message = "没有找到软件商品，不能同步。"
+            if show_message:
+                QMessageBox.warning(self, "提示", message)
+            return False, message
+        if callable(append_event):
+            append_event(f"pdd_price_sync:item:start product_id={product_id} product_db_id={product_db_id}")
 
         try:
             old_product_rows = self.db.safe_fetchall(
@@ -1860,20 +2178,68 @@ class PddProductMatchDialog(QDialog):
                 "UPDATE products SET coupon_amount=?, new_customer_discount=?, is_limited_time=?, is_marketing=? WHERE id=?",
                 (coupon_amount, new_customer_discount, is_limited_time, is_marketing, product_db_id),
             )
-            self._record_product_operation(
-                product_db_id,
-                f"拼多多价格管理同步：商品ID {product_id}；" + ("；".join(changes) if changes else "无变化"),
-                metric="价格营销同步",
-                old="",
-                new="；".join(changes),
-                change_type="pdd_price_marketing_sync",
-            )
+            if changes:
+                self._record_product_operation(
+                    product_db_id,
+                    "；".join(changes),
+                    metric="改价",
+                    old="",
+                    new="；".join(changes),
+                    change_type="pdd_price_marketing_sync",
+                )
 
-            self._refresh_store_margin_after_link_write()
-            self.refresh_price_management_product(product_id)
-            QMessageBox.information(self, "同步完成", f"已同步商品 {product_id} 的价格和营销信息。")
+            if show_message:
+                QMessageBox.information(self, "同步完成", f"已同步商品 {product_id} 的价格和营销信息。")
+            if refresh_after:
+                QTimer.singleShot(0, lambda pid=product_id, dbid=product_db_id: self._refresh_after_price_sync(pid, dbid))
+            if callable(append_event):
+                append_event(f"pdd_price_sync:item:done product_id={product_id} product_db_id={product_db_id}")
+            return True, f"已同步商品 {product_id}"
         except Exception as e:
-            QMessageBox.warning(self, "同步失败", f"同步价格和营销失败：{e}")
+            message = f"同步价格和营销失败：{e}"
+            if show_message:
+                QMessageBox.warning(self, "同步失败", message)
+            return False, message
+
+    def sync_all_price_management_products(self):
+        syncable_ids = [
+            str(product_id)
+            for product_id, compare in (self.price_sync_rows or {}).items()
+            if compare.get("can_sync")
+        ]
+        if not syncable_ids:
+            self.lbl_summary.setText("当前没有可一键同步的未匹配链接。规格不匹配、商品未匹配、已完全匹配的链接会自动跳过。")
+            QMessageBox.information(self, "无需同步", "当前没有可一键同步的未匹配链接。")
+            return
+
+        self.btn_sync_all_price.setEnabled(False)
+        self._set_scan_controls_enabled(False)
+        QApplication.processEvents()
+        success = 0
+        failed = []
+        synced_db_ids = []
+        try:
+            for product_id in syncable_ids:
+                ok, message = self.sync_price_management_product(product_id, show_message=False, refresh_after=False)
+                if ok:
+                    success += 1
+                    rows = (self.price_sync_rows.get(str(product_id)) or {}).get("rows") or []
+                    if rows and rows[0].get("product_db_id"):
+                        synced_db_ids.append(rows[0].get("product_db_id"))
+                else:
+                    failed.append(f"{product_id}: {message}")
+        finally:
+            self._set_scan_controls_enabled(True)
+            if hasattr(self, "btn_sync_all_price"):
+                self.btn_sync_all_price.setEnabled(any(compare.get("can_sync") for compare in (self.price_sync_rows or {}).values()))
+
+        summary = f"一键同步完成：成功 {success} 个，跳过/失败 {len(failed)} 个。"
+        if failed:
+            summary += " " + "；".join(failed[:5])
+            self.lbl_summary.setToolTip("\n".join(failed))
+        self.lbl_summary.setText(summary)
+        QMessageBox.information(self, "一键同步完成", summary)
+        QTimer.singleShot(0, lambda ids=synced_db_ids: self._refresh_after_price_sync(None, ids))
 
     def open_price_product_spec_dialog(self, product_id):
         product_id = str(product_id or "").strip()
@@ -1888,7 +2254,9 @@ class PddProductMatchDialog(QDialog):
         parent = self.owner or self.parent()
         dialog = None
         try:
-            if parent and hasattr(parent, "open_spec_dialog"):
+            if parent and hasattr(parent, "open_product_spec_dialog"):
+                dialog = parent.open_product_spec_dialog(self.db, product_db_id, product_id, product_title, parent)
+            elif parent and hasattr(parent, "open_spec_dialog"):
                 dialog = parent.open_spec_dialog(product_db_id, product_id, product_title)
             elif parent and hasattr(parent, "main_app") and hasattr(parent.main_app, "open_product_spec_dialog"):
                 dialog = parent.main_app.open_product_spec_dialog(self.db, product_db_id, product_id, product_title, parent)
@@ -1896,7 +2264,10 @@ class PddProductMatchDialog(QDialog):
             QMessageBox.warning(self, "打开失败", f"打开规格与毛利管理失败：{e}")
             return
 
-        if dialog is not None and hasattr(dialog, "finished"):
+        if dialog is None:
+            QMessageBox.warning(self, "打开失败", "没有找到规格与毛利管理窗口入口。")
+            return
+        if hasattr(dialog, "finished"):
             dialog.finished.connect(lambda result=0, pid=product_id: self._refresh_price_product_after_edit(pid, result))
         elif dialog is not None and hasattr(dialog, "destroyed"):
             dialog.destroyed.connect(lambda _=None: None)
@@ -1948,14 +2319,48 @@ class PddProductMatchDialog(QDialog):
         self.price_unmatched_spec_product_ids = sorted(set(self.price_unmatched_spec_product_ids), key=self.price_unmatched_spec_product_ids.index)
         self.price_current_page_matched_product_ids = sorted(set(self.price_current_page_matched_product_ids), key=self.price_current_page_matched_product_ids.index)
         if hasattr(self, "btn_copy_unmatched_specs"):
-            self.btn_copy_unmatched_specs.setEnabled(True)
+            self.btn_copy_unmatched_specs.setEnabled(bool(self._spec_unmatched_records()))
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setEnabled(any(compare.get("can_sync") for compare in (self.price_sync_rows or {}).values()))
         if self.unmatched_task_window is not None:
-            if compare.get("all_matched"):
+            if compare.get("all_matched") or not self._is_spec_unmatched_record(self.price_unmatched_records.get(product_id, {})):
                 self.unmatched_task_window.remove_product_ids([product_id])
             else:
                 self.unmatched_task_window.upsert_records([self.price_unmatched_records[product_id]])
+        if self.unmatched_code_dialog is not None:
+            self.unmatched_code_dialog._refresh_unmatched_spec_ids_panel()
         self._add_price_result_card(item, local_product, compare, insert_at=insert_at)
         self.lbl_summary.setText(f"商品ID {product_id} 已根据保存后的软件规格刷新匹配状态。")
+
+    def refresh_all_price_management_matches(self):
+        product_ids = list((self.price_result_items or {}).keys())
+        if not product_ids:
+            self.lbl_summary.setText("当前没有缓存的价格管理抓取结果，请先点击“开始抓取”。")
+            return
+
+        self.price_unmatched_spec_product_ids = []
+        self.price_unmatched_records = {}
+        self.price_current_page_matched_product_ids = []
+        refreshed_count = 0
+        for product_id in product_ids:
+            cached = self.price_result_items.get(product_id) or {}
+            item = cached.get("item")
+            if not item:
+                continue
+            local_product = self._local_products_for_store(self.current_store_id()).get(str(product_id))
+            if not local_product:
+                self.price_unmatched_records[str(product_id)] = {
+                    "product_id": str(product_id),
+                    "title": item.get("title") or "",
+                    "reasons": ["商品ID未匹配"],
+                }
+                continue
+            self.refresh_price_management_product(str(product_id))
+            refreshed_count += 1
+
+        self.lbl_summary.setText(f"已基于当前缓存重新刷新 {refreshed_count}/{len(product_ids)} 个价格管理链接的匹配状态。")
+        if hasattr(self, "btn_sync_all_price"):
+            self.btn_sync_all_price.setEnabled(any(compare.get("can_sync") for compare in (self.price_sync_rows or {}).values()))
 
     def copy_missing_ids(self):
         QApplication.clipboard().setText("\n".join(self.missing_ids))
@@ -1964,9 +2369,10 @@ class PddProductMatchDialog(QDialog):
     def show_unmatched_task_window(self):
         if self.unmatched_task_window is None:
             self.unmatched_task_window = PddUnmatchedTaskWindow()
+            self.unmatched_task_window.open_code_requested.connect(self.open_unmatched_code_match)
             self.unmatched_task_window.destroyed.connect(lambda _=None: setattr(self, "unmatched_task_window", None))
         self.unmatched_task_window.remove_product_ids(self.price_current_page_matched_product_ids)
-        self.unmatched_task_window.upsert_records(list((self.price_unmatched_records or {}).values()))
+        self.unmatched_task_window.upsert_records(self._spec_unmatched_records())
         if self.unmatched_task_window.isMinimized():
             self.unmatched_task_window.showNormal()
         else:
@@ -1974,8 +2380,55 @@ class PddProductMatchDialog(QDialog):
         self.unmatched_task_window.raise_()
         self.unmatched_task_window.activateWindow()
         self.lbl_summary.setText(
-            f"已生成未匹配置顶窗口：本次新增/更新 {len(self.price_unmatched_records or {})} 个未匹配链接。"
+            f"已生成未匹配规格链接窗口：本次新增/更新 {len(self._spec_unmatched_records())} 个规格未匹配链接。"
         )
+
+    def open_unmatched_code_match(self, product_id):
+        product_id = str(product_id or "").strip()
+        store_id = self.current_store_id()
+        if not product_id or not store_id:
+            return
+        try:
+            if self.unmatched_code_dialog is None:
+                self.unmatched_code_dialog = PddProductMatchDialog(
+                    self.db,
+                    self.monitor,
+                    default_store_id=store_id,
+                    parent=None,
+                    mode="code",
+                    store_id_provider=self.current_store_id,
+                    owner=self.owner or self,
+                    unmatched_records_provider=lambda: (
+                        self.unmatched_task_window.records
+                        if self.unmatched_task_window is not None
+                        else self.price_unmatched_records
+                    ),
+                )
+                self.unmatched_code_dialog.link_saved.connect(self._unmatched_code_saved)
+                self.unmatched_code_dialog.destroyed.connect(lambda _=None: setattr(self, "unmatched_code_dialog", None))
+            else:
+                self.unmatched_code_dialog.unmatched_records_provider = lambda: (
+                    self.unmatched_task_window.records
+                    if self.unmatched_task_window is not None
+                    else self.price_unmatched_records
+                )
+                self.unmatched_code_dialog._refresh_unmatched_spec_ids_panel()
+            if self.unmatched_code_dialog.isMinimized():
+                self.unmatched_code_dialog.showNormal()
+            else:
+                self.unmatched_code_dialog.show()
+            self.unmatched_code_dialog.raise_()
+            self.unmatched_code_dialog.activateWindow()
+            self.unmatched_code_dialog.lbl_summary.setText(
+                f"已打开抓取添加编码窗口。商品ID {product_id} 可在上方未匹配规格ID中复制；请手动打开对应添加编码界面后点击开始抓取。"
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "抓取添加编码", f"打开商品 {product_id} 的抓取添加编码失败：{e}")
+
+    def _unmatched_code_saved(self, product_id):
+        product_id = str(product_id or "").strip()
+        if product_id in self.price_result_items:
+            QTimer.singleShot(0, lambda pid=product_id: self.refresh_price_management_product(pid))
 
     def copy_unmatched_spec_product_ids(self):
         ids = [str(product_id).strip() for product_id in (self.price_unmatched_spec_product_ids or []) if str(product_id).strip()]
@@ -1991,6 +2444,513 @@ class PddProductMatchDialog(QDialog):
         self.lbl_summary.setText("已复制当前页面调试JSON。")
 
 
+class PddPromotionStatusDialog(QDialog):
+    """展示当前商品推广页面抓取到的直通车推广状态和软件投产设置对比。"""
+
+    def __init__(self, db, monitor, store_id_provider, parent=None, owner=None):
+        super().__init__(parent)
+        self.db = db
+        self.monitor = monitor
+        self.store_id_provider = store_id_provider
+        self.owner = owner or parent
+        self.last_debug_info = {}
+        self.captured_items = {}
+        self.setWindowTitle("拼多多推广状态抓取")
+        self.resize(1180, 720)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        top = QHBoxLayout()
+        self.lbl_summary = QLabel("请先在浏览器切到商品推广页面，再点击“抓取当前推广页”。")
+        self.lbl_summary.setWordWrap(True)
+        self.lbl_summary.setStyleSheet("color: #555;")
+        top.addWidget(self.lbl_summary, 1)
+        self.btn_scan = QPushButton("抓取当前推广页")
+        self.btn_scan.clicked.connect(self.scan_current_page)
+        self._style_button(self.btn_scan, "#8e44ad", "#7d3c98", "#5b2c6f")
+        top.addWidget(self.btn_scan)
+        self.btn_sync_all = QPushButton("一键同步修改所有")
+        self.btn_sync_all.clicked.connect(self.sync_all_items)
+        self._style_button(self.btn_sync_all, "#27ae60", "#1e8449", "#145a32")
+        top.addWidget(self.btn_sync_all)
+        self.btn_clear = QPushButton("清空结果")
+        self.btn_clear.clicked.connect(self.clear_results)
+        self._style_button(self.btn_clear, "#566573", "#34495e", "#273746")
+        top.addWidget(self.btn_clear)
+        self.btn_copy_debug = QPushButton("复制调试JSON")
+        self.btn_copy_debug.clicked.connect(self.copy_debug_json)
+        self._style_button(self.btn_copy_debug, "#3498db", "#21618c", "#154360")
+        top.addWidget(self.btn_copy_debug)
+        layout.addLayout(top)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels([
+            "主图", "商品ID", "软件标题", "抓取推广", "抓取类型", "抓取数值",
+            "软件当前设置", "匹配结果", "抓取原文", "同步修改"
+        ])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(64)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 64)
+        self.table.setColumnWidth(1, 135)
+        self.table.setColumnWidth(2, 240)
+        self.table.setColumnWidth(3, 82)
+        self.table.setColumnWidth(4, 118)
+        self.table.setColumnWidth(5, 88)
+        self.table.setColumnWidth(6, 230)
+        self.table.setColumnWidth(7, 170)
+        self.table.setColumnWidth(9, 96)
+        layout.addWidget(self.table)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+        self._style_button(btn_close, "#7f8c8d", "#566573", "#424949")
+        bottom.addWidget(btn_close)
+        layout.addLayout(bottom)
+
+    def _button_style(self, bg, hover, pressed=None):
+        pressed = pressed or hover
+        return (
+            f"QPushButton {{ background-color: {bg}; color: white; border: 1px solid {hover}; "
+            "padding: 7px 14px; border-radius: 5px; font-weight: bold; }}"
+            f"QPushButton:hover {{ background-color: {hover}; border: 1px solid {pressed}; }}"
+            f"QPushButton:pressed {{ background-color: {pressed}; padding-top: 8px; padding-left: 15px; }}"
+            "QPushButton:disabled { background-color: #bdc3c7; border-color: #aeb6bf; color: #f4f6f7; }"
+        )
+
+    def _style_button(self, button, bg, hover, pressed=None):
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(self._button_style(bg, hover, pressed))
+
+    def _show_toast(self, message):
+        main_app = self._main_app()
+        if main_app is not None and hasattr(main_app, "show_toast"):
+            main_app.show_toast(message)
+        else:
+            self.lbl_summary.setText(message)
+
+    def current_store_id(self):
+        try:
+            return self.store_id_provider() if self.store_id_provider else None
+        except Exception:
+            return None
+
+    def _load_local_products(self):
+        store_id = self.current_store_id()
+        if not store_id:
+            return {}
+        rows = self.db.safe_fetchall(
+            """SELECT id, name, title, image_data, COALESCE(current_roi, 0),
+                      COALESCE(transaction_bid, 0), COALESCE(roi_input_mode, 'roi'),
+                      COALESCE(is_natural_flow, 0), COALESCE(is_sitewide_managed, 0)
+               FROM products
+               WHERE store_id=? AND COALESCE(is_archived, 0)=0""",
+            (store_id,),
+        )
+        return {
+            str(row[1] or "").strip(): {
+                "db_id": row[0],
+                "product_id": str(row[1] or "").strip(),
+                "title": row[2] or "",
+                "image_data": row[3],
+                "current_roi": float(row[4] or 0),
+                "transaction_bid": float(row[5] or 0),
+                "roi_input_mode": row[6] if row[6] in ("roi", "bid") else "roi",
+                "is_natural_flow": bool(row[7]),
+                "is_sitewide_managed": bool(row[8]),
+            }
+            for row in rows
+        }
+
+    def _numeric_value(self, value):
+        match = re.search(r"-?\d+(?:\.\d+)?", str(value or "").replace(",", ""))
+        return float(match.group(0)) if match else None
+
+    def _software_setting_text(self, product):
+        if not product:
+            return "软件未找到该商品ID"
+        if product.get("is_natural_flow"):
+            return "自然流｜软件当前未开启直通车"
+        if product.get("is_sitewide_managed"):
+            return "全站托管｜软件当前不是直通车模式"
+        if product.get("roi_input_mode") == "bid":
+            return f"稳定成本推广｜净成交出价 ¥{product.get('transaction_bid', 0):.2f}｜折算投产 {product.get('current_roi', 0):.2f}"
+        return f"稳定成本推广｜净目标投产比 {product.get('current_roi', 0):.2f}"
+
+    def _compare_item(self, item, product):
+        if not product:
+            return "未匹配：软件没有这个商品ID", False
+
+        ad_enabled = bool(item.get("ad_enabled"))
+        software_active = (not product.get("is_natural_flow")) and (not product.get("is_sitewide_managed"))
+        problems = []
+        if ad_enabled != software_active:
+            if ad_enabled:
+                problems.append("开关不一致：抓取已开启，软件当前未开启；同步后会改为稳定成本推广")
+            else:
+                problems.append("开关不一致：抓取已关闭，软件当前为推广模式；同步后会改为自然流")
+
+        if not software_active:
+            if not problems:
+                return "匹配：软件非直通车推广，页面也未开启", True
+            return "；".join(problems), False
+
+        bid_type = str(item.get("bid_type") or "")
+        bid_value = self._numeric_value(item.get("bid_value"))
+        expected_type = "净成交出价" if product.get("roi_input_mode") == "bid" else "净目标投产比"
+        expected_value = product.get("transaction_bid") if product.get("roi_input_mode") == "bid" else product.get("current_roi")
+
+        if expected_type not in bid_type:
+            problems.append(f"类型不一致：抓取{bid_type or '未识别'}，软件{expected_type}")
+        if bid_value is None:
+            problems.append("抓取数值未识别")
+        elif abs(float(bid_value) - float(expected_value or 0)) > 0.01:
+            problems.append(f"数值不一致：抓取{bid_value:.2f}，软件{float(expected_value or 0):.2f}")
+
+        if problems:
+            return "；".join(problems), False
+        return "匹配", True
+
+    def _set_item(self, row, col, text, color=None):
+        item = QTableWidgetItem(str(text or ""))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setToolTip(str(text or ""))
+        if color:
+            item.setForeground(QColor(color))
+        self.table.setItem(row, col, item)
+        return item
+
+    def _set_image_cell(self, row, image_data):
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("padding: 1px; background: #fff;")
+        if image_data:
+            pixmap = QPixmap()
+            pixmap.loadFromData(bytes(image_data))
+            if not pixmap.isNull():
+                label.setPixmap(pixmap.scaled(58, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                label.setText("无图")
+        else:
+            label.setText("无图")
+        self.table.setCellWidget(row, 0, label)
+
+    def _set_sync_button(self, row, product_id, enabled=True):
+        button = QPushButton("同步")
+        button.setEnabled(bool(enabled))
+        self._style_button(button, "#2e86de", "#1b4f72", "#154360")
+        button.clicked.connect(lambda _checked=False, pid=product_id: self.sync_single_item(pid))
+        self.table.setCellWidget(row, 9, button)
+
+    def render_items(self):
+        items = list(self.captured_items.values())
+        items.sort(key=lambda item: str(item.get("product_id") or ""))
+        local_products = self._load_local_products()
+        self.table.setRowCount(0)
+        matched_count = 0
+        for item in items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setRowHeight(row, 64)
+            product_id = str(item.get("product_id") or "").strip()
+            product = local_products.get(product_id)
+            result_text, matched = self._compare_item(item, product)
+            if matched:
+                matched_count += 1
+            self._set_image_cell(row, product.get("image_data") if product else None)
+            self._set_item(row, 1, product_id)
+            self._set_item(row, 2, product.get("title", "") if product else "软件未匹配")
+            self._set_item(row, 3, item.get("ad_status_text") or ("开启" if item.get("ad_enabled") else "关闭"), "#008000" if item.get("ad_enabled") else "#999999")
+            self._set_item(row, 4, item.get("bid_type") or "--")
+            self._set_item(row, 5, item.get("bid_value") or "--")
+            self._set_item(row, 6, self._software_setting_text(product))
+            self._set_item(row, 7, result_text, "#008000" if matched else "#d00000")
+            self._set_item(row, 8, item.get("raw_text") or "")
+            item["_sync_needed"] = bool(product) and not matched
+            self._set_sync_button(row, product_id, enabled=item["_sync_needed"])
+        return matched_count, len(items)
+
+    def scan_current_page(self):
+        try:
+            if hasattr(self.monitor, "set_store_context"):
+                self.monitor.set_store_context(self.current_store_id())
+            info = self.monitor.inspect_promotion_status_page()
+        except Exception as e:
+            QMessageBox.warning(self, "抓取失败", f"读取当前推广页面失败：{e}")
+            return
+
+        self.last_debug_info = info
+        items = info.get("items") or []
+        for item in items:
+            product_id = str(item.get("product_id") or "").strip()
+            key = product_id or str(item.get("data_testid") or len(self.captured_items))
+            self.captured_items[key] = item
+
+        status = info.get("status") or f"已识别 {len(items)} 条推广状态"
+        matched_count, total_count = self.render_items()
+        self.lbl_summary.setText(f"{status}｜本次新增/更新 {len(items)} 条｜累计 {total_count} 条｜软件匹配 {matched_count}/{total_count} 条｜页面：{info.get('title') or '--'}")
+        self.lbl_summary.setToolTip(json.dumps(info, ensure_ascii=False, indent=2))
+        if not items:
+            detail = info.get("status") or "当前页面没有识别到商品推广开关。请确认已经切到商品推广列表，并且表格行已加载出来。"
+            if info.get("ok") is False:
+                QMessageBox.warning(self, "抓取失败", detail)
+            else:
+                QMessageBox.information(self, "未识别到数据", detail)
+
+    def clear_results(self):
+        self.captured_items = {}
+        self.table.setRowCount(0)
+        self.lbl_summary.setText("已清空推广状态抓取结果。")
+
+    def _main_app(self):
+        owner = self.owner
+        if owner is not None and hasattr(owner, "main_app"):
+            return owner.main_app
+        return owner
+
+    def _record_sync_operation(self, product_db_id, old_text, new_text):
+        main_app = self._main_app()
+        text = f"拼多多推广状态同步：{old_text} → {new_text}"
+        if main_app is not None and hasattr(main_app, "record_product_operation"):
+            main_app.record_product_operation(
+                product_db_id,
+                text,
+                metric="推广状态同步",
+                old=old_text,
+                new=new_text,
+                change_type="pdd_promotion_status_sync",
+            )
+
+    def _refresh_after_sync(self):
+        if append_event:
+            append_event("pdd_promotion_sync:refresh:start")
+        main_app = self._main_app()
+        owner = self.owner
+        if owner is not None and hasattr(owner, "load_data"):
+            owner.load_data()
+        if owner is not None and hasattr(owner, "update_summary"):
+            owner.update_summary()
+        if main_app is not None and hasattr(main_app, "refresh_store_cards"):
+            store_id = self.current_store_id()
+            if store_id:
+                main_app.refresh_store_cards(store_id)
+        if append_event:
+            append_event("pdd_promotion_sync:refresh:done")
+
+    def _target_setting_from_item(self, item, product):
+        ad_enabled = bool(item.get("ad_enabled"))
+        bid_type = str(item.get("bid_type") or "")
+        bid_value = self._numeric_value(item.get("bid_value"))
+        if not product:
+            raise ValueError("软件没有这个商品ID")
+        if not ad_enabled:
+            return {
+                "is_natural_flow": 1,
+                "is_sitewide_managed": 0,
+                "roi_input_mode": product.get("roi_input_mode") or "roi",
+                "current_roi": product.get("current_roi") or 0,
+                "transaction_bid": product.get("transaction_bid") or 0,
+                "text": "自然流",
+            }
+        if bid_value is None:
+            raise ValueError("推广开启但抓取数值为空，未同步")
+        if "净成交出价" in bid_type:
+            return {
+                "is_natural_flow": 0,
+                "is_sitewide_managed": 0,
+                "roi_input_mode": "bid",
+                "current_roi": product.get("current_roi") or 0,
+                "transaction_bid": bid_value,
+                "text": f"稳定成本推广｜净成交出价 ¥{bid_value:.2f}",
+            }
+        return {
+            "is_natural_flow": 0,
+            "is_sitewide_managed": 0,
+            "roi_input_mode": "roi",
+            "current_roi": bid_value,
+            "transaction_bid": product.get("transaction_bid") or 0,
+            "text": f"稳定成本推广｜净目标投产比 {bid_value:.2f}",
+        }
+
+    def _sync_item(self, product_id, item=None, refresh=True):
+        product_id = str(product_id or "").strip()
+        if append_event:
+            append_event(f"pdd_promotion_sync:item:start product_id={product_id} refresh={refresh}")
+        if not item:
+            item = self.captured_items.get(product_id)
+        if not item:
+            return False, f"{product_id or '空ID'}：没有抓取数据"
+        product = self._load_local_products().get(product_id)
+        if not product:
+            return False, f"{product_id}：软件没有这个商品ID"
+        result_text, matched = self._compare_item(item, product)
+        if matched:
+            if append_event:
+                append_event(f"pdd_promotion_sync:item:skip_matched product_id={product_id}")
+            return True, f"{product_id}：已匹配，无需同步"
+        old_text = self._software_setting_text(product)
+        try:
+            target = self._target_setting_from_item(item, product)
+        except Exception as e:
+            return False, f"{product_id}：{e}"
+        unchanged = (
+            int(product.get("is_natural_flow") or 0) == target["is_natural_flow"]
+            and int(product.get("is_sitewide_managed") or 0) == target["is_sitewide_managed"]
+            and (
+                target["is_natural_flow"]
+                or (
+                    str(product.get("roi_input_mode") or "roi") == target["roi_input_mode"]
+                    and abs(float(product.get(
+                        "transaction_bid" if target["roi_input_mode"] == "bid" else "current_roi"
+                    ) or 0) - float(target[
+                        "transaction_bid" if target["roi_input_mode"] == "bid" else "current_roi"
+                    ] or 0)) <= 0.01
+                )
+            )
+        )
+        if unchanged:
+            if append_event:
+                append_event(f"pdd_promotion_sync:item:skip_unchanged product_id={product_id}")
+            return True, f"{product_id}：推广数据未变化"
+        if append_event:
+            append_event(f"pdd_promotion_sync:item:update_db product_id={product_id}")
+        self.db.safe_execute(
+            """UPDATE products
+               SET is_natural_flow=?, is_sitewide_managed=?, roi_input_mode=?,
+                   current_roi=?, transaction_bid=?
+               WHERE id=?""",
+            (
+                target["is_natural_flow"],
+                target["is_sitewide_managed"],
+                target["roi_input_mode"],
+                target["current_roi"],
+                target["transaction_bid"],
+                product["db_id"],
+            ),
+        )
+        if append_event:
+            append_event(f"pdd_promotion_sync:item:record product_id={product_id}")
+        self._record_sync_operation(product["db_id"], old_text, target["text"])
+        if refresh:
+            self._refresh_after_sync()
+            self.render_items()
+        if append_event:
+            append_event(f"pdd_promotion_sync:item:done product_id={product_id}")
+        return True, f"{product_id}：已同步为{target['text']}"
+
+    def sync_single_item(self, product_id):
+        ok, message = self._sync_item(product_id, refresh=True)
+        if ok:
+            self.lbl_summary.setText(message)
+        else:
+            QMessageBox.warning(self, "同步失败", message)
+
+    def sync_all_items(self):
+        if append_event:
+            append_event("pdd_promotion_sync:all:start")
+        if not self.captured_items:
+            QMessageBox.information(self, "提示", "请先抓取推广状态。")
+            return
+        local_products = self._load_local_products()
+        sync_items = {}
+        skipped = 0
+        for key, item in (self.captured_items or {}).items():
+            product_id = str(item.get("product_id") or key or "").strip()
+            product = local_products.get(product_id)
+            _result_text, matched = self._compare_item(item, product)
+            if product and not matched:
+                sync_items[key] = item
+            else:
+                skipped += 1
+        if not sync_items:
+            if append_event:
+                append_event("pdd_promotion_sync:all:no_changes")
+            self.lbl_summary.setText("当前抓取结果全部匹配，无需同步。")
+            QMessageBox.information(self, "无需同步", "当前抓取结果全部匹配，没有需要修改的推广设置。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认同步",
+            f"确定同步 {len(sync_items)} 条不一致的推广设置吗？\n已匹配的 {skipped} 条不会修改、不会记录操作记录。",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        success = 0
+        failed = []
+        for key, item in list(sync_items.items()):
+            product_id = str(item.get("product_id") or key or "").strip()
+            ok, message = self._sync_item(product_id, item=item, refresh=False)
+            if ok:
+                success += 1
+            else:
+                failed.append(message)
+        self._refresh_after_sync()
+        self.render_items()
+        if append_event:
+            append_event(f"pdd_promotion_sync:all:done success={success} failed={len(failed)} skipped={skipped}")
+        summary = f"一键同步完成：成功 {success} 条，跳过/失败 {len(failed)} 条。"
+        if failed:
+            summary += " " + "；".join(failed[:5])
+        self.lbl_summary.setText(summary)
+        if failed:
+            self.lbl_summary.setToolTip("\n".join(failed))
+
+    def sync_all_items(self):
+        if append_event:
+            append_event("pdd_promotion_sync:all:start")
+        if not self.captured_items:
+            self._show_toast("请先抓取推广状态")
+            return
+        local_products = self._load_local_products()
+        sync_items = {}
+        skipped = 0
+        for key, item in (self.captured_items or {}).items():
+            product_id = str(item.get("product_id") or key or "").strip()
+            product = local_products.get(product_id)
+            _result_text, matched = self._compare_item(item, product)
+            if product and not matched:
+                sync_items[key] = item
+            else:
+                skipped += 1
+        if not sync_items:
+            if append_event:
+                append_event("pdd_promotion_sync:all:no_changes")
+            self.lbl_summary.setText("当前抓取结果全部匹配，无需同步。")
+            self._show_toast("无需修改")
+            return
+        success = 0
+        failed = []
+        for key, item in list(sync_items.items()):
+            product_id = str(item.get("product_id") or key or "").strip()
+            ok, message = self._sync_item(product_id, item=item, refresh=False)
+            if ok:
+                success += 1
+            else:
+                failed.append(message)
+        self._refresh_after_sync()
+        self.render_items()
+        if append_event:
+            append_event(f"pdd_promotion_sync:all:done success={success} failed={len(failed)} skipped={skipped}")
+        summary = f"一键同步完成：已修改 {success} 条，跳过/失败 {len(failed)} 条。"
+        if failed:
+            summary += " " + "；".join(failed[:5])
+        self.lbl_summary.setText(summary)
+        self.lbl_summary.setToolTip("\n".join(failed) if failed else "")
+        self._show_toast(f"已修改 {success} 条")
+
+    def copy_debug_json(self):
+        QApplication.clipboard().setText(json.dumps(self.last_debug_info or {}, ensure_ascii=False, indent=2))
+        self.lbl_summary.setText("已复制推广状态抓取调试JSON。")
+
+
 class PddLinkControlDialog(QDialog):
     """拼多多链接抓取主控小窗口。"""
 
@@ -2001,8 +2961,9 @@ class PddLinkControlDialog(QDialog):
         self.default_store_id = default_store_id
         self.code_dialog = None
         self.price_dialog = None
+        self.promotion_status_dialog = None
         self.setWindowTitle("拼多多链接抓取")
-        self.resize(460, 260)
+        self.resize(620, 260)
         self.init_ui()
         self.load_stores()
         QTimer.singleShot(250, self.refresh_browser_display)
@@ -2038,6 +2999,10 @@ class PddLinkControlDialog(QDialog):
         self.btn_open_price = QPushButton("抓取价格管理")
         self.btn_open_price.clicked.connect(self.open_price_dialog)
         button_row.addWidget(self.btn_open_price)
+
+        self.btn_open_promotion_status = QPushButton("抓取推广状态")
+        self.btn_open_promotion_status.clicked.connect(self.open_promotion_status_dialog)
+        button_row.addWidget(self.btn_open_promotion_status)
         layout.addLayout(button_row)
 
         close_row = QHBoxLayout()
@@ -2048,15 +3013,22 @@ class PddLinkControlDialog(QDialog):
         layout.addLayout(close_row)
 
     def load_stores(self):
-        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
         self.combo_store.clear()
+        if self.default_store_id is not None:
+            rows = self.db.safe_fetchall("SELECT id, name FROM stores WHERE id=?", (self.default_store_id,))
+            if rows:
+                store_id, store_name = rows[0]
+                self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
+            else:
+                self.combo_store.addItem(f"店铺{self.default_store_id}", int(self.default_store_id))
+            self.combo_store.setEnabled(False)
+            self.combo_store.setToolTip("已固定为当前打开窗口所属店铺，不能在此切换店铺。")
+            return
+
+        rows = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order, id")
         for store_id, store_name in rows:
             self.combo_store.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
-        if self.default_store_id is not None:
-            for i in range(self.combo_store.count()):
-                if self.combo_store.itemData(i) == self.default_store_id:
-                    self.combo_store.setCurrentIndex(i)
-                    break
+        self.combo_store.setEnabled(True)
 
     def current_store_id(self):
         return self.combo_store.currentData()
@@ -2102,8 +3074,24 @@ class PddLinkControlDialog(QDialog):
                 mode="code",
                 store_id_provider=self.current_store_id,
                 owner=self._window_parent(),
+                unmatched_records_provider=lambda: (
+                    self.price_dialog.unmatched_task_window.records
+                    if self.price_dialog is not None and self.price_dialog.unmatched_task_window is not None
+                    else self.price_dialog.price_unmatched_records
+                    if self.price_dialog is not None
+                    else {}
+                ),
             )
             self.code_dialog.destroyed.connect(lambda _=None: setattr(self, "code_dialog", None))
+        else:
+            self.code_dialog.unmatched_records_provider = lambda: (
+                self.price_dialog.unmatched_task_window.records
+                if self.price_dialog is not None and self.price_dialog.unmatched_task_window is not None
+                else self.price_dialog.price_unmatched_records
+                if self.price_dialog is not None
+                else {}
+            )
+            self.code_dialog._refresh_unmatched_spec_ids_panel()
         self._show_result_dialog(self.code_dialog)
 
     def open_price_dialog(self):
@@ -2122,6 +3110,20 @@ class PddLinkControlDialog(QDialog):
             self.price_dialog.destroyed.connect(lambda _=None: setattr(self, "price_dialog", None))
         self._show_result_dialog(self.price_dialog)
 
+    def open_promotion_status_dialog(self):
+        self._activate_browser_store_context()
+        self.refresh_browser_display()
+        if self.promotion_status_dialog is None:
+            self.promotion_status_dialog = PddPromotionStatusDialog(
+                self.db,
+                self.monitor,
+                self.current_store_id,
+                parent=None,
+                owner=self._window_parent(),
+            )
+            self.promotion_status_dialog.destroyed.connect(lambda _=None: setattr(self, "promotion_status_dialog", None))
+        self._show_result_dialog(self.promotion_status_dialog)
+
     def refresh_browser_display(self):
         try:
             self._activate_browser_store_context()
@@ -2133,7 +3135,13 @@ class PddLinkControlDialog(QDialog):
         url = info.get("url") or "--"
         status = info.get("status") or "未知状态"
         detail = info.get("current_code_detail") or {}
-        page_type = "价格管理" if "价格管理" in title or "goods-price-management" in url else "添加编码界面" if detail.get("product_id") or detail.get("specs") else "商家端"
+        page_type = (
+            "价格管理"
+            if info.get("is_price_management") or "价格管理" in title or "goods-price-management" in url
+            else "商品推广" if info.get("is_promotion_page") or any(marker in f"{title} {url}" for marker in ("商品推广", "商品营销", "推广平台", "推广", "promotion", "advert", "ad_manage", "marketing", "traffic"))
+            else "添加编码界面" if detail.get("product_id") or detail.get("specs")
+            else "商家端"
+        )
         code_text = f"添加编码：{detail.get('product_id') or '未识别'} / 规格 {len(detail.get('specs') or [])} 条"
         self.lbl_browser_display.setText(
             f"浏览器状态：{status}\n页面类型：{page_type}\n标题：{title}\n{code_text}\nURL：{url[:90]}"
@@ -2196,24 +3204,23 @@ class ImageCell(QWidget):
     cell_hovered = pyqtSignal(int)
     image_view_requested = pyqtSignal(int)
     paste_requested = pyqtSignal(int)
-    clear_requested = pyqtSignal(int)
 
     def __init__(self, index, parent=None):
         super().__init__(parent)
         self.index = index
-        self.image_label = None
-        self.clear_btn = None
         self.current_pixmap = None
-        self.setStyleSheet("border: 2px dashed #cccccc; background-color: #f5f5f5; border-radius: 4px;")
+        self.setStyleSheet("border: 1px solid #c7ccd4; background-color: #ffffff; border-radius: 0px;")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
         layout.setAlignment(Qt.AlignCenter)
-        self.placeholder = QLabel("Ctrl+V\n粘贴图片")
-        self.placeholder.setAlignment(Qt.AlignCenter)
-        self.placeholder.setStyleSheet("color: #999999; font-size: 12px;")
-        layout.addWidget(self.placeholder)
+        self.image_label = QLabel("Ctrl+V\n粘贴图片")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("border: none; color: #999999; font-size: 11px; background: transparent;")
+        layout.addWidget(self.image_label)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
+        self.setCursor(Qt.PointingHandCursor)
 
     def enterEvent(self, event):
         self.cell_hovered.emit(self.index)
@@ -2237,54 +3244,43 @@ class ImageCell(QWidget):
 
     def set_image(self, pixmap):
         self.current_pixmap = pixmap
-        self.placeholder.setVisible(False)
-
-        for child in self.children():
-            if isinstance(child, QWidget) and child != self.placeholder:
-                child.deleteLater()
-
-        container = QWidget()
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setAlignment(Qt.AlignCenter)
-
-        self.image_label = QLabel()
-        self.image_label.setPixmap(pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.image_label.setAlignment(Qt.AlignCenter)
-        container_layout.addWidget(self.image_label)
-
-        self.clear_btn = QPushButton("×")
-        self.clear_btn.setFixedSize(24, 24)
-        self.clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(231, 76, 60, 200);
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-size: 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(192, 57, 43, 255);
-            }
-        """)
-        self.clear_btn.clicked.connect(lambda: self.clear_requested.emit(self.index))
-        container_layout.addWidget(self.clear_btn)
-
-        layout = self.layout()
-        layout.addWidget(container)
+        self.image_label.setText("")
+        self._refresh_thumbnail()
 
     def clear_image(self):
-        for child in self.children():
-            if isinstance(child, QWidget) and child != self.placeholder:
-                child.deleteLater()
-        self.image_label = None
-        self.clear_btn = None
         self.current_pixmap = None
-        self.placeholder.setVisible(True)
+        self.image_label.clear()
+        self.image_label.setText("Ctrl+V\n粘贴图片")
 
     def has_image(self):
         return self.current_pixmap is not None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_thumbnail()
+
+    def _refresh_thumbnail(self):
+        if not self.current_pixmap or self.current_pixmap.isNull():
+            return
+        target_width = max(1, self.width() - 2)
+        target_height = max(1, self.height() - 2)
+        scaled = self.current_pixmap.scaled(
+            target_width,
+            target_height,
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - target_width) // 2)
+        y = max(0, (scaled.height() - target_height) // 2)
+        self.image_label.setPixmap(scaled.copy(x, y, target_width, target_height))
+
+
+def _next_store_image_slot(rows):
+    return max((int(row[0]) for row in rows), default=-1) + 1
+
+
+def _should_clear_weekly_images(latest_end_date, new_end_date, is_overwrite):
+    return bool(not is_overwrite and latest_end_date and new_end_date and new_end_date > latest_end_date)
 
 
 class LargeMarginDataDialog(QDialog):
@@ -2756,55 +3752,6 @@ class LargeMarginDataDialog(QDialog):
         
         main_layout.addWidget(bottom_btn_widget)
 
-        self.image_area = QWidget()
-        self.image_area.setMaximumHeight(0)
-        self.image_area.setVisible(False)
-        image_layout = QHBoxLayout(self.image_area)
-        image_layout.setContentsMargins(0, 5, 0, 0)
-
-        self.image_grid = QGridLayout()
-        self.image_grid.setSpacing(5)
-        image_layout.addLayout(self.image_grid)
-
-        self.temp_images = []
-        self.image_count = 6
-
-        for i in range(self.image_count):
-            cell = ImageCell(i)
-            cell.setFixedSize(150, 150)
-            cell.cell_hovered.connect(self.on_cell_hovered)
-            cell.paste_requested.connect(self.on_paste_requested)
-            cell.image_view_requested.connect(self.show_image_viewer)
-            cell.clear_requested.connect(self.clear_temp_image)
-            cell.setAcceptDrops(True)
-            self.image_grid.addWidget(cell, 0, i)
-            self.temp_images.append(cell)
-
-        self.btn_toggle_image_area = QPushButton("📷")
-        self.btn_toggle_image_area.setFixedHeight(35)
-        self.btn_toggle_image_area.setFixedWidth(45)
-        self.btn_toggle_image_area.setStyleSheet("""
-            QPushButton {
-                background-color: #17a2b8;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 6px 10px;
-            }
-            QPushButton:hover {
-                background-color: #138496;
-            }
-        """)
-        self.btn_toggle_image_area.clicked.connect(self.toggle_image_area)
-
-        main_layout.addWidget(self.btn_toggle_image_area)
-        main_layout.addWidget(self.image_area)
-
-        self.temp_image_index = -1
-        self.installEventFilter(self)
-
         self.records = records
 
         for col in range(self.table.columnCount()):
@@ -2819,134 +3766,9 @@ class LargeMarginDataDialog(QDialog):
         window_height = min(max(200 + data_rows * 60 + comparison_rows * 12, 600), screen.height() - 100)
         self.resize(window_width, window_height)
 
-    def toggle_image_area(self):
-        if self.image_area.isVisible():
-            self.image_area.setVisible(False)
-            self.image_area.setMaximumHeight(0)
-        else:
-            self.image_area.setVisible(True)
-            self.image_area.setMaximumHeight(220)
-
-    def on_cell_hovered(self, index):
-        self.temp_image_index = index
-
-    def on_paste_requested(self, index):
-        clipboard = QApplication.clipboard()
-        mimeData = clipboard.mimeData()
-        if mimeData.hasImage():
-            pixmap = QPixmap.fromImage(clipboard.image())
-            self.temp_images[index].set_image(pixmap)
-            self.save_temp_image(index, pixmap)
-
-    def save_temp_image(self, index, pixmap):
-        try:
-            byte_array = QByteArray()
-            buffer = QBuffer(byte_array)
-            buffer.open(QIODevice.WriteOnly)
-            pixmap.save(buffer, "PNG")
-            image_data = bytes(byte_array)
-            self.db.safe_execute(
-                """INSERT OR REPLACE INTO store_temp_images (store_id, slot_index, image_data, created_time)
-                VALUES (?, ?, ?, ?)""",
-                (self.store_id, index, image_data, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            )
-        except Exception as e:
-            print(f"保存临时图片失败: {e}")
-
-    def load_temp_images(self):
-        try:
-            print(f"[DEBUG] load_temp_images called, store_id={self.store_id}, image_count={self.image_count}")
-            rows = self.db.safe_fetchall(
-                "SELECT slot_index, image_data FROM store_temp_images WHERE store_id=? ORDER BY slot_index",
-                (self.store_id,)
-            )
-            print(f"[DEBUG] Found {len(rows)} images in DB")
-            for slot_index, image_data in rows:
-                print(f"[DEBUG] Loading image to slot {slot_index}")
-                if slot_index < self.image_count:
-                    byte_array = QByteArray(image_data)
-                    pixmap = QPixmap()
-                    pixmap.loadFromData(byte_array, "PNG")
-                    self.temp_images[slot_index].set_image(pixmap)
-        except Exception as e:
-            print(f"加载临时图片失败: {e}")
-
-    def clear_temp_image(self, index):
-        self.temp_images[index].clear_image()
-        try:
-            self.db.safe_execute(
-                "DELETE FROM store_temp_images WHERE store_id=? AND slot_index=?",
-                (self.store_id, index)
-            )
-        except Exception as e:
-            print(f"删除临时图片失败: {e}")
-
-    def eventFilter(self, obj, event):
-        return super().eventFilter(obj, event)
-
-    def show_image_viewer(self, index):
-        cell = self.temp_images[index]
-        if not cell or not cell.has_image():
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"图片 {index + 1}")
-        dialog.resize(900, 700)
-        dialog.setStyleSheet("background-color: #1a1a1a;")
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(5, 5, 5, 5)
-
-        self.viewer_index = index
-        self.viewer_cells = [c for c in self.temp_images if c.has_image()]
-
-        label = QLabel()
-        label.setAlignment(Qt.AlignCenter)
-        label.setScaledContents(False)
-        label.mouseDoubleClickEvent = lambda e: dialog.close()
-
-        pixmap = self.viewer_cells[self.viewer_index].current_pixmap
-        scaled = pixmap.scaled(880, 660, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        label.setPixmap(scaled)
-        layout.addWidget(label)
-
-        nav_layout = QHBoxLayout()
-        btn_prev = QPushButton("◀ 上一张")
-        btn_prev.setStyleSheet("background-color: #444; color: white; padding: 8px 20px; border-radius: 4px;")
-        btn_prev.clicked.connect(lambda: self.navigate_image(-1, label))
-        btn_next = QPushButton("下一张 ▶")
-        btn_next.setStyleSheet("background-color: #444; color: white; padding: 8px 20px; border-radius: 4px;")
-        btn_next.clicked.connect(lambda: self.navigate_image(1, label))
-        btn_close = QPushButton("关闭")
-        btn_close.setStyleSheet("background-color: #e74c3c; color: white; padding: 8px 20px; border-radius: 4px;")
-        btn_close.clicked.connect(dialog.close)
-
-        nav_layout.addWidget(btn_prev)
-        nav_layout.addStretch()
-        nav_layout.addWidget(QLabel(f"{self.viewer_index + 1} / {len(self.viewer_cells)}"))
-        nav_layout.addStretch()
-        nav_layout.addWidget(btn_next)
-        layout.addLayout(nav_layout)
-
-        dialog.exec_()
-
-    def navigate_image(self, direction, label_widget):
-        if not self.viewer_cells:
-            return
-        self.viewer_index = (self.viewer_index + direction) % len(self.viewer_cells)
-        pixmap = self.viewer_cells[self.viewer_index].current_pixmap
-        scaled = pixmap.scaled(880, 660, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        label_widget.setPixmap(scaled)
-        dialog = label_widget.parentWidget()
-        nav_layout = dialog.layout().itemAt(1).layout()
-        page_label = nav_layout.itemAt(2).widget()
-        if page_label:
-            page_label.setText(f"{self.viewer_index + 1} / {len(self.viewer_cells)}")
-
     def showEvent(self, event):
         super().showEvent(event)
         self.reload_data()
-        self.load_temp_images()
 
     def reload_data(self):
         records = self.load_all_data()
@@ -3437,6 +4259,8 @@ class StoreMarginDialog(QDialog):
     """店铺毛利综合管理对话框"""
     def __init__(self, store_id, store_name, main_app, parent=None, save_callback=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        apply_window_icon(self, "store")
         self.store_id = store_id
         self.store_name = store_name
         self.main_app = main_app
@@ -3444,6 +4268,7 @@ class StoreMarginDialog(QDialog):
         self.product_weights = {}
         self.is_balancing = False
         self.save_callback = save_callback
+        self._disposing = False
         self.is_reading_mode = False
         self.large_dialog = None
         self.ai_report_dialog = None
@@ -3453,6 +4278,11 @@ class StoreMarginDialog(QDialog):
         self.pdd_browser_monitor = None
         self.pdd_product_match_dialog = None
         self.pdd_link_control_dialog = None
+        self._button_tooltip_widget = None
+        self._button_tooltip_text = ""
+        self._button_tooltip_timer = QTimer(self)
+        self._button_tooltip_timer.setSingleShot(True)
+        self._button_tooltip_timer.timeout.connect(self._show_delayed_button_tooltip)
 
         self.setWindowTitle(f"🏪 店铺毛利管理 - {store_name}")
         self.resize(1700, 800)
@@ -3482,8 +4312,228 @@ class StoreMarginDialog(QDialog):
 
         self.init_ui()
         self._restore_latest_import_history_if_needed()
+        self._normalize_imported_order_store_ids()
         self.load_products()
+        self._apply_store_margin_button_tooltips()
         self.refresh_manual_data_display()
+
+    def _build_weekly_images_panel(self):
+        self.weekly_images_panel = QWidget(self)
+        self.weekly_images_panel.setObjectName("WeeklyImagesPanel")
+        self.weekly_images_panel.setAttribute(Qt.WA_StyledBackground, True)
+        self.weekly_images_panel.setStyleSheet("""
+            QWidget#WeeklyImagesPanel {
+                background: white;
+                border: 1px solid #9aa7b2;
+                border-radius: 4px;
+            }
+        """)
+        self.weekly_images_panel.resize(760, 360)
+        panel_layout = QVBoxLayout(self.weekly_images_panel)
+        panel_layout.setContentsMargins(10, 8, 10, 10)
+        panel_layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        title = QLabel("本周附带图片")
+        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #263746; border: none;")
+        self.lbl_weekly_image_count = QLabel("0 张")
+        self.lbl_weekly_image_count.setStyleSheet("color: #667788; border: none;")
+        self.btn_clear_weekly_images = QPushButton("清空图片")
+        self.btn_clear_weekly_images.setFixedSize(76, 28)
+        self.btn_clear_weekly_images.setStyleSheet("QPushButton { padding: 1px; }")
+        self.btn_clear_weekly_images.clicked.connect(self.clear_all_weekly_images)
+        header.addWidget(title)
+        header.addWidget(self.lbl_weekly_image_count)
+        header.addStretch()
+        header.addWidget(self.btn_clear_weekly_images)
+        panel_layout.addLayout(header)
+
+        self.weekly_images_scroll = QScrollArea()
+        self.weekly_images_scroll.setWidgetResizable(True)
+        self.weekly_images_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.weekly_images_content = QWidget()
+        self.weekly_images_grid = QGridLayout(self.weekly_images_content)
+        self.weekly_images_grid.setContentsMargins(1, 1, 1, 1)
+        self.weekly_images_grid.setSpacing(1)
+        self.weekly_images_grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.weekly_images_scroll.setWidget(self.weekly_images_content)
+        panel_layout.addWidget(self.weekly_images_scroll)
+        self.weekly_image_cells = {}
+        self.weekly_images_panel.hide()
+
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._weekly_app_filter_installed = True
+
+    def _position_weekly_images_panel(self):
+        panel = getattr(self, "weekly_images_panel", None)
+        button = getattr(self, "btn_weekly_images", None)
+        if panel is None or button is None:
+            return
+        width = min(760, max(420, self.width() - 32))
+        image_count = len(getattr(self, "weekly_image_cells", {})) + 1
+        columns = max(1, (width - 22) // 87)
+        image_rows = (image_count + columns - 1) // columns
+        height = min(340, max(143, 56 + image_rows * 87))
+        height = min(height, max(126, self.height() - 32))
+        panel.resize(width, height)
+        anchor = button.mapTo(self, button.rect().bottomRight())
+        x = max(8, min(anchor.x() - width, self.width() - width - 8))
+        y = anchor.y() + 4
+        if y + height > self.height() - 8:
+            y = max(8, button.mapTo(self, button.rect().topLeft()).y() - height - 4)
+        panel.move(x, y)
+
+    def toggle_weekly_images_panel(self):
+        if self.weekly_images_panel.isVisible():
+            self.weekly_images_panel.hide()
+            return
+        self.load_weekly_images()
+        self._position_weekly_images_panel()
+        self.weekly_images_panel.show()
+        self.weekly_images_panel.raise_()
+
+    def load_weekly_images(self):
+        rows = self.db.safe_fetchall(
+            "SELECT slot_index, image_data FROM store_temp_images WHERE store_id=? ORDER BY slot_index",
+            (self.store_id,),
+        )
+        while self.weekly_images_grid.count():
+            item = self.weekly_images_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.weekly_image_cells = {}
+        columns = max(1, (self.weekly_images_panel.width() - 22) // 87)
+        for position, (slot_index, image_data) in enumerate(rows):
+            slot_index = int(slot_index)
+            cell = ImageCell(slot_index, self.weekly_images_content)
+            cell.setFixedSize(86, 86)
+            cell.setToolTip("双击查看大图；查看窗口中按 Ctrl+滚轮缩放")
+            pixmap = QPixmap()
+            pixmap.loadFromData(bytes(image_data or b""))
+            if not pixmap.isNull():
+                cell.set_image(pixmap)
+            cell.paste_requested.connect(lambda _index: self._append_weekly_image_from_clipboard())
+            cell.image_view_requested.connect(self.show_weekly_image_viewer)
+            self.weekly_images_grid.addWidget(cell, position // columns, position % columns)
+            self.weekly_image_cells[slot_index] = cell
+
+        add_slot = _next_store_image_slot(rows)
+        add_cell = ImageCell(add_slot, self.weekly_images_content)
+        add_cell.setFixedSize(86, 86)
+        add_cell.paste_requested.connect(lambda _index: self._append_weekly_image_from_clipboard())
+        position = len(rows)
+        self.weekly_images_grid.addWidget(add_cell, position // columns, position % columns)
+        self.lbl_weekly_image_count.setText(f"{len(rows)} 张")
+
+    def _append_weekly_image_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        if not clipboard.mimeData().hasImage():
+            self.show_toast("剪贴板中没有图片")
+            return False
+        pixmap = QPixmap.fromImage(clipboard.image())
+        if pixmap.isNull():
+            self.show_toast("无法读取剪贴板图片")
+            return False
+        rows = self.db.safe_fetchall(
+            "SELECT slot_index FROM store_temp_images WHERE store_id=?",
+            (self.store_id,),
+        )
+        slot_index = _next_store_image_slot(rows)
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        buffer.open(QIODevice.WriteOnly)
+        if not pixmap.save(buffer, "PNG"):
+            self.show_toast("图片转换失败")
+            return False
+        self.db.safe_execute(
+            """INSERT INTO store_temp_images (store_id, slot_index, image_data, created_time)
+               VALUES (?, ?, ?, ?)""",
+            (self.store_id, slot_index, bytes(byte_array), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.load_weekly_images()
+        self.show_toast("已添加附带图片")
+        return True
+
+    def clear_all_weekly_images(self):
+        rows = self.db.safe_fetchall(
+            "SELECT 1 FROM store_temp_images WHERE store_id=? LIMIT 1",
+            (self.store_id,),
+        )
+        if not rows:
+            self.show_toast("当前没有附带图片")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认清空",
+            "确定清空当前店铺的全部附带图片吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.db.safe_execute("DELETE FROM store_temp_images WHERE store_id=?", (self.store_id,))
+        self.load_weekly_images()
+
+    def show_weekly_image_viewer(self, slot_index):
+        slots = [slot for slot, cell in sorted(self.weekly_image_cells.items()) if cell.has_image()]
+        if int(slot_index) not in slots:
+            return
+        try:
+            from manager.dialogs.product_spec import SpecImageViewerDialog
+        except ImportError:
+            from dialogs.product_spec import SpecImageViewerDialog
+
+        class WeeklyImageViewerDialog(SpecImageViewerDialog):
+            def __init__(viewer_self, pixmaps, current_index, parent):
+                viewer_self.pixmaps = pixmaps
+                viewer_self.current_index = current_index
+                super().__init__(pixmaps[current_index], parent)
+                nav = QHBoxLayout()
+                viewer_self.btn_previous = QPushButton("← 上一张")
+                viewer_self.btn_next = QPushButton("下一张 →")
+                viewer_self.page_label = QLabel()
+                viewer_self.btn_previous.clicked.connect(lambda: viewer_self.switch_image(-1))
+                viewer_self.btn_next.clicked.connect(lambda: viewer_self.switch_image(1))
+                nav.addWidget(viewer_self.btn_previous)
+                nav.addStretch()
+                nav.addWidget(viewer_self.page_label)
+                nav.addStretch()
+                nav.addWidget(viewer_self.btn_next)
+                viewer_self.layout().insertLayout(0, nav)
+                viewer_self.refresh_page_label()
+
+            def refresh_page_label(viewer_self):
+                total = len(viewer_self.pixmaps)
+                viewer_self.page_label.setText(f"{viewer_self.current_index + 1} / {total}")
+                viewer_self.btn_previous.setEnabled(total > 1)
+                viewer_self.btn_next.setEnabled(total > 1)
+                viewer_self.setWindowTitle(f"附带图片 {viewer_self.current_index + 1}/{total}")
+
+            def switch_image(viewer_self, direction):
+                if len(viewer_self.pixmaps) <= 1:
+                    return
+                viewer_self.current_index = (viewer_self.current_index + direction) % len(viewer_self.pixmaps)
+                viewer_self.original_pixmap = viewer_self.pixmaps[viewer_self.current_index]
+                viewer_self.scale_factor = 1.0
+                viewer_self._refresh_image()
+                QTimer.singleShot(0, viewer_self._center_image_view)
+                viewer_self.refresh_page_label()
+
+            def keyPressEvent(viewer_self, event):
+                if event.key() == Qt.Key_Left:
+                    viewer_self.switch_image(-1)
+                    return
+                if event.key() == Qt.Key_Right:
+                    viewer_self.switch_image(1)
+                    return
+                super().keyPressEvent(event)
+
+        pixmaps = [self.weekly_image_cells[slot].current_pixmap for slot in slots]
+        dialog = WeeklyImageViewerDialog(pixmaps, slots.index(int(slot_index)), self)
+        dialog.exec_()
 
     def toggle_reading_mode(self):
         """切换阅览模式 - 弹出放大版数据表格窗口"""
@@ -3530,6 +4580,10 @@ class StoreMarginDialog(QDialog):
 
     def get_pdd_browser_monitor(self):
         if self.pdd_browser_monitor is None:
+            main_app = getattr(self, "main_app", None)
+            if main_app is not None and hasattr(main_app, "_get_pdd_browser_monitor"):
+                self.pdd_browser_monitor = main_app._get_pdd_browser_monitor()
+                return self.pdd_browser_monitor
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
         return self.pdd_browser_monitor
@@ -3704,18 +4758,190 @@ class StoreMarginDialog(QDialog):
 
         return self._restore_orders_from_snapshot(snapshot, import_time)
 
+    def _current_store_product_codes(self):
+        rows = self.db.safe_fetchall(
+            "SELECT name FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
+            (self.store_id,)
+        )
+        return {str(row[0]).strip() for row in rows if row and str(row[0]).strip()}
+
+    def _normalize_imported_order_store_ids(self):
+        """把属于当前店铺商品ID的旧订单记录归到当前店铺，兼容跨电脑本地存档的 store_id 差异。"""
+        product_codes = self._current_store_product_codes()
+        if not product_codes:
+            return 0
+
+        safe_product_codes = []
+        for product_code in product_codes:
+            count_rows = self.db.safe_fetchall(
+                "SELECT COUNT(*) FROM products WHERE name=? AND COALESCE(is_archived, 0)=0",
+                (product_code,)
+            )
+            if count_rows and int(count_rows[0][0] or 0) == 1:
+                safe_product_codes.append(product_code)
+        if not safe_product_codes:
+            return 0
+
+        fixed_count = 0
+        for product_code in safe_product_codes:
+            rows = self.db.safe_fetchall(
+                """SELECT id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count
+                   FROM imported_orders
+                   WHERE product_id=? AND store_id<>?""",
+                (product_code, self.store_id)
+            )
+            for row in rows:
+                order_id, prod_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count = row
+                existing = self.db.safe_fetchall(
+                    """SELECT id, order_count, actual_amount, refund_count, order_date
+                       FROM imported_orders
+                       WHERE store_id=? AND product_id=? AND spec_code=?""",
+                    (self.store_id, prod_id, spec_code)
+                )
+                if existing:
+                    existing_id, old_count, old_amount, old_refund, old_date = existing[0]
+                    merged_dates = []
+                    for value in (old_date, order_date):
+                        if value:
+                            for part in str(value).split("~"):
+                                part = part.strip()
+                                if part and part not in merged_dates:
+                                    merged_dates.append(part)
+                    merged_date = "~".join(merged_dates) if merged_dates else None
+                    self.db.safe_execute(
+                        """UPDATE imported_orders
+                           SET order_count=?, actual_amount=?, refund_count=?, order_date=?, import_time=?
+                           WHERE id=?""",
+                        (
+                            int(old_count or 0) + int(order_count or 0),
+                            float(old_amount or 0) + float(actual_amount or 0),
+                            int(old_refund or 0) + int(refund_count or 0),
+                            merged_date,
+                            import_time,
+                            existing_id
+                        )
+                    )
+                    self.db.safe_execute("DELETE FROM imported_orders WHERE id=?", (order_id,))
+                else:
+                    self.db.safe_execute(
+                        "UPDATE imported_orders SET store_id=? WHERE id=?",
+                        (self.store_id, order_id)
+                    )
+                fixed_count += 1
+        if fixed_count:
+            try:
+                self.db.conn.commit()
+            except Exception:
+                pass
+            print(f"[STORE_MARGIN] 已修正 {fixed_count} 条订单记录的店铺归属")
+        return fixed_count
+
     def get_user_id_by_sys_id(self, sys_id):
         """根据系统ID获取用户ID"""
         return self.sys_id_to_user_id.get(sys_id)
 
+    def _button_tooltip_for(self, button):
+        button_tips = {
+            getattr(self, "btn_last_week", None): "将过往数据分析的日期范围快速设置为最近七天。",
+            getattr(self, "btn_input_data", None): "打开录入数据窗口，手动填写当前日期范围的实发订单、实发金额、毛利润、退款和推广等店铺毛利数据。",
+            getattr(self, "btn_import_data", None): "导入过往店铺算账表格，写入顶部数据周期板块。ERP模式按原表导入；表格模式会读取订单明细并自动预填可计算的数据。",
+            getattr(self, "btn_export_excel", None): "导出顶部过往算账数据，并附带店铺商品权重和商品规格售卖情况。",
+            getattr(self, "btn_reading_mode", None): "打开放大阅览窗口，便于单独查看过往数据分析表。",
+            getattr(self, "btn_weekly_images", None): "查看或追加当前店铺的本周附带图片；展开后将鼠标移入图片区域，可按 Ctrl+V 直接粘贴图片。",
+            getattr(self, "btn_clear_weekly_images", None): "清空当前店铺已经保存的全部本周附带图片。",
+            getattr(self, "btn_profit_calc", None): "重新计算当前店铺商品权重、综合毛利和相关利润指标。",
+            getattr(self, "btn_import_orders", None): "导入订单规格数据，用于计算店铺商品权重、主卖规格、单量、销售额和退款结构。",
+            getattr(self, "btn_history", None): "查看当前店铺的订单导入历史，可恢复或删除历史导入记录。",
+            getattr(self, "btn_ai_report", None): "打开AI店铺周报窗口，基于近两周财务、售卖结构和操作记录生成文字报告。",
+            getattr(self, "btn_promotion_data", None): "打开推广数据分析窗口，导入和查看当前店铺各链接的每日真实推广数据。",
+            getattr(self, "btn_display_settings", None): "设置主卖规格和退款占比最多规格的显示方式，支持规格编码或规格名称并全局生效。",
+            getattr(self, "btn_save_store_settings", None): "保存当前店铺的综合设置，包括全站托管投产比和店铺通用满减梯度。",
+            getattr(self, "btn_save", None): "保存当前店铺商品权重和综合毛利相关改动，并记录必要的店铺操作记录。",
+            getattr(self, "btn_close", None): "关闭店铺毛利管理窗口。",
+        }
+        tip = button_tips.get(button)
+        if tip:
+            return tip
+        text = re.sub(r"\s+", "", button.text() or "")
+        if "查看商品" in text:
+            return "打开该链接的规格与毛利管理窗口，查看和编辑规格、成本、价格、活动和投产信息。"
+        if text == "关闭":
+            return "关闭当前窗口。"
+        if text == "保存":
+            return "保存当前窗口中的设置或数据。"
+        if text == "取消":
+            return "取消本次操作并关闭窗口。"
+        if text == "确定" or text == "确认":
+            return "确认当前选择并继续执行。"
+        if "复制" in text:
+            return "复制当前窗口展示的内容到剪贴板。"
+        return ""
+
+    def _apply_store_margin_button_tooltips(self):
+        for button in self.findChildren(QPushButton):
+            tip = self._button_tooltip_for(button)
+            if not tip:
+                continue
+            button.setToolTip("")
+            button.setProperty("store_margin_tooltip_text", tip)
+            if not button.property("store_margin_tooltip_filter_installed"):
+                button.installEventFilter(self)
+                button.setProperty("store_margin_tooltip_filter_installed", True)
+
+    def _start_button_tooltip_timer(self, button, text):
+        self._button_tooltip_timer.stop()
+        QToolTip.hideText()
+        self._button_tooltip_widget = button
+        self._button_tooltip_text = text
+        self._button_tooltip_timer.start(1000)
+
+    def _stop_button_tooltip_timer(self, button=None):
+        if button is None or button == self._button_tooltip_widget:
+            self._button_tooltip_timer.stop()
+            QToolTip.hideText()
+            self._button_tooltip_widget = None
+            self._button_tooltip_text = ""
+
+    def _show_delayed_button_tooltip(self):
+        button = self._button_tooltip_widget
+        if not button or not button.isVisible() or not button.underMouse():
+            return
+        text = self._button_tooltip_text or button.property("store_margin_tooltip_text") or ""
+        if not text:
+            return
+        pos = button.mapToGlobal(button.rect().bottomLeft())
+        QToolTip.showText(pos, text, button)
+
     def eventFilter(self, obj, event):
+        if getattr(self, "_disposing", False):
+            return False
+        panel = getattr(self, "weekly_images_panel", None)
+        button = getattr(self, "btn_weekly_images", None)
+        if panel is not None and panel.isVisible():
+            if event.type() == QEvent.KeyPress and event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_V:
+                if panel.rect().contains(panel.mapFromGlobal(QCursor.pos())):
+                    self._append_weekly_image_from_clipboard()
+                    return True
+            if event.type() == QEvent.MouseButtonPress and hasattr(event, "globalPos"):
+                global_pos = event.globalPos()
+                inside_panel = panel.rect().contains(panel.mapFromGlobal(global_pos))
+                inside_button = button and button.rect().contains(button.mapFromGlobal(global_pos))
+                if not inside_panel and not inside_button:
+                    panel.hide()
+        if isinstance(obj, QPushButton):
+            tooltip_text = obj.property("store_margin_tooltip_text")
+            if tooltip_text:
+                if event.type() == QEvent.Enter:
+                    self._start_button_tooltip_timer(obj, tooltip_text)
+                elif event.type() in (QEvent.Leave, QEvent.MouseButtonPress, QEvent.Hide):
+                    self._stop_button_tooltip_timer(obj)
         if event.type() == QEvent.MouseButtonDblClick:
             if isinstance(obj, QLineEdit):
                 row = obj.property("row")
                 prod_id = obj.property("prod_id")
                 if row is not None and prod_id is not None:
-                    return super().eventFilter(obj, event)
-        return super().eventFilter(obj, event)
+                    return False
+        return False
 
     def on_weight_changed(self, user_id, text):
         if user_id not in self.product_weights:
@@ -3802,12 +5028,59 @@ class StoreMarginDialog(QDialog):
             records = self.db.get_store_record(self.store_id, now.year, now.month, now.day)
             records.append({"time": time_str, "text": log_text})
             self.db.save_store_record(self.store_id, now.year, now.month, now.day, records)
-            if hasattr(self.main_app, "load_data_safe"):
-                self.main_app.load_data_safe()
+            if hasattr(self.main_app, "refresh_store_cards"):
+                QTimer.singleShot(0, lambda: self.main_app.refresh_store_cards(self.store_id))
         except Exception as e:
             print(f"保存全站托管投产记录失败: {e}")
 
-    def save_sitewide_roi(self):
+    def _format_store_discount_rules_for_input(self):
+        try:
+            rules = self.db.get_store_discount_rules(self.store_id)
+        except Exception:
+            rules = []
+        parts = []
+        for rule in rules:
+            threshold = float(rule.get("threshold") or 0)
+            discount = float(rule.get("discount") or 0)
+            threshold_text = f"{threshold:.2f}".rstrip("0").rstrip(".")
+            discount_text = f"{discount:.2f}".rstrip("0").rstrip(".")
+            parts.append(f"满{threshold_text}减{discount_text}")
+        return "；".join(parts)
+
+    def _parse_store_discount_rules_input(self):
+        text = self.store_discount_rules_input.text().strip() if hasattr(self, "store_discount_rules_input") else ""
+        if not text:
+            return []
+        matches = re.findall(r"满\s*([0-9]+(?:\.[0-9]+)?)\s*减\s*([0-9]+(?:\.[0-9]+)?)", text)
+        if not matches:
+            raise ValueError("店铺满减格式不正确，请按“满100减10；满200减30”填写。")
+        rules = []
+        for threshold_text, discount_text in matches:
+            threshold = float(threshold_text)
+            discount = float(discount_text)
+            if threshold <= 0 or discount <= 0:
+                raise ValueError("满减门槛和减免金额必须大于0。")
+            if discount >= threshold:
+                raise ValueError("满减金额不能大于或等于门槛金额。")
+            rules.append({"threshold": threshold, "discount": discount})
+        return rules
+
+    def _record_store_discount_rules_change(self, old_text, new_text):
+        if old_text == new_text:
+            return
+        try:
+            now = datetime.now()
+            time_str = now.strftime("%H:%M")
+            log_text = f"【店铺满减】{old_text or '未设置'} → {new_text or '未设置'}"
+            records = self.db.get_store_record(self.store_id, now.year, now.month, now.day)
+            records.append({"time": time_str, "text": log_text})
+            self.db.save_store_record(self.store_id, now.year, now.month, now.day, records)
+            if hasattr(self.main_app, "refresh_store_cards"):
+                QTimer.singleShot(0, lambda: self.main_app.refresh_store_cards(self.store_id))
+        except Exception as e:
+            print(f"保存店铺满减记录失败: {e}")
+
+    def save_sitewide_roi(self, show_toast=True):
         try:
             sitewide_roi = float(self.sitewide_roi_input.text().strip()) if self.sitewide_roi_input.text().strip() else 0.0
             if sitewide_roi < 0:
@@ -3816,17 +5089,51 @@ class StoreMarginDialog(QDialog):
             old_roi = float(old_rows[0][0] or 0) if old_rows else 0.0
             self.db.safe_execute("UPDATE stores SET sitewide_roi=? WHERE id=?", (sitewide_roi, self.store_id))
             self._record_sitewide_roi_change(old_roi, sitewide_roi)
-            self.main_app.show_toast("全站托管投产比已保存")
+            if show_toast and hasattr(self.main_app, "show_toast"):
+                self.main_app.show_toast("全站托管投产比已保存")
             return True
         except ValueError:
-            self.main_app.show_toast("全站托管投产比格式不正确")
+            if show_toast and hasattr(self.main_app, "show_toast"):
+                self.main_app.show_toast("全站托管投产比格式不正确")
             return False
 
+    def save_store_discount_rules(self, show_toast=True):
+        try:
+            old_text = self.db.format_store_discount_rules(self.store_id)
+            rules = self._parse_store_discount_rules_input()
+            clean_rules = self.db.save_store_discount_rules(self.store_id, rules)
+            self.store_discount_rules_input.setText(self._format_store_discount_rules_for_input())
+            new_text = self.db.format_store_discount_rules(self.store_id)
+            self._record_store_discount_rules_change(old_text, new_text)
+            if show_toast and hasattr(self.main_app, "show_toast"):
+                self.main_app.show_toast("店铺满减梯度已保存")
+            return True
+        except ValueError as e:
+            QMessageBox.warning(self, "店铺满减格式错误", str(e))
+            return False
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", f"保存店铺满减失败：{e}")
+            return False
+
+    def save_store_comprehensive_settings(self, show_toast=True):
+        if not self.save_sitewide_roi(show_toast=False):
+            if show_toast and hasattr(self.main_app, "show_toast"):
+                self.main_app.show_toast("全站托管投产比格式不正确")
+            return False
+        if not self.save_store_discount_rules(show_toast=False):
+            return False
+        if show_toast and hasattr(self.main_app, "show_toast"):
+            self.main_app.show_toast("店铺综合设置已保存")
+        self.calculate_total_margin()
+        return True
+
     def save_weights(self):
+        if append_event:
+            append_event(f"store_margin:save_weights:start store_id={self.store_id}")
         old_margin = self.calculate_total_margin()
-        if not self.save_sitewide_roi():
+        if not self.save_store_comprehensive_settings(show_toast=False):
             return
-        saved_count = 0
+        updates = []
         for row in range(self.table.rowCount()):
             prod_id = self.table.item(row, 1).data(Qt.UserRole)
             if not prod_id or prod_id not in self.product_weights:
@@ -3836,18 +5143,19 @@ class StoreMarginDialog(QDialog):
                 continue
             weight = self.product_weights[prod_id]["weight"]
             is_locked = self.product_weights[prod_id]["locked"]
-            self.db.safe_execute(
-                "UPDATE products SET store_weight=?, store_weight_locked=? WHERE id=?",
-                (weight, is_locked, sys_id),
-            )
-            saved_count += 1
+            updates.append((weight, is_locked, sys_id))
+        self.db.save_product_weights(updates)
+        if append_event:
+            append_event(f"store_margin:save_weights:db_done store_id={self.store_id} count={len(updates)}")
+        saved_count = len(updates)
         new_margin = self.calculate_total_margin()
         if old_margin is not None and new_margin is not None and abs(old_margin - new_margin) > 0.01:
             self.save_margin_log(old_margin, new_margin)
         self.main_app.show_toast(f"✅ 已保存 {saved_count} 项权重数据")
-        self.main_app.refresh_store_weight_sync_flag(self.store_id)
-        if self.save_callback:
-            self.save_callback(self.store_id, new_margin)
+        callback = self.save_callback
+        store_id = self.store_id
+        if callback:
+            callback(store_id, new_margin)
         self.close()
 
     def save_margin_log(self, old_margin, new_margin):
@@ -3869,53 +5177,76 @@ class StoreMarginDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 调试标签
-        debug_widget = QWidget()
-        debug_layout = QHBoxLayout(debug_widget)
-        debug_layout.setContentsMargins(5, 2, 5, 2)
-        debug_label = QLabel(f"[DEBUG] 文件: dialogs/store_margin.py")
-        debug_label.setStyleSheet("background-color: #ffeb3b; color: #000; font-size: 11px; padding: 2px 8px;")
-        debug_label.setCursor(Qt.PointingHandCursor)
-        debug_label.setToolTip("点击复制文件路径")
-        debug_layout.addWidget(debug_label)
-        debug_layout.addStretch()
-        layout.addWidget(debug_widget)
+        # ====== 店铺综合设置板块 ======
+        settings_widget = QWidget()
+        self.settings_widget = settings_widget
+        settings_widget.setStyleSheet("""
+            QWidget {
+                background-color: #f8fbff;
+                border: 1px solid #d6e4f0;
+                border-radius: 6px;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+            QLineEdit {
+                background: white;
+            }
+        """)
+        settings_layout = QHBoxLayout(settings_widget)
+        settings_layout.setContentsMargins(10, 8, 10, 8)
+        settings_layout.setSpacing(8)
 
-        def copy_path():
-            clipboard = QApplication.clipboard()
-            clipboard.setText("e:/zhuomian/shop/manager/dialogs/store_margin.py")
-        debug_label.mousePressEvent = lambda e: copy_path()
+        settings_title = QLabel("店铺综合设置")
+        settings_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50;")
+        settings_layout.addWidget(settings_title)
+
+        settings_layout.addWidget(QLabel("全站托管投产:"))
+        self.sitewide_roi_input = QLineEdit()
+        self.sitewide_roi_input.setFixedWidth(80)
+        self.sitewide_roi_input.setPlaceholderText("投产比")
+        self.sitewide_roi_input.setStyleSheet("padding: 5px; border: 1px solid #8e44ad; border-radius: 4px; font-weight: bold;")
+        try:
+            sitewide_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (self.store_id,))
+            sitewide_roi = float(sitewide_rows[0][0] or 0) if sitewide_rows else 0.0
+            self.sitewide_roi_input.setText(f"{sitewide_roi:.2f}" if sitewide_roi > 0 else "")
+        except Exception:
+            pass
+        self.sitewide_roi_input.returnPressed.connect(self.save_store_comprehensive_settings)
+        settings_layout.addWidget(self.sitewide_roi_input)
+
+        settings_layout.addWidget(QLabel("店铺满减梯度:"))
+        self.store_discount_rules_input = QLineEdit()
+        self.store_discount_rules_input.setMinimumWidth(260)
+        self.store_discount_rules_input.setPlaceholderText("例如：满100减10；满200减30")
+        self.store_discount_rules_input.setStyleSheet("padding: 5px; border: 1px solid #27ae60; border-radius: 4px;")
+        self.store_discount_rules_input.setText(self._format_store_discount_rules_for_input())
+        self.store_discount_rules_input.returnPressed.connect(self.save_store_comprehensive_settings)
+        settings_layout.addWidget(self.store_discount_rules_input, 1)
+
+        self.btn_save_store_settings = QPushButton("保存设置")
+        self.btn_save_store_settings.setStyleSheet("""
+            QPushButton {
+                background-color: #2c7be5;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background-color: #1a68d1; }
+        """)
+        self.btn_save_store_settings.clicked.connect(self.save_store_comprehensive_settings)
+        settings_layout.addWidget(self.btn_save_store_settings)
+        layout.addWidget(settings_widget)
 
         # ====== 板块1: 过往数据分析板块 ======
         historical_widget = QWidget()
         historical_widget.setStyleSheet("border: 1px solid #dee2e6; border-radius: 8px;")
         historical_layout = QVBoxLayout(historical_widget)
         historical_layout.setContentsMargins(0, 0, 0, 0)
-
-        # 板块标题栏（放在日期选择行上方）- 包含多个功能标签
-        section_title_bar = QWidget()
-        section_title_bar.setStyleSheet("padding: 5px 10px; border-radius: 4px;")
-        section_title_layout = QHBoxLayout(section_title_bar)
-        section_title_layout.setContentsMargins(5, 5, 5, 5)
-
-        section_label_1 = QLabel("📈 过往数据分析")
-        section_label_1.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50; padding: 5px 10px; border-radius: 4px;")
-        section_title_layout.addWidget(section_label_1)
-
-        section_label_2 = QLabel("📅 数据周期选择")
-        section_label_2.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
-        section_title_layout.addWidget(section_label_2)
-
-        section_label_3 = QLabel("📝 手动录入数据")
-        section_label_3.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
-        section_title_layout.addWidget(section_label_3)
-
-        section_label_4 = QLabel("📊 周环比对比")
-        section_label_4.setStyleSheet("font-size: 12px; color: #666; padding: 5px 10px;")
-        section_title_layout.addWidget(section_label_4)
-
-        section_title_layout.addStretch()
-        historical_layout.addWidget(section_title_bar)
 
         # 日期选择行
         date_row = QWidget()
@@ -3931,7 +5262,7 @@ class StoreMarginDialog(QDialog):
 
         self.date_start_input = QDateEdit()
         self.date_start_input.setCalendarPopup(True)
-        self.date_start_input.setDate(QDate.currentDate().addDays(-7))  # 默认一周前
+        self.date_start_input.setDate(QDate.currentDate().addDays(-7))
         self.date_start_input.setDisplayFormat("yyyy-MM-dd")
         self.date_start_input.setFixedWidth(100)
         self.date_start_input.setStyleSheet("font-size: 11px; padding: 2px;")
@@ -3941,7 +5272,7 @@ class StoreMarginDialog(QDialog):
 
         self.date_end_input = QDateEdit()
         self.date_end_input.setCalendarPopup(True)
-        self.date_end_input.setDate(QDate.currentDate())  # 默认今天
+        self.date_end_input.setDate(QDate.currentDate().addDays(-1))
         self.date_end_input.setDisplayFormat("yyyy-MM-dd")
         self.date_end_input.setFixedWidth(100)
         self.date_end_input.setStyleSheet("font-size: 11px; padding: 2px;")
@@ -3972,7 +5303,7 @@ class StoreMarginDialog(QDialog):
         self.btn_input_data.setFixedWidth(90)
         self.btn_input_data.setStyleSheet("""
             QPushButton {
-                background-color: #27ae60;
+                background-color: #4f86ad;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -3981,10 +5312,10 @@ class StoreMarginDialog(QDialog):
                 padding: 6px 10px;
             }
             QPushButton:hover {
-                background-color: #219a52;
+                background-color: #40769b;
             }
             QPushButton:pressed {
-                background-color: #1e8449;
+                background-color: #356687;
             }
         """)
         self.btn_input_data.clicked.connect(self.open_input_data_dialog)
@@ -3993,7 +5324,7 @@ class StoreMarginDialog(QDialog):
         self.btn_import_data.setFixedWidth(90)
         self.btn_import_data.setStyleSheet("""
             QPushButton {
-                background-color: #9b59b6;
+                background-color: #3f739e;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -4002,10 +5333,10 @@ class StoreMarginDialog(QDialog):
                 padding: 6px 10px;
             }
             QPushButton:hover {
-                background-color: #8e44ad;
+                background-color: #356388;
             }
             QPushButton:pressed {
-                background-color: #7d3c98;
+                background-color: #2c5474;
             }
         """)
         self.btn_import_data.clicked.connect(self.import_data)
@@ -4014,7 +5345,7 @@ class StoreMarginDialog(QDialog):
         self.btn_export_excel.setFixedWidth(90)
         self.btn_export_excel.setStyleSheet("""
             QPushButton {
-                background-color: #2ecc71;
+                background-color: #5b91b8;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -4023,13 +5354,13 @@ class StoreMarginDialog(QDialog):
                 padding: 6px 10px;
             }
             QPushButton:hover {
-                background-color: #27ae60;
+                background-color: #4c80a6;
             }
             QPushButton:pressed {
-                background-color: #229954;
+                background-color: #406f92;
             }
         """)
-        self.btn_export_excel.clicked.connect(self.export_margin_excel)
+        self.btn_export_excel.clicked.connect(self._export_margin_excel_from_button)
 
         self.combo_margin_data_mode = QComboBox()
         self.combo_margin_data_mode.addItem("ERP模式", "erp")
@@ -4061,6 +5392,22 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_reading_mode.clicked.connect(self.toggle_reading_mode)
 
+        self.btn_weekly_images = QPushButton("本周附带图片")
+        self.btn_weekly_images.setFixedWidth(112)
+        self.btn_weekly_images.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover { background-color: #138496; }
+        """)
+        self.btn_weekly_images.clicked.connect(self.toggle_weekly_images_panel)
+
         self.lbl_current_history = QLabel("📍 当前: 暂无数据")
         self.lbl_current_history.setStyleSheet("""
             QLabel {
@@ -4085,8 +5432,10 @@ class StoreMarginDialog(QDialog):
         date_layout.addWidget(self.btn_reading_mode)
         date_layout.addWidget(self.lbl_current_history)
         date_layout.addStretch()
+        date_layout.addWidget(self.btn_weekly_images)
 
         historical_layout.addWidget(date_row)
+        self._build_weekly_images_panel()
 
         # 子板块C: 手动录入数据表格
         self.margin_data_table = QTableWidget()
@@ -4108,7 +5457,7 @@ class StoreMarginDialog(QDialog):
                 gridline-color: #cccccc;
                 font-size: 14px;
                 border: 1px solid #cccccc;
-                border-radius: 4px;
+                border-radius: 0px;
                 margin: 0px;
                 background-color: white;
             }
@@ -4139,13 +5488,8 @@ class StoreMarginDialog(QDialog):
                 font-weight: bold;
                 min-height: 45px;
             }
-            QHeaderView::section:first {
-                border-left: 1px solid #cccccc;
-                border-top-left-radius: 4px;
-            }
-            QHeaderView::section:last {
-                border-right: 1px solid #cccccc;
-                border-top-right-radius: 4px;
+            QTableCornerButton::section {
+                border-radius: 0px;
             }
         """)
         # 设置表格字体大小
@@ -4179,7 +5523,7 @@ class StoreMarginDialog(QDialog):
                 gridline-color: #cccccc;
                 font-size: 14px;
                 border: 1px solid #cccccc;
-                border-radius: 4px;
+                border-radius: 0px;
                 background-color: white;
             }
             QTableWidget::item {
@@ -4210,19 +5554,26 @@ class StoreMarginDialog(QDialog):
 
         # 毛利明细表格
         self.table = QTableWidget()
-        self.table.setColumnCount(15)
-        self.table.setHorizontalHeaderLabels(["图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "销售额", "主卖规格", "退款率", "退款占比\n最多规格", "操作"])
+        self.table.setColumnCount(14)
+        self.table.setHorizontalHeaderLabels(["图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)", "权重对比\n(较上周)", "单量", "单量对比\n(较上周)", "销售额", "主卖规格", "退款率", "退款占比\n最多规格"])
         self.table.setAlternatingRowColors(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.cellChanged.connect(self.on_cell_changed)
+        self.table.cellClicked.connect(self.on_cell_clicked)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
         
         # 设置列宽自适应填充
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setMinimumSectionSize(50)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(-1, Qt.AscendingOrder)
+        self._order_sort_column = -1
+        self._order_sort_order = Qt.AscendingOrder
+        header.sectionClicked.connect(self.sort_order_table_by_column)
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 72)
         # 商品标题列固定200像素
@@ -4230,16 +5581,33 @@ class StoreMarginDialog(QDialog):
         self.table.setColumnWidth(2, 200)
         self.table.setStyleSheet("""
             QTableWidget {
-                gridline-color: #cccccc;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
+                gridline-color: #dfe3e6;
+                border: 1px solid #cfd4d8;
+                border-radius: 0px;
                 background-color: white;
             }
             QTableWidget::item {
                 padding: 0px;
                 text-align: center;
-                border: 1px solid #cccccc;
+                border: 0px;
                 background-color: white;
+            }
+            QTableWidget::item:focus {
+                border: 0px;
+                outline: none;
+            }
+            QTableWidget QLabel,
+            QTableWidget QLineEdit {
+                background: transparent;
+                border: none;
+                border-radius: 0px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QWidget#plainTableCell {
+                background: transparent;
+                border: none;
+                border-radius: 0px;
             }
             QTableWidget::item:selected {
                 background-color: #e6f3ff;
@@ -4257,13 +5625,16 @@ class StoreMarginDialog(QDialog):
                 background-color: white;
                 padding: 0px;
                 margin: 0px;
-                border: 1px solid #cccccc;
+                border: 0px;
+                border-right: 1px solid #dfe3e6;
+                border-bottom: 1px solid #cfd4d8;
                 font-weight: bold;
                 min-height: 35px;
                 text-align: center;
             }
         """)
         historical_layout.addWidget(self.table)
+
         btn_widget = QWidget()
         btn_layout = QHBoxLayout(btn_widget)
         self.btn_profit_calc = QPushButton("🧮 计算利润")
@@ -4288,7 +5659,7 @@ class StoreMarginDialog(QDialog):
         self.btn_import_orders = QPushButton("📥 导入订单")
         self.btn_import_orders.setStyleSheet("""
             QPushButton {
-                background-color: #27ae60;
+                background-color: #5b63a9;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -4297,10 +5668,10 @@ class StoreMarginDialog(QDialog):
                 padding: 6px 12px;
             }
             QPushButton:hover {
-                background-color: #219a52;
+                background-color: #4d5597;
             }
             QPushButton:pressed {
-                background-color: #1e8449;
+                background-color: #424986;
             }
         """)
         self.btn_import_orders.clicked.connect(self.import_orders)
@@ -4309,7 +5680,7 @@ class StoreMarginDialog(QDialog):
         self.btn_history = QPushButton("📜 全部记录")
         self.btn_history.setStyleSheet("""
             QPushButton {
-                background-color: #8e44ad;
+                background-color: #6b73b9;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -4318,10 +5689,10 @@ class StoreMarginDialog(QDialog):
                 padding: 6px 12px;
             }
             QPushButton:hover {
-                background-color: #7d3c98;
+                background-color: #5c64a7;
             }
             QPushButton:pressed {
-                background-color: #6c3483;
+                background-color: #4e5695;
             }
         """)
         self.btn_history.clicked.connect(self.show_import_history)
@@ -4363,45 +5734,7 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_promotion_data.clicked.connect(self.open_promotion_data_dialog)
 
-        self.btn_link_changes = QPushButton("链接变化")
-        self.btn_link_changes.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #2c3e50;
-            }
-        """)
-        self.btn_link_changes.clicked.connect(self.open_link_changes_dialog)
-
         self.btn_display_settings = QPushButton("设置")
-        self.btn_pdd_merchant_test = QPushButton("抓取链接")
-        self.btn_pdd_merchant_test.setToolTip("打开拼多多链接抓取窗口，可抓取添加编码界面和价格管理")
-        self.btn_pdd_merchant_test.setStyleSheet("""
-            QPushButton {
-                background-color: #f39c12;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #d68910;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-            }
-        """)
-        self.btn_pdd_merchant_test.clicked.connect(self.open_pdd_merchant_test)
-
         self.btn_display_settings.setStyleSheet("""
             QPushButton {
                 background-color: #7f8c8d;
@@ -4418,6 +5751,24 @@ class StoreMarginDialog(QDialog):
         """)
         self.btn_display_settings.clicked.connect(self.open_store_margin_display_settings)
 
+        self.btn_pdd_merchant_test = QPushButton("抓取链接")
+        self.btn_pdd_merchant_test.setToolTip("打开拼多多链接抓取窗口，可抓取添加编码界面、价格管理和推广状态")
+        self.btn_pdd_merchant_test.setStyleSheet("""
+            QPushButton {
+                background-color: #f39c12;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QPushButton:hover {
+                background-color: #d68910;
+            }
+        """)
+        self.btn_pdd_merchant_test.clicked.connect(self.open_pdd_merchant_test)
+
         self.lbl_total_margin = QLabel("综合毛利: 0.00%")
         self.lbl_total_margin.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 6px 12px; border-radius: 6px;"
@@ -4432,20 +5783,6 @@ class StoreMarginDialog(QDialog):
         self.lbl_order_range.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #8e44ad; background-color: #f5eef8; padding: 6px 12px; border-radius: 6px;"
         )
-
-        btn_layout.addWidget(QLabel("全站托管投产:"))
-        self.sitewide_roi_input = QLineEdit()
-        self.sitewide_roi_input.setFixedWidth(80)
-        self.sitewide_roi_input.setPlaceholderText("投产比")
-        self.sitewide_roi_input.setStyleSheet("padding: 5px; border: 1px solid #8e44ad; border-radius: 4px; font-weight: bold;")
-        try:
-            sitewide_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (self.store_id,))
-            sitewide_roi = float(sitewide_rows[0][0] or 0) if sitewide_rows else 0.0
-            self.sitewide_roi_input.setText(f"{sitewide_roi:.2f}" if sitewide_roi > 0 else "")
-        except Exception:
-            pass
-        self.sitewide_roi_input.returnPressed.connect(self.save_sitewide_roi)
-        btn_layout.addWidget(self.sitewide_roi_input)
 
         self.btn_save = QPushButton("💾 保存")
         self.btn_save.setStyleSheet("""
@@ -4490,7 +5827,6 @@ class StoreMarginDialog(QDialog):
         btn_layout.addWidget(self.btn_history)
         btn_layout.addWidget(self.btn_ai_report)
         btn_layout.addWidget(self.btn_promotion_data)
-        btn_layout.addWidget(self.btn_link_changes)
         btn_layout.addWidget(self.btn_pdd_merchant_test)
         btn_layout.addWidget(self.btn_display_settings)
         btn_layout.addSpacing(10)
@@ -4508,162 +5844,68 @@ class StoreMarginDialog(QDialog):
         """窗口大小改变时同步两表列宽"""
         super().resizeEvent(event)
         self.sync_table_widths()
+        if getattr(self, "weekly_images_panel", None) is not None and self.weekly_images_panel.isVisible():
+            self._position_weekly_images_panel()
 
     def closeEvent(self, event):
+        self._prepare_for_account_switch()
         super().closeEvent(event)
 
-    def _is_link_change_record(self, record):
-        if not isinstance(record, dict):
-            return False
-        if record.get("type") == "link_change":
-            return True
-        text = str(record.get("text", "") or "").strip()
-        prefixes = ("【链接上架】", "【链接删除】", "【新增链接】", "【删除链接】")
-        return any(text.startswith(prefix) for prefix in prefixes)
-
-    def _link_change_action_text(self, record):
-        action = str(record.get("action", "") if isinstance(record, dict) else "")
-        text = str(record.get("text", "") if isinstance(record, dict) else "")
-        if action == "add" or "上架" in text or "新增" in text:
-            return "上架"
-        if action == "delete" or "删除" in text:
-            return "删除"
-        return "变化"
-
-    def _parse_link_change_text_field(self, text, marker):
-        if marker not in text:
-            return ""
-        value = text.split(marker, 1)[1]
-        for sep in ("｜", "|", "，", ","):
-            if sep in value:
-                value = value.split(sep, 1)[0]
-                break
-        return value.strip()
-
-    def _collect_store_link_change_records(self, start_date=None, end_date=None):
-        rows = self.db.safe_fetchall(
-            "SELECT year, month, day, records_json FROM store_records WHERE store_id=?",
-            (self.store_id,)
-        )
-        items = []
-        for year, month, day, records_json in rows:
+    def _prepare_for_account_switch(self):
+        self._disposing = True
+        app = QApplication.instance()
+        if app is not None and getattr(self, "_weekly_app_filter_installed", False):
+            app.removeEventFilter(self)
+            self._weekly_app_filter_installed = False
+        for timer_name in ("_button_tooltip_timer",):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+        anim = getattr(self, "toast_fade_out_animation", None)
+        if anim is not None:
+            anim.stop()
+        for widget in [self, *self.findChildren(QWidget)]:
             try:
-                record_date = datetime(int(year), int(month), int(day)).date()
+                widget.removeEventFilter(self)
+                QApplication.removePostedEvents(widget)
             except Exception:
-                continue
-            if start_date and record_date < start_date:
-                continue
-            if end_date and record_date > end_date:
-                continue
-            try:
-                day_records = json.loads(records_json) if records_json else []
-            except Exception:
-                day_records = []
-            for record in day_records:
-                if not self._is_link_change_record(record):
-                    continue
-                text = str(record.get("text", "") or "").strip()
-                product_id = str(record.get("product_id", "") or "").strip()
-                product_title = str(record.get("product_title", "") or "").strip()
-                if not product_id:
-                    product_id = self._parse_link_change_text_field(text, "商品ID：")
-                if not product_title:
-                    product_title = self._parse_link_change_text_field(text, "标题：")
-                items.append({
-                    "date": record_date.strftime("%Y-%m-%d"),
-                    "time": str(record.get("time", "") or ""),
-                    "action": self._link_change_action_text(record),
-                    "product_id": product_id,
-                    "product_title": product_title,
-                    "content": text,
-                })
-        items.sort(key=lambda x: (x["date"], x["time"], x["product_id"]), reverse=True)
-        return items
-
-    def open_link_changes_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"链接变化 - {self.store_name}")
-        dialog.resize(900, 520)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-
-        hint = QLabel("当前店铺的链接上架/删除记录。记录来源为店铺行操作记录，新增或删除链接后会自动写入。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #555; font-size: 12px;")
-        layout.addWidget(hint)
-
-        items = self._collect_store_link_change_records()
-        table = QTableWidget()
-        table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(["日期", "时间", "类型", "商品ID", "商品标题", "记录内容"])
-        table.setRowCount(len(items))
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setWordWrap(True)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        widths = [100, 70, 60, 150, 240, 260]
-        for col, width in enumerate(widths):
-            table.setColumnWidth(col, width)
-
-        for row, item in enumerate(items):
-            values = [
-                item.get("date", ""),
-                item.get("time", ""),
-                item.get("action", ""),
-                item.get("product_id", ""),
-                item.get("product_title", ""),
-                item.get("content", ""),
-            ]
-            for col, value in enumerate(values):
-                cell = QTableWidgetItem(str(value or ""))
-                cell.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
-                table.setItem(row, col, cell)
-            table.setRowHeight(row, 52)
-        layout.addWidget(table)
-
-        if not items:
-            empty_label = QLabel("暂无链接变化记录")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: #999; padding: 8px;")
-            layout.addWidget(empty_label)
-
-        btn_row = QHBoxLayout()
-        btn_copy = QPushButton("复制全部")
-        btn_close = QPushButton("关闭")
-        btn_copy.setEnabled(bool(items))
-        btn_copy.setStyleSheet("QPushButton { background-color: #3498db; color: white; padding: 6px 14px; border-radius: 4px; } QPushButton:disabled { background-color: #bdc3c7; }")
-        btn_close.setStyleSheet("QPushButton { padding: 6px 14px; border-radius: 4px; }")
-
-        def copy_all():
-            lines = ["日期\t时间\t类型\t商品ID\t商品标题\t记录内容"]
-            for item in items:
-                lines.append("\t".join([
-                    item.get("date", ""),
-                    item.get("time", ""),
-                    item.get("action", ""),
-                    item.get("product_id", ""),
-                    item.get("product_title", ""),
-                    item.get("content", ""),
-                ]))
-            QApplication.clipboard().setText("\n".join(lines))
-            self.show_toast("链接变化记录已复制")
-
-        btn_copy.clicked.connect(copy_all)
-        btn_close.clicked.connect(dialog.accept)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_copy)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
-        dialog.exec_()
+                pass
+        for child_name in (
+            "large_dialog", "promotion_data_dialog", "pdd_product_match_dialog",
+            "pdd_link_control_dialog", "pdd_code_dialog", "pdd_price_dialog",
+            "promotion_status_dialog",
+        ):
+            child = getattr(self, child_name, None)
+            if child is not None:
+                try:
+                    child.close()
+                    child.deleteLater()
+                except Exception:
+                    pass
+                setattr(self, child_name, None)
 
     def open_promotion_data_dialog(self):
+        existing = getattr(self, "promotion_data_dialog", None)
+        if existing is not None:
+            existing.showNormal() if existing.isMinimized() else existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
         try:
             from manager.dialogs.promotion_data import PromotionDataDialog
         except ImportError:
             from dialogs.promotion_data import PromotionDataDialog
-        dialog = PromotionDataDialog(self.store_id, self.store_name, self.db, self.main_app, self)
-        dialog.exec_()
+        dialog = PromotionDataDialog(self.store_id, self.store_name, self.db, self.main_app, None)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(
+            lambda _=None, d=dialog: setattr(self, "promotion_data_dialog", None)
+            if getattr(self, "promotion_data_dialog", None) is d else None
+        )
+        self.promotion_data_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def open_store_margin_display_settings(self):
         dialog = QDialog(self)
@@ -4714,11 +5956,15 @@ class StoreMarginDialog(QDialog):
         dialog.exec_()
 
     def load_products(self):
-        self.table.cellChanged.disconnect()
+        try:
+            self.table.cellChanged.disconnect()
+        except (TypeError, RuntimeError):
+            pass
         products_raw = self.db.safe_fetchall(
             """SELECT id, name, title, image_data, sort_order, product_category_label,
                       store_weight, store_weight_locked
-               FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0""",
+               FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0
+                 AND COALESCE(is_violation, 0)=0""",
             (self.store_id,),
         )
         if hasattr(self.main_app, "_sort_products_for_display"):
@@ -4743,9 +5989,11 @@ class StoreMarginDialog(QDialog):
             sys_id, prod_id, prod_title, image_data, store_weight, store_locked = prod
             self.sys_id_to_user_id[sys_id] = prod_id
             self.product_weights[prod_id] = {"sys_id": sys_id, "weight": store_weight or 0, "locked": 0}
+        self.calculate_weights_from_orders()
         self.table.setRowCount(len(products))
         for row, prod in enumerate(products):
             sys_id, prod_id, prod_title, image_data, store_weight, store_locked = prod
+            store_weight = self.product_weights.get(prod_id, {}).get("weight", store_weight or 0)
             if prod_id in self.product_weights:
                 self.product_weights[prod_id]["locked"] = store_locked or 0
             img_widget = QWidget()
@@ -4759,7 +6007,11 @@ class StoreMarginDialog(QDialog):
             img_label.setAlignment(Qt.AlignCenter)
             if image_data:
                 pixmap = QPixmap()
-                pixmap.loadFromData(image_data)
+                try:
+                    pixmap.loadFromData(bytes(image_data))
+                except Exception as e:
+                    print(f"店铺毛利商品图片加载失败 product={prod_id}: {e}")
+                    pixmap = QPixmap()
                 if not pixmap.isNull():
                     scaled = pixmap.scaled(70, 70, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
                     x = max(0, (scaled.width() - 70) // 2)
@@ -4780,7 +6032,11 @@ class StoreMarginDialog(QDialog):
             self.table.setItem(row, 1, item_id)
             item_title = QTableWidgetItem(prod_title or "")
             item_title.setFlags(item_title.flags() & ~Qt.ItemIsEditable)
-            item_title.setFont(QFont("Microsoft YaHei", 9))
+            title_font = QFont("Microsoft YaHei", 9)
+            title_font.setUnderline(True)
+            item_title.setFont(title_font)
+            item_title.setForeground(QColor("#1769aa"))
+            item_title.setToolTip("单击打开规格与毛利管理")
             self.table.setItem(row, 2, item_title)
             cost, price, margin = self.get_product_margin(sys_id)
             cost_item = QTableWidgetItem(f"¥{cost:.2f}" if cost else "¥0.00")
@@ -4806,10 +6062,12 @@ class StoreMarginDialog(QDialog):
             weight = store_weight or 0
             is_locked = store_locked or 0
             weight_widget = QWidget()
+            weight_widget.setObjectName("plainTableCell")
             weight_layout = QHBoxLayout(weight_widget)
-            weight_layout.setContentsMargins(2, 2, 2, 2)
-            weight_layout.setSpacing(5)
+            weight_layout.setContentsMargins(0, 0, 0, 0)
+            weight_layout.setSpacing(0)
             left_widget = QWidget()
+            left_widget.setObjectName("plainTableCell")
             left_layout = QVBoxLayout(left_widget)
             left_layout.setContentsMargins(0, 0, 0, 0)
             weight_str = str(int(weight)) if weight == int(weight) else f"{weight:.1f}"
@@ -4818,7 +6076,7 @@ class StoreMarginDialog(QDialog):
             weight_input.setFixedHeight(25)
             weight_input.setReadOnly(True)
             weight_input.setStyleSheet(
-                "QLineEdit { background-color: #f5f5f5; border: 1px solid #4caf50; border-radius: 3px; padding: 2px; font-weight: bold; color: #2e7d32; }"
+                "QLineEdit { background: transparent; border: none; border-radius: 0px; padding: 0px; font-weight: bold; color: #2e7d32; }"
             )
             weight_input.installEventFilter(self)
             weight_input.setProperty("row", row)
@@ -4829,6 +6087,7 @@ class StoreMarginDialog(QDialog):
             
             # 新增：权重对比列（第 8 列）
             weight_compare_widget = QWidget()
+            weight_compare_widget.setObjectName("plainTableCell")
             weight_compare_layout = QHBoxLayout(weight_compare_widget)
             weight_compare_layout.setContentsMargins(0, 0, 0, 0)
             weight_compare_label = QLabel("-")
@@ -4838,6 +6097,7 @@ class StoreMarginDialog(QDialog):
             self.table.setCellWidget(row, 7, weight_compare_widget)
             
             order_label_widget = QWidget()
+            order_label_widget.setObjectName("plainTableCell")
             order_label_layout = QHBoxLayout(order_label_widget)
             order_label_layout.setContentsMargins(0, 0, 0, 0)
             order_label = QLabel("")
@@ -4848,6 +6108,7 @@ class StoreMarginDialog(QDialog):
             
             # 新增：单量对比列（第 10 列）
             order_compare_widget = QWidget()
+            order_compare_widget.setObjectName("plainTableCell")
             order_compare_layout = QHBoxLayout(order_compare_widget)
             order_compare_layout.setContentsMargins(0, 0, 0, 0)
             order_compare_label = QLabel("-")
@@ -4857,6 +6118,7 @@ class StoreMarginDialog(QDialog):
             self.table.setCellWidget(row, 9, order_compare_widget)
             
             main_spec_widget = QWidget()
+            main_spec_widget.setObjectName("plainTableCell")
             main_spec_layout = QHBoxLayout(main_spec_widget)
             main_spec_layout.setContentsMargins(0, 0, 0, 0)
             main_spec_label = QLabel("-")
@@ -4885,15 +6147,6 @@ class StoreMarginDialog(QDialog):
             refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
             self.table.setCellWidget(row, 13, refund_ratio_label)
             self.refund_widgets[row]['ratio'] = refund_ratio_label
-            btn_widget = QWidget()
-            btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(5, 2, 5, 2)
-            btn_edit = QPushButton("查看商品")
-            btn_edit.setFixedSize(60, 25)
-            btn_edit.setStyleSheet("QPushButton { padding: 1px; }")
-            btn_edit.clicked.connect(lambda checked, sid=sys_id, pid=prod_id, pt=prod_title: self.open_spec_dialog(sid, pid, pt))
-            btn_layout.addWidget(btn_edit)
-            self.table.setCellWidget(row, 14, btn_widget)
             self.table.setItem(row, 10, QTableWidgetItem("-"))
             self.table.item(row, 10).setFont(QFont("Microsoft YaHei", 14))
             self.table.item(row, 10).setTextAlignment(Qt.AlignCenter)
@@ -4907,9 +6160,11 @@ class StoreMarginDialog(QDialog):
         self.update_orders_display()
         self.update_compare_columns()
         self.update_product_avg_price()
+        self._apply_store_margin_button_tooltips()
 
     def update_product_avg_price(self):
         """更新所有商品的客单价和销售额列"""
+        self._normalize_imported_order_store_ids()
         for row in range(self.table.rowCount()):
             prod_id_item = self.table.item(row, 1)
             if not prod_id_item:
@@ -4938,7 +6193,7 @@ class StoreMarginDialog(QDialog):
             spec_sales = self.db.safe_fetchall(
                 "SELECT ps.sale_price, io.order_count FROM product_specs ps "
                 "LEFT JOIN imported_orders io ON io.product_id = ? AND io.spec_code = ps.spec_code "
-                "WHERE ps.product_id = ?",
+                "WHERE ps.product_id = ? AND COALESCE(ps.is_temporarily_off_shelf, 0)=0",
                 (user_product_id, sys_id)
             )
             total_amount = 0.0
@@ -5071,6 +6326,8 @@ class StoreMarginDialog(QDialog):
     def _table_cell_text(self, table, row, col):
         widget = table.cellWidget(row, col)
         if widget:
+            if isinstance(widget, QLabel):
+                return widget.text()
             line_edit = widget.findChild(QLineEdit)
             if line_edit:
                 return line_edit.text()
@@ -5084,7 +6341,7 @@ class StoreMarginDialog(QDialog):
     def _format_manual_record_for_export(self, record):
         start_date = record[0] if record[0] else ""
         end_date = record[1] if record[1] else ""
-        date_text = f"{start_date}~{end_date}" if start_date or end_date else ""
+        date_text = self._export_period_day_text(start_date, end_date)
         days = 1
         if start_date and end_date:
             try:
@@ -5117,6 +6374,30 @@ class StoreMarginDialog(QDialog):
             f"¥{float(record[19] or 0):.2f}",
             f"¥{daily_profit:.2f}",
         ]
+
+    def _export_period_day_text(self, start_date, end_date):
+        days = []
+        for value in (start_date, end_date):
+            day_text = self._export_day_text(value)
+            if day_text and day_text not in days:
+                days.append(day_text)
+        return "~".join(days)
+
+    def _export_day_text(self, value):
+        text = str(value or "").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                return f"{dt.month}月{dt.day}日"
+            except Exception:
+                pass
+        match = re.search(r"(\d{1,2})月(\d{1,2})日", text)
+        if match:
+            return f"{int(match.group(1))}月{int(match.group(2))}日"
+        match = re.search(r"\d{4}[-/](\d{1,2})[-/](\d{1,2})", text)
+        if match:
+            return f"{int(match.group(1))}月{int(match.group(2))}日"
+        return text
 
     def _manual_record_numeric_values_for_export(self, record):
         days = 1
@@ -5177,7 +6458,8 @@ class StoreMarginDialog(QDialog):
 
     def _style_excel_sheet(self, ws, widths=None):
         header_fill = PatternFill("solid", fgColor="D9EAF7")
-        header_font = Font(bold=True, color="1F2933")
+        header_font = Font(name="SimHei", bold=True, color="1F2933", size=13)
+        data_font = Font(name="SimHei", color="000000", size=12)
         thin = Side(style="thin", color="B7C4D1")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
         for row in ws.iter_rows():
@@ -5187,19 +6469,21 @@ class StoreMarginDialog(QDialog):
                 if cell.row == 1:
                     cell.fill = header_fill
                     cell.font = header_font
+                else:
+                    cell.font = data_font
         if widths:
             for col_idx, width in widths.items():
                 ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     def _style_historical_export_sheet(self, ws, row_types, compare_directions, widths=None):
         header_fill = PatternFill("solid", fgColor="EAF4FF")
-        header_font = Font(bold=True, color="1F2933", size=11)
-        manual_font = Font(bold=True, color="1B8F3A", size=11)
-        calculated_font = Font(bold=True, color="1D4ED8", size=11)
-        neutral_font = Font(bold=True, color="374151", size=11)
-        compare_up_font = Font(bold=True, color="16A34A", size=11)
-        compare_down_font = Font(bold=True, color="DC2626", size=11)
-        compare_flat_font = Font(bold=True, color="6B7280", size=11)
+        header_font = Font(name="SimHei", bold=True, color="1F2933", size=12)
+        manual_font = Font(name="SimHei", bold=True, color="1B8F3A", size=12)
+        calculated_font = Font(name="SimHei", bold=True, color="1D4ED8", size=12)
+        neutral_font = Font(name="SimHei", bold=True, color="374151", size=12)
+        compare_up_font = Font(name="SimHei", bold=True, color="16A34A", size=12)
+        compare_down_font = Font(name="SimHei", bold=True, color="DC2626", size=12)
+        compare_flat_font = Font(name="SimHei", bold=True, color="6B7280", size=12)
         white_fill = PatternFill("solid", fgColor="FFFFFF")
         compare_fill = PatternFill("solid", fgColor="F7F8FA")
         thin = Side(style="thin", color="CAD5E2")
@@ -5270,6 +6554,149 @@ class StoreMarginDialog(QDialog):
             }
         )
         ws.freeze_panes = "A2"
+        self._append_reading_mode_images_to_historical_sheet(ws)
+
+    def _export_month_text(self, value):
+        text = str(value or "").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                return f"{dt.month}月"
+            except Exception:
+                pass
+        match = re.search(r"(\d{1,2})月", text)
+        if match:
+            return f"{int(match.group(1))}月"
+        match = re.search(r"\d{4}[-/](\d{1,2})", text)
+        if match:
+            return f"{int(match.group(1))}月"
+        return ""
+
+    def _reading_mode_images_for_export(self):
+        try:
+            return self.db.safe_fetchall(
+                """SELECT slot_index, image_data, created_time
+                   FROM store_temp_images
+                   WHERE store_id=?
+                   ORDER BY slot_index""",
+                (self.store_id,),
+            )
+        except Exception as e:
+            print(f"读取本周附带图片失败: {e}")
+            return []
+
+    def _add_reading_export_image(self, ws, image_data, cell, image_refs, label):
+        if not image_data:
+            return None
+        try:
+            image_stream, display_width, display_height = self._high_res_export_image_stream(
+                image_data,
+                max_embed_size=None,
+                max_display_width=96,
+                max_display_height=96,
+            )
+            if image_stream is None:
+                return None
+            image = ExcelImage(image_stream)
+            image.width = display_width
+            image.height = display_height
+            ws.add_image(image, cell)
+            image_refs.append(image_stream)
+            return image
+        except Exception as e:
+            print(f"导出{label}失败: {e}")
+            return None
+
+    def _high_res_export_image_stream(self, image_data, max_embed_size=2400, max_display_width=360, max_display_height=260):
+        from PIL import Image as PilImage
+
+        source = PilImage.open(BytesIO(image_data))
+        if source.mode not in ("RGB", "RGBA"):
+            source = source.convert("RGBA")
+        width, height = source.size
+        if width <= 0 or height <= 0:
+            return None, 0, 0
+
+        embed = source.copy()
+        if max_embed_size and max(width, height) > max_embed_size:
+            embed.thumbnail((int(max_embed_size), int(max_embed_size)), PilImage.LANCZOS)
+            width, height = embed.size
+
+        display_scale = min(float(max_display_width) / width, float(max_display_height) / height, 1.0)
+        display_width = max(1, int(width * display_scale))
+        display_height = max(1, int(height * display_scale))
+
+        stream = BytesIO()
+        embed.save(stream, format="PNG", optimize=True)
+        stream.seek(0)
+        return stream, display_width, display_height
+
+    def _thumbnail_export_image_stream(self, image_data, max_width, max_height):
+        from PIL import Image as PilImage
+
+        source = PilImage.open(BytesIO(image_data))
+        if source.mode not in ("RGB", "RGBA"):
+            source = source.convert("RGBA")
+        width, height = source.size
+        if width <= 0 or height <= 0:
+            return None
+        source.thumbnail((int(max_width), int(max_height)), PilImage.LANCZOS)
+        stream = BytesIO()
+        source.save(stream, format="PNG", optimize=True)
+        stream.seek(0)
+        return stream
+
+    def _append_reading_mode_images_to_historical_sheet(self, ws):
+        rows = self._reading_mode_images_for_export()
+        if not rows:
+            return
+        image_refs = getattr(ws, "_image_stream_refs", [])
+        start_row = ws.max_row + 2
+        max_col = max(20, ws.max_column)
+        title_fill = PatternFill("solid", fgColor="EAF4FF")
+        label_fill = PatternFill("solid", fgColor="F8FAFC")
+        header_font = Font(name="SimHei", bold=True, color="1F2933", size=13)
+        data_font = Font(name="SimHei", color="000000", size=12)
+        thin = Side(style="thin", color="CAD5E2")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=max_col)
+        title_cell = ws.cell(start_row, 1, "本周附带图片")
+        title_cell.fill = title_fill
+        title_cell.font = header_font
+        title_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        title_cell.border = border
+        current_row = start_row + 1
+        ws.cell(current_row, 1, "月份")
+        ws.cell(current_row, 2, "位置")
+        ws.cell(current_row, 3, "图片")
+        for col in range(1, 4):
+            cell = ws.cell(current_row, col)
+            cell.fill = label_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=6)
+        current_row += 1
+
+        for slot_index, image_data, created_time in rows:
+            ws.cell(current_row, 1, self._export_month_text(created_time))
+            ws.cell(current_row, 2, f"图片{int(slot_index or 0) + 1}")
+            for col in range(1, 4):
+                cell = ws.cell(current_row, col)
+                cell.font = data_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = border
+                if col < 3:
+                    cell.fill = PatternFill("solid", fgColor="FFFFFF")
+            ws.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=6)
+            image = self._add_reading_export_image(ws, image_data, f"C{current_row}", image_refs, "本周附带图片")
+            if image:
+                ws.row_dimensions[current_row].height = self._excel_row_height_for_pixels(100)
+            current_row += 1
+        ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 12)
+        ws.column_dimensions["B"].width = max(ws.column_dimensions["B"].width or 0, 12)
+        ws._image_stream_refs = image_refs
 
     def _product_image_map_for_export(self):
         rows = self.db.safe_fetchall(
@@ -5278,56 +6705,1090 @@ class StoreMarginDialog(QDialog):
         )
         return {str(name): image_data for name, image_data in rows if name is not None and image_data}
 
+    def _compare_export_text_and_direction(self, table, row, col):
+        text = self._table_cell_text(table, row, col).strip()
+        widget = table.cellWidget(row, col)
+        style = ""
+        if widget:
+            if isinstance(widget, QLabel):
+                style = widget.styleSheet() or ""
+            else:
+                labels = widget.findChildren(QLabel)
+                if labels:
+                    style = labels[0].styleSheet() or ""
+        clean = re.sub(r"[\U0001F7E2\U0001F534\U000026AA\U000026AB\U00002B06\U00002B07\U000027A1\ufe0f]", "", text)
+        clean = clean.replace("⬆", "").replace("⬇", "").replace("➡", "").strip()
+        if "#27ae60" in style.lower() or "green" in style.lower():
+            return f"↑ {clean}", "up"
+        if "#c0392b" in style.lower() or "red" in style.lower():
+            return f"↓ {clean}", "down"
+        if clean in ("", "-", "无"):
+            return clean or "-", "flat"
+        return f"→ {clean}", "flat"
+
     def _write_orders_export_sheet(self, wb):
-        ws = wb.create_sheet("订单规格毛利权重")
+        ws = wb.create_sheet("店铺商品权重")
         headers = self._excel_headers(self.table)
         if headers and headers[-1] == "操作":
             headers = headers[:-1]
         ws.append(headers)
         image_map = self._product_image_map_for_export()
         image_refs = []
+        compare_styles = []
+        image_size = self._export_product_image_size()
         for row in range(self.table.rowCount()):
             product_id = self._table_cell_text(self.table, row, 1)
             values = []
             for col in range(len(headers)):
-                values.append("" if col == 0 else self._table_cell_text(self.table, row, col))
+                if col == 0:
+                    values.append("")
+                elif col in (7, 9):
+                    compare_text, direction = self._compare_export_text_and_direction(self.table, row, col)
+                    values.append(compare_text)
+                    compare_styles.append((row + 2, col + 1, direction))
+                else:
+                    values.append(self._table_cell_text(self.table, row, col))
             ws.append(values)
             excel_row = row + 2
-            ws.row_dimensions[excel_row].height = 58
+            self._set_square_image_cell(ws, excel_row, 1, image_size)
             image_data = image_map.get(product_id)
             if image_data:
-                try:
-                    image_stream = BytesIO(image_data)
-                    image = ExcelImage(image_stream)
-                    image.width = 56
-                    image.height = 56
-                    ws.add_image(image, f"A{excel_row}")
-                    image_refs.append(image_stream)
-                except Exception as e:
-                    print(f"导出商品图片失败: {e}")
+                self._add_export_image(ws, image_data, f"A{excel_row}", image_size, image_refs, "商品")
         ws._image_stream_refs = image_refs
-        self._style_excel_sheet(ws, {1: 10, 2: 16, 3: 28, 4: 13, 5: 13, 6: 12, 7: 12, 8: 14, 9: 12, 10: 14, 11: 14, 12: 20, 13: 12, 14: 22})
+        self._style_excel_sheet(ws, {1: self._excel_column_width_for_pixels(image_size), 2: 14, 3: 24, 4: 11, 5: 11, 6: 10, 7: 10, 8: 12, 9: 10, 10: 12, 11: 12, 12: 16, 13: 10, 14: 18})
+        weight_col = None
+        for col_idx, header in enumerate(headers, start=1):
+            if str(header or "").strip() == "权重":
+                weight_col = col_idx
+                break
+        if weight_col:
+            ws.cell(1, weight_col).font = Font(name="SimHei", bold=True, color="1F2933", size=15)
+            for excel_row in range(2, ws.max_row + 1):
+                cell = ws.cell(excel_row, weight_col)
+                text = str(cell.value or "").strip()
+                if text and text not in ("-", "无") and "%" not in text:
+                    number = self._first_number_for_export(text)
+                    cell.value = f"{number:.2f}%" if number is not None else f"{text}%"
+                cell.font = Font(name="SimHei", color="000000", size=14)
+        for excel_row, excel_col, direction in compare_styles:
+            color = "16A34A" if direction == "up" else "DC2626" if direction == "down" else "6B7280"
+            ws.cell(excel_row, excel_col).font = Font(name="SimHei", color=color, size=12, bold=direction in ("up", "down"))
         ws.freeze_panes = "A2"
 
-    def export_margin_excel(self):
-        if not OPENPYXL_AVAILABLE:
-            QMessageBox.warning(self, "缺少依赖", "请先安装 openpyxl 库：\npip install openpyxl")
-            return
-        safe_store_name = "".join(ch for ch in self.store_name if ch not in r'\/:*?"<>|').strip() or "店铺"
-        default_name = f"店铺毛利_{safe_store_name}_{datetime.now().strftime('%Y%m%d')}.xlsx"
-        file_path, _ = QFileDialog.getSaveFileName(self, "导出Excel", default_name, "Excel文件 (*.xlsx)")
-        if not file_path:
-            return
-        if not file_path.lower().endswith(".xlsx"):
-            file_path += ".xlsx"
+    def _safe_export_float(self, value, default=0.0):
         try:
-            wb = Workbook()
-            self._write_historical_export_sheet(wb)
-            self._write_orders_export_sheet(wb)
-            wb.save(file_path)
-            QMessageBox.information(self, "导出成功", f"数据已导出到：\n{file_path}")
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _fmt_export_money(self, value):
+        return f"¥{self._safe_export_float(value):.2f}"
+
+    def _fmt_export_pct(self, value):
+        return f"{self._safe_export_float(value):.2f}%"
+
+    def _fmt_export_number(self, value, digits=2, suffix=""):
+        return f"{self._safe_export_float(value):.{digits}f}{suffix}"
+
+    def _split_spec_name_for_export(self, product_sys_id, spec_name):
+        text = str(spec_name or "").strip()
+        return text
+
+    def _promotion_summary_for_export(self, ctx):
+        parts = []
+        if ctx["coupon"] > 0:
+            parts.append(f"有{ctx['coupon']:.0f}元优惠券")
+        if ctx["new_customer"] > 0:
+            parts.append(f"有{ctx['new_customer']:.0f}元新客立减")
+        store_discount_text = ctx.get("store_discount_text") or ""
+        if store_discount_text and store_discount_text != "未设置":
+            parts.append(f"店铺满减：{store_discount_text}")
+        if ctx["is_limited_time"]:
+            parts.append("限时限量购")
+        if ctx["is_marketing"]:
+            parts.append("活动")
+        return "；".join(parts) if parts else "这个链接是裸价"
+
+    def _roi_summary_for_export(self, ctx):
+        parts = [f"推广方式：{ctx['promotion_mode']}"]
+        if ctx["current_roi"] > 0:
+            parts.append(f"当前投产：{ctx['current_roi']:.2f}")
+        if ctx["transaction_bid"] > 0:
+            parts.append(f"成交出价：{ctx['transaction_bid']:.2f}")
+        if ctx["margin_pct"] > 0:
+            parts.append(f"综合毛利率：{ctx['margin_pct']:.2f}%")
+        if ctx["gross_break_even"] > 0:
+            parts.append(f"毛保本投产：{ctx['gross_break_even']:.2f}")
+        if ctx["net_break_even"] > 0:
+            parts.append(f"净保本投产：{ctx['net_break_even']:.2f}")
+        if ctx["roi_multiple"] > 0:
+            parts.append(f"投产倍数：{ctx['roi_multiple']:.2f}倍")
+        if ctx["scale_roi"] > 0:
+            parts.append(f"放量投产：{ctx['scale_roi']:.2f}")
+        if ctx["promotion_ratio"] > 0:
+            parts.append(f"推广占比：{ctx['promotion_ratio']:.2f}%")
+        if ctx["net_profit_rate"]:
+            parts.append(f"净利率：{ctx['net_profit_rate']:.2f}%")
+        return "；".join(parts)
+
+    def _previous_week_range_for_export(self):
+        today = datetime.now().date()
+        this_week_monday = today - timedelta(days=today.weekday())
+        start_date = this_week_monday - timedelta(days=7)
+        end_date = this_week_monday - timedelta(days=1)
+        return start_date, end_date
+
+    def _weekday_cn_for_export(self, record_date):
+        return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][record_date.weekday()]
+
+    def _operation_record_color_for_export(self, record_date):
+        colors = ["1D4ED8", "16A34A", "9333EA", "EA580C", "0891B2", "DB2777", "4B5563"]
+        return colors[record_date.weekday() % len(colors)]
+
+    def _style_operation_record_export_row(self, ws, row, max_col, color, bold=False, start_col=1):
+        font = Font(name="SimHei", color=color, size=12, bold=bold)
+        for col in range(start_col, max_col + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.font = font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    def _first_number_for_export(self, value):
+        match = re.search(r"-?\d+(?:\.\d+)?", str(value or ""))
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+
+    def _brief_change_text_for_export(self, change, fallback_text=""):
+        if not isinstance(change, dict):
+            return str(change or fallback_text or "").strip()
+        metric = str(change.get("metric", "") or "").strip()
+        text = str(change.get("text", "") or "").strip()
+        old = str(change.get("old", "") or "").strip()
+        new = str(change.get("new", "") or "").strip()
+        combined = f"{metric} {text} {old} {new}"
+
+        def new_text():
+            return new or text or fallback_text
+
+        if "推广模式" in combined or "自然流" in combined or "全站" in combined or "稳定成本" in combined:
+            return f"变到{new_text()}" if new_text() else "调整推广方式"
+        if "成交出价" in combined or "出价" in combined:
+            return f"成交出价变到{new_text()}" if new_text() else "调整成交出价"
+        if "投产" in combined or "ROI" in combined or "roi" in combined:
+            old_num = self._first_number_for_export(old)
+            new_num = self._first_number_for_export(new)
+            if old_num is not None and new_num is not None:
+                action = "提投产到" if new_num > old_num else "降投产到" if new_num < old_num else "投产变到"
+                return f"{action}{new}"
+            return f"调整投产：{new_text()}" if new_text() else "调整投产"
+        if "售价" in combined or "价格" in combined or "涨价" in combined or "降价" in combined:
+            old_num = self._first_number_for_export(old)
+            new_num = self._first_number_for_export(new)
+            if old_num is not None and new_num is not None:
+                action = "涨价格到" if new_num > old_num else "降价格到" if new_num < old_num else "价格变到"
+                return f"{action}{new}"
+            return text or (f"改价格到{new}" if new else "调整价格")
+        if "优惠券" in combined:
+            return f"优惠券变到{new_text()}" if new_text() else "调整优惠券"
+        if "新客立减" in combined:
+            return f"新客立减变到{new_text()}" if new_text() else "调整新客立减"
+        if "限时" in combined or "营销" in combined or "活动" in combined:
+            return text or (f"活动变到{new}" if new else "调整活动")
+        if "规格新增" in combined or "新增规格" in combined:
+            return text or "新增规格"
+        if "规格删除" in combined or "删除规格" in combined:
+            return text or "删除规格"
+        if "规格名称" in combined:
+            return text or (f"规格名称变到{new}" if new else "修改规格名称")
+        return text or fallback_text or (f"{metric}：{old}→{new}" if metric or old or new else "")
+
+    def _record_briefs_for_export(self, product_sys_id):
+        start_date, end_date = self._previous_week_range_for_export()
+        rows = self.db.safe_fetchall(
+            """SELECT year, month, day, records_json
+               FROM records
+               WHERE product_id=?""",
+            (product_sys_id,),
+        )
+        briefs = []
+        for year, month, day, records_json in rows:
+            try:
+                record_date = datetime(int(year), int(month), int(day)).date()
+            except Exception:
+                continue
+            if record_date < start_date or record_date > end_date:
+                continue
+            try:
+                records = json.loads(records_json) if records_json else []
+            except Exception:
+                records = []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                time_text = str(record.get("time", "") or "").strip()
+                fallback_text = str(record.get("text", "") or "").strip()
+                changes = record.get("changes") or []
+                if isinstance(changes, list) and changes:
+                    texts = [self._brief_change_text_for_export(change, fallback_text) for change in changes]
+                    content = "；".join([text for text in texts if text])
+                else:
+                    content = fallback_text
+                content = re.sub(r"\s+", " ", str(content or "")).strip()
+                if not content:
+                    continue
+                prefix = f"{record_date.month}/{record_date.day} {self._weekday_cn_for_export(record_date)}"
+                if time_text:
+                    prefix += f" {time_text}"
+                briefs.append({
+                    "date": record_date,
+                    "time": time_text,
+                    "text": f"{prefix} {content}",
+                    "has_spec": "规格" in content,
+                })
+        briefs.sort(key=lambda item: (item["date"], item["time"]))
+        range_text = f"{start_date.month}/{start_date.day}-{end_date.month}/{end_date.day}"
+        return range_text, briefs
+
+    def _products_for_specs_export(self):
+        rows = self.db.safe_fetchall(
+            """SELECT id, name, title, image_data, sort_order, product_category_label
+               FROM products
+               WHERE store_id=? AND COALESCE(is_archived, 0)=0""",
+            (self.store_id,),
+        )
+        detail_ids = getattr(self, "export_detail_product_ids", None)
+        if detail_ids is not None:
+            detail_ids = {str(value) for value in detail_ids}
+            rows = [row for row in rows if str(row[1]) in detail_ids]
+        if hasattr(self.main_app, "_sort_products_for_display"):
+            sorted_rows = self.main_app._sort_products_for_display(rows)
+        else:
+            sorted_rows = sorted(rows, key=lambda p: (p[4] if p[4] is not None else p[0], p[0]))
+        return sorted_rows
+
+    def _product_order_map_for_export(self, product_id):
+        rows = self.db.safe_fetchall(
+            """SELECT spec_code, COALESCE(SUM(order_count), 0), COALESCE(SUM(refund_count), 0)
+               FROM imported_orders
+               WHERE store_id=? AND product_id=?
+               GROUP BY spec_code""",
+            (self.store_id, product_id),
+        )
+        return {
+            str(spec_code or ""): {
+                "orders": int(order_count or 0),
+                "refunds": int(refund_count or 0),
+            }
+            for spec_code, order_count, refund_count in rows
+        }
+
+    def _product_export_context(self, product):
+        sys_id, product_id, title, image_data, _sort_order, category_label = product
+        product_rows = self.db.safe_fetchall(
+            """SELECT coupon_amount, new_customer_discount, current_roi, COALESCE(transaction_bid, 0),
+                      return_rate, is_limited_time, is_marketing, is_natural_flow,
+                      is_sitewide_managed, COALESCE(roi_input_mode, 'roi'), product_memo
+               FROM products WHERE id=?""",
+            (sys_id,),
+        )
+        prod = product_rows[0] if product_rows else (0, 0, 0, 0, 0, 0, 0, 0, 0, "roi", "")
+        coupon = self._safe_export_float(prod[0])
+        new_customer = self._safe_export_float(prod[1])
+        product_discount = max(coupon, new_customer)
+        saved_roi = self._safe_export_float(prod[2])
+        transaction_bid = self._safe_export_float(prod[3])
+        return_rate = self._safe_export_float(prod[4])
+        is_limited_time = bool(prod[5])
+        is_marketing = bool(prod[6])
+        is_natural_flow = bool(prod[7])
+        is_sitewide_managed = bool(prod[8]) and not is_natural_flow
+        roi_input_mode = prod[9] if prod[9] in ("roi", "bid") else "roi"
+        product_memo = str(prod[10] or "")
+        sitewide_rows = self.db.safe_fetchall("SELECT sitewide_roi FROM stores WHERE id=?", (self.store_id,))
+        sitewide_roi = self._safe_export_float(sitewide_rows[0][0]) if sitewide_rows else 0.0
+        store_discount_text = self.db.format_store_discount_rules(self.store_id)
+
+        spec_rows = self.db.safe_fetchall(
+            """SELECT spec_name, spec_code, sale_price, weight_percent, is_locked, spec_image_data
+               FROM product_specs WHERE product_id=?
+                 AND COALESCE(is_temporarily_off_shelf, 0)=0""",
+            (sys_id,),
+        )
+        cost_map = {}
+        spec_codes = [str(row[1] or "") for row in spec_rows if row[1]]
+        if spec_codes:
+            for i in range(0, len(spec_codes), 800):
+                chunk = spec_codes[i:i + 800]
+                placeholders = ",".join(["?"] * len(chunk))
+                cost_rows = self.db.safe_fetchall(
+                    f"SELECT spec_code, cost_price FROM cost_library WHERE spec_code IN ({placeholders})",
+                    tuple(chunk),
+                )
+                cost_map.update({str(code): self._safe_export_float(cost) for code, cost in cost_rows})
+
+        order_map = self._product_order_map_for_export(product_id)
+        valid_spec_codes = {str(row[1] or "") for row in spec_rows if row[1]}
+        recognized_orders = sum(
+            data["orders"] for code, data in order_map.items()
+            if code in valid_spec_codes
+        )
+
+        specs = []
+        total_weight = 0.0
+        weighted_margin = 0.0
+        weighted_final_price = 0.0
+        weighted_profit = 0.0
+        fallback_prices = []
+        fallback_profits = []
+        for row in spec_rows:
+            spec_name = str(row[0] or "")
+            spec_code = str(row[1] or "")
+            sale_price = self._safe_export_float(row[2])
+            weight_percent = self._safe_export_float(row[3])
+            is_locked = bool(row[4])
+            spec_image_data = row[5] if len(row) > 5 else None
+            cost = cost_map.get(spec_code, 0.0)
+            store_discount, _rule = self.db.calculate_store_discount(self.store_id, sale_price)
+            effective_discount = max(product_discount, store_discount)
+            final_price = sale_price - effective_discount
+            margin_pct = ((final_price - cost) / final_price * 100) if final_price > 0 and cost > 0 else 0.0
+            gross_profit = final_price - cost
+            order_data = order_map.get(spec_code, {"orders": 0, "refunds": 0})
+            order_count = order_data["orders"]
+            refund_count = order_data["refunds"]
+            if recognized_orders > 0:
+                display_weight = order_count / recognized_orders * 100
+                weight_source = "导入订单"
+            else:
+                display_weight = weight_percent
+                weight_source = "手动权重"
+            refund_ratio = refund_count / order_count * 100 if order_count > 0 and refund_count > 0 else 0.0
+            display_spec_name = self._split_spec_name_for_export(sys_id, spec_name)
+            specs.append({
+                "spec_image_data": spec_image_data,
+                "spec_name": display_spec_name,
+                "spec_code": spec_code,
+                "cost": cost,
+                "sale_price": sale_price,
+                "final_price": final_price,
+                "effective_discount": effective_discount,
+                "margin_pct": margin_pct,
+                "gross_profit": gross_profit,
+                "weight": display_weight,
+                "weight_source": weight_source,
+                "is_locked": is_locked,
+                "order_count": order_count,
+                "refund_count": refund_count,
+                "refund_ratio": refund_ratio,
+            })
+            if final_price > 0:
+                fallback_prices.append(final_price)
+                fallback_profits.append(gross_profit)
+            if final_price > 0 and display_weight > 0:
+                weighted_final_price += final_price * display_weight
+                weighted_profit += gross_profit * display_weight
+                total_weight += display_weight
+                weighted_margin += (margin_pct / 100.0) * display_weight
+
+        specs.sort(key=lambda item: item["final_price"])
+        margin_decimal = weighted_margin / total_weight if total_weight > 0 else 0.0
+        margin_pct = margin_decimal * 100
+        avg_price = weighted_final_price / total_weight if total_weight > 0 else (
+            sum(fallback_prices) / len(fallback_prices) if fallback_prices else 0.0
+        )
+        avg_profit = weighted_profit / total_weight if total_weight > 0 else (
+            sum(fallback_profits) / len(fallback_profits) if fallback_profits else 0.0
+        )
+        gross_break_even = 1 / margin_decimal if margin_decimal > 0 else 0.0
+        net_margin_formula = margin_decimal * (1 - return_rate / 100) - 0.006
+        net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0.0
+
+        promotion_mode = "稳定成本推广"
+        current_roi = saved_roi
+        if is_natural_flow:
+            promotion_mode = "自然流"
+            current_roi = 0.0
+        elif is_sitewide_managed:
+            promotion_mode = "全站托管"
+            current_roi = sitewide_roi
+        elif roi_input_mode == "bid" and transaction_bid > 0 and avg_price > 0:
+            promotion_mode = "稳定成本推广（成交出价）"
+            current_roi = avg_price / transaction_bid
+
+        if is_natural_flow:
+            net_profit_rate = net_margin_formula * 100
+            promotion_ratio = 0.0
+            roi_multiple = 0.0
+        elif roi_input_mode == "bid" and not is_sitewide_managed and transaction_bid > 0 and avg_price > 0:
+            net_profit_amount = avg_profit * (1 - return_rate / 100) - (avg_price * 0.006) - transaction_bid
+            net_profit_rate = net_profit_amount / avg_price * 100
+            promotion_ratio = transaction_bid / avg_price * 100
+            roi_multiple = current_roi / net_break_even if net_break_even > 0 else 0.0
+        elif current_roi > 0:
+            net_profit_rate = (margin_decimal * (1 - return_rate / 100) - 0.006 - (1 / current_roi)) * 100
+            promotion_ratio = 1 / current_roi * 100
+            roi_multiple = current_roi / net_break_even if net_break_even > 0 else 0.0
+        else:
+            net_profit_rate = 0.0
+            promotion_ratio = 0.0
+            roi_multiple = 0.0
+
+        return {
+            "sys_id": sys_id,
+            "product_id": str(product_id or ""),
+            "title": str(title or ""),
+            "image_data": image_data,
+            "category_label": str(category_label or ""),
+            "product_memo": product_memo,
+            "coupon": coupon,
+            "new_customer": new_customer,
+            "store_discount_text": store_discount_text,
+            "max_discount": max([product_discount] + [spec.get("effective_discount", 0.0) for spec in specs]) if specs else product_discount,
+            "is_limited_time": is_limited_time,
+            "is_marketing": is_marketing,
+            "is_natural_flow": is_natural_flow,
+            "is_sitewide_managed": is_sitewide_managed,
+            "promotion_mode": promotion_mode,
+            "roi_input_mode": "成交出价" if roi_input_mode == "bid" else "投产比",
+            "current_roi": current_roi,
+            "transaction_bid": transaction_bid,
+            "return_rate": return_rate,
+            "margin_pct": margin_pct,
+            "gross_break_even": gross_break_even,
+            "net_break_even": net_break_even,
+            "roi_multiple": roi_multiple,
+            "scale_roi": net_break_even * 0.8 if net_break_even > 0 else 0.0,
+            "promotion_ratio": promotion_ratio,
+            "net_profit_rate": net_profit_rate,
+            "specs": specs,
+        }
+
+    def _set_range_fill(self, ws, row, start_col, end_col, fill):
+        for col in range(start_col, end_col + 1):
+            ws.cell(row=row, column=col).fill = fill
+
+    def _style_product_specs_block(self, ws, start_row, end_row, max_col):
+        thin = Side(style="thin", color="C9D4E2")
+        thick = Side(style="thick", color="000000")
+        for row in range(start_row, end_row + 1):
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=row, column=col)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                if row == start_row:
+                    cell.font = Font(name="SimHei", color="000000", size=13, bold=True)
+                else:
+                    cell.font = Font(name="SimHei", color="000000", size=12, bold=cell.font.bold)
+                left = thick if col == 1 else thin
+                right = thick if col == max_col else thin
+                top = thick if row == start_row else thin
+                bottom = thick if row == end_row else thin
+                cell.border = Border(left=left, right=right, top=top, bottom=bottom)
+
+    def _style_product_specs_export_range(self, ws, start_row, end_row, start_col, end_col):
+        thin = Side(style="thin", color="C9D4E2")
+        thick = Side(style="thick", color="000000")
+        for row in range(start_row, end_row + 1):
+            for col in range(start_col, end_col + 1):
+                cell = ws.cell(row=row, column=col)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                if row in (start_row, start_row + 2, start_row + 3):
+                    cell.font = Font(name="SimHei", color="000000", size=13, bold=True)
+                else:
+                    cell.font = Font(name="SimHei", color="000000", size=12, bold=cell.font.bold)
+                left = thick if col == start_col else thin
+                right = thick if col == end_col else thin
+                top = thick if row == start_row else thin
+                bottom = thick if row == end_row else thin
+                cell.border = Border(left=left, right=right, top=top, bottom=bottom)
+
+    def _excel_column_width_for_pixels(self, pixels):
+        return max(1.0, (float(pixels) - 5.0) / 7.0)
+
+    def _excel_row_height_for_pixels(self, pixels):
+        return float(pixels) * 0.75
+
+    def _export_product_image_size(self):
+        return 96
+
+    def _export_image_quality_config(self):
+        mode = getattr(self, "export_image_quality", "clear")
+        configs = {
+            "clear": {"label": "清晰版", "square": 1600, "reading": 2400},
+            "balanced": {"label": "均衡版", "square": 1000, "reading": 1400},
+            "light": {"label": "轻量版", "square": 640, "reading": 900},
+        }
+        return configs.get(mode, configs["clear"])
+
+    def _export_image_embed_size(self):
+        return int(self._export_image_quality_config().get("square", 1600))
+
+    def _set_square_image_cell(self, ws, row, col, size):
+        ws.row_dimensions[row].height = self._excel_row_height_for_pixels(size)
+        ws.column_dimensions[get_column_letter(col)].width = self._excel_column_width_for_pixels(size)
+
+    def _square_image_stream(self, image_data, display_size, max_embed_size=None):
+        from PIL import Image as PilImage
+
+        max_embed_size = max_embed_size or self._export_image_embed_size()
+        cache = getattr(self, "_excel_export_image_cache", None)
+        cache_key = None
+        if cache is not None:
+            cache_key = (hashlib.md5(bytes(image_data)).hexdigest(), display_size, max_embed_size)
+            cached = cache.get(cache_key)
+            if cached:
+                return BytesIO(cached)
+
+        source = PilImage.open(BytesIO(image_data))
+        if source.mode not in ("RGB", "RGBA"):
+            source = source.convert("RGBA")
+        width, height = source.size
+        if width <= 0 or height <= 0:
+            return None
+        side = min(width, height)
+        left = max(0, (width - side) // 2)
+        top = max(0, (height - side) // 2)
+        square = source.crop((left, top, left + side, top + side))
+        target_size = side
+        if target_size > max_embed_size:
+            target_size = max_embed_size
+        elif target_size < display_size:
+            target_size = display_size
+        if target_size != side:
+            square = square.resize((target_size, target_size), PilImage.LANCZOS)
+        stream = BytesIO()
+        square.save(stream, format="PNG", optimize=True)
+        stream.seek(0)
+        if cache is not None and cache_key:
+            cache[cache_key] = stream.getvalue()
+            stream.seek(0)
+        return stream
+
+    def _add_export_image(self, ws, image_data, cell, size, image_refs, label):
+        if not image_data:
+            return
+        try:
+            image_stream = self._square_image_stream(image_data, size)
+            if image_stream is None:
+                return
+            image = ExcelImage(image_stream)
+            image.width = size
+            image.height = size
+            ws.add_image(image, cell)
+            image_refs.append(image_stream)
         except Exception as e:
-            QMessageBox.warning(self, "导出失败", f"导出时发生错误：\n{str(e)}")
+            print(f"导出{label}图片失败: {e}")
+
+    def _operation_record_export_cells(self, record_info):
+        record_date = record_info["date"]
+        time_text = str(record_info.get("time") or "").strip()
+        date_text = f"{record_date.month}/{record_date.day} {self._weekday_cn_for_export(record_date)}"
+        if time_text:
+            date_text += f" {time_text}"
+        content = str(record_info.get("text") or "").strip()
+        if content.startswith(date_text):
+            content = content[len(date_text):].strip()
+        return date_text, content or "-"
+
+    def _write_product_specs_export_sheet(self, wb):
+        ws = wb.create_sheet("商品规格售卖情况")
+        image_size = self._export_product_image_size()
+
+        basic_fill = PatternFill("solid", fgColor="EAF4FF")
+        promo_fill = PatternFill("solid", fgColor="E8F7EF")
+        roi_fill = PatternFill("solid", fgColor="FFF3D6")
+        spec_fill = PatternFill("solid", fgColor="F3E8FF")
+        operation_fill = PatternFill("solid", fgColor="EEF2FF")
+        white_fill = PatternFill("solid", fgColor="FFFFFF")
+        header_font = Font(name="SimHei", color="000000", bold=True, size=13)
+        image_refs = []
+
+        products = self._products_for_specs_export()
+        if not products:
+            ws.append(["暂无商品数据"])
+            ws["A1"].font = header_font
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+            self._style_product_specs_block(ws, 1, 1, 6)
+            return
+
+        spec_fields = [
+            ("规格图", "_image"),
+            ("规格名称", "spec_name"),
+            ("规格编码", "spec_code"),
+            ("成本", "cost"),
+            ("实际价格", "final_price"),
+            ("毛利率", "margin_pct"),
+            ("毛利润", "gross_profit"),
+            ("权重", "weight"),
+            ("单量", "order_count"),
+            ("退款订单", "refund_count"),
+            ("退款占比", "refund_ratio"),
+        ]
+        block_width = len(spec_fields)
+        block_gap = 1
+        info_row = 1
+        category_row = 2
+        spec_title_row = 3
+        spec_header_row = 4
+        spec_first_row = 5
+        max_written_row = spec_header_row
+
+        for product_index, product in enumerate(products):
+            ctx = self._product_export_context(product)
+            record_range, record_lines = self._record_briefs_for_export(ctx["sys_id"])
+            specs = ctx.get("specs", [])
+            start_col = 1 + product_index * (block_width + block_gap)
+            end_col = start_col + block_width - 1
+            block_start_row = info_row
+
+            self._set_square_image_cell(ws, info_row, start_col, image_size)
+            for col_idx in range(start_col + 1, end_col + 1):
+                ws.column_dimensions[get_column_letter(col_idx)].width = 16
+            ws.column_dimensions[get_column_letter(start_col)].width = self._excel_column_width_for_pixels(image_size)
+
+            ws.cell(info_row, start_col, "")
+            if start_col + 1 <= end_col:
+                ws.merge_cells(start_row=info_row, start_column=start_col + 1, end_row=info_row, end_column=end_col)
+            ws.cell(info_row, start_col + 1, f"商品ID：{ctx['product_id']}\n标题：{ctx['title']}")
+            self._set_range_fill(ws, info_row, start_col, end_col, basic_fill)
+            self._add_export_image(ws, ctx["image_data"], f"{get_column_letter(start_col)}{info_row}", image_size, image_refs, "商品")
+
+            ws.merge_cells(start_row=category_row, start_column=start_col, end_row=category_row, end_column=end_col)
+            ws.cell(category_row, start_col, f"商品分类：{ctx['category_label'] or '-'}")
+            self._set_range_fill(ws, category_row, start_col, end_col, basic_fill)
+
+            ws.merge_cells(start_row=spec_title_row, start_column=start_col, end_row=spec_title_row, end_column=end_col)
+            ws.cell(spec_title_row, start_col, "规格数据")
+            self._set_range_fill(ws, spec_title_row, start_col, end_col, spec_fill)
+            ws.cell(spec_title_row, start_col).font = header_font
+
+            for offset, (label, _key) in enumerate(spec_fields):
+                cell = ws.cell(spec_header_row, start_col + offset, label)
+                cell.fill = spec_fill
+                cell.font = header_font
+
+            current_row = spec_first_row
+            if specs:
+                for spec in specs:
+                    for offset, (_label, key) in enumerate(spec_fields):
+                        col_idx = start_col + offset
+                        cell = ws.cell(current_row, col_idx)
+                        if key == "_image":
+                            self._set_square_image_cell(ws, current_row, col_idx, image_size)
+                            self._add_export_image(ws, spec["spec_image_data"], f"{get_column_letter(col_idx)}{current_row}", image_size, image_refs, "规格")
+                        elif key in ("cost", "final_price", "gross_profit"):
+                            cell.value = self._fmt_export_money(spec[key])
+                        elif key == "margin_pct":
+                            cell.value = self._fmt_export_pct(spec[key])
+                        elif key == "weight":
+                            cell.value = f"{self._safe_export_float(spec[key]):.2f}%"
+                        elif key == "order_count":
+                            cell.value = f"{int(spec[key])}单"
+                        elif key == "refund_count":
+                            cell.value = f"{int(spec[key])}单" if spec[key] else "无"
+                        elif key == "refund_ratio":
+                            cell.value = self._fmt_export_pct(spec[key]) if spec[key] else "无"
+                        else:
+                            cell.value = spec.get(key, "")
+                        cell.fill = white_fill
+                    current_row += 1
+            else:
+                ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+                ws.cell(current_row, start_col, "暂无规格数据")
+                self._set_range_fill(ws, current_row, start_col, end_col, white_fill)
+                current_row += 1
+
+            ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+            ws.cell(current_row, start_col, "促销活动优惠情况")
+            self._set_range_fill(ws, current_row, start_col, end_col, promo_fill)
+            ws.cell(current_row, start_col).font = header_font
+            current_row += 1
+
+            promotion_text = self._promotion_summary_for_export(ctx)
+            ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+            ws.cell(current_row, start_col, promotion_text)
+            self._set_range_fill(ws, current_row, start_col, end_col, white_fill)
+            ws.row_dimensions[current_row].height = max(ws.row_dimensions[current_row].height or 0, 28)
+            current_row += 1
+
+            ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+            ws.cell(current_row, start_col, "投产比分析")
+            self._set_range_fill(ws, current_row, start_col, end_col, roi_fill)
+            ws.cell(current_row, start_col).font = header_font
+            current_row += 1
+
+            roi_text = self._roi_summary_for_export(ctx)
+            ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+            ws.cell(current_row, start_col, roi_text)
+            self._set_range_fill(ws, current_row, start_col, end_col, white_fill)
+            roi_lines = max(1, len(roi_text) // 48 + 1, roi_text.count("；") + 1)
+            ws.row_dimensions[current_row].height = max(ws.row_dimensions[current_row].height or 0, 24 + roi_lines * 18)
+            current_row += 1
+
+            ws.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+            ws.cell(current_row, start_col, f"上一周操作记录（{record_range}）")
+            self._set_range_fill(ws, current_row, start_col, end_col, operation_fill)
+            ws.cell(current_row, start_col).font = header_font
+            current_row += 1
+
+            spec_names_for_bold = [
+                str(spec.get("spec_name") or "").strip()
+                for spec in specs
+                if str(spec.get("spec_name") or "").strip()
+            ]
+            operation_row_styles = []
+            if record_lines:
+                for record_info in record_lines:
+                    date_text, content = self._operation_record_export_cells(record_info)
+                    ws.cell(current_row, start_col, date_text)
+                    if start_col + 1 <= end_col:
+                        ws.merge_cells(start_row=current_row, start_column=start_col + 1, end_row=current_row, end_column=end_col)
+                    ws.cell(current_row, start_col + 1, content)
+                    self._set_range_fill(ws, current_row, start_col, end_col, white_fill)
+                    ws.row_dimensions[current_row].height = max(ws.row_dimensions[current_row].height or 0, 30)
+                    record_text = str(record_info.get("text") or "")
+                    contains_spec_name = any(spec_name and spec_name in record_text for spec_name in spec_names_for_bold)
+                    operation_row_styles.append((
+                        current_row,
+                        self._operation_record_color_for_export(record_info["date"]),
+                        bool(record_info.get("has_spec") or contains_spec_name),
+                    ))
+                    current_row += 1
+            else:
+                ws.cell(current_row, start_col, "-")
+                if start_col + 1 <= end_col:
+                    ws.merge_cells(start_row=current_row, start_column=start_col + 1, end_row=current_row, end_column=end_col)
+                ws.cell(current_row, start_col + 1, "上一周无操作记录")
+                self._set_range_fill(ws, current_row, start_col, end_col, white_fill)
+                ws.row_dimensions[current_row].height = max(ws.row_dimensions[current_row].height or 0, 30)
+                operation_row_styles.append((current_row, "6B7280", False))
+                current_row += 1
+
+            block_end_row = current_row - 1
+            self._style_product_specs_export_range(ws, block_start_row, block_end_row, start_col, end_col)
+            for row_idx, color, bold in operation_row_styles:
+                if block_start_row <= row_idx <= block_end_row:
+                    self._style_operation_record_export_row(ws, row_idx, end_col, color, bold, start_col)
+            max_written_row = max(max_written_row, block_end_row)
+
+        ws.freeze_panes = "A5"
+        ws.auto_filter.ref = f"A4:{get_column_letter(ws.max_column)}{max_written_row}"
+        ws._image_stream_refs = image_refs
+
+    def _write_product_specs_export_sheet(self, wb):
+        ws = wb.create_sheet("商品规格售卖情况")
+        image_size = self._export_product_image_size()
+        image_refs = []
+        products = self._products_for_specs_export()
+        fills = {
+            "title": PatternFill("solid", fgColor="DCEBFF"),
+            "section": PatternFill("solid", fgColor="EAF4FF"),
+            "spec": PatternFill("solid", fgColor="F3E8FF"),
+            "roi": PatternFill("solid", fgColor="FFF3D6"),
+            "white": PatternFill("solid", fgColor="FFFFFF"),
+        }
+        header_font = Font(name="SimHei", color="000000", bold=True, size=14)
+        normal_font = Font(name="SimHei", color="000000", size=13)
+        input_fill = PatternFill("solid", fgColor="E8F7EF")
+        formula_fill = PatternFill("solid", fgColor="FFF7ED")
+        headers = ["规格图", "规格名称", "规格编码", "成本", "实际价格", "毛利率", "毛利润", "权重", "单量", "退款订单", "退款占比"]
+        for col, width in enumerate([14, 18, 18, 12, 12, 12, 12, 11, 10, 10, 12], start=1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        if not products:
+            ws.append(["本次未选择需要详细展示的链接"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+            ws["A1"].font = header_font
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            self._style_product_specs_export_range(ws, 1, 1, 1, len(headers))
+            return
+        current_row = 1
+        for product in products:
+            ctx = self._product_export_context(product)
+            specs = ctx.get("specs", [])
+            block_start = current_row
+            self._set_square_image_cell(ws, current_row, 1, image_size)
+            ws.cell(current_row, 2, "商品ID")
+            ws.cell(current_row, 3, ctx["product_id"])
+            ws.cell(current_row, 4, "商品标题")
+            ws.merge_cells(start_row=current_row, start_column=5, end_row=current_row, end_column=11)
+            ws.cell(current_row, 5, ctx["title"])
+            self._set_range_fill(ws, current_row, 1, 11, fills["title"])
+            self._add_export_image(ws, ctx["image_data"], f"A{current_row}", image_size, image_refs, "商品")
+            current_row += 1
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=11)
+            ws.cell(current_row, 1, f"链接备注：{ctx['product_memo'] or '-'}")
+            self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+            current_row += 1
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=11)
+            ws.cell(current_row, 1, f"促销活动优惠情况：{self._promotion_summary_for_export(ctx)}")
+            self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+            current_row += 1
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=11)
+            ws.cell(current_row, 1, f"商品分类：{ctx['category_label'] or '-'}")
+            self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+            current_row += 1
+            ws.cell(current_row, 1, "规格售卖情况")
+            self._set_range_fill(ws, current_row, 1, 11, fills["spec"])
+            ws.cell(current_row, 1).font = header_font
+            current_row += 1
+            for offset, label in enumerate(headers, start=1):
+                cell = ws.cell(current_row, offset, label)
+                cell.fill = fills["spec"]
+                cell.font = header_font
+            current_row += 1
+            spec_first_row = current_row
+            if specs:
+                for spec in specs:
+                    self._set_square_image_cell(ws, current_row, 1, image_size)
+                    self._add_export_image(ws, spec.get("spec_image_data"), f"A{current_row}", image_size, image_refs, "规格")
+                    values = {
+                        2: spec.get("spec_name", ""),
+                        3: spec.get("spec_code", ""),
+                        4: self._safe_export_float(spec.get("cost")),
+                        5: self._safe_export_float(spec.get("final_price")),
+                        6: f'=IF(E{current_row}>0,(E{current_row}-D{current_row})/E{current_row},0)',
+                        7: f"=E{current_row}-D{current_row}",
+                        8: self._safe_export_float(spec.get("weight")) / 100,
+                        9: int(spec.get("order_count") or 0),
+                        10: int(spec.get("refund_count") or 0),
+                        11: f'=IF(I{current_row}>0,J{current_row}/I{current_row},0)',
+                    }
+                    for col, value in values.items():
+                        cell = ws.cell(current_row, col, value)
+                        cell.fill = input_fill if col in (4, 5, 8, 9, 10) else (formula_fill if col in (6, 7, 11) else fills["white"])
+                        cell.font = normal_font
+                    for col in (4, 5, 7):
+                        ws.cell(current_row, col).number_format = '¥#,##0.00'
+                    for col in (6, 8, 11):
+                        ws.cell(current_row, col).number_format = '0.00%'
+                    current_row += 1
+            else:
+                ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=11)
+                ws.cell(current_row, 1, "暂无规格数据")
+                self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+                current_row += 1
+            spec_last_row = max(spec_first_row, current_row - 1)
+            summary_row = current_row
+            ws.cell(summary_row, 1, "综合")
+            ws.cell(summary_row, 2, "综合毛利率")
+            ws.cell(summary_row, 3, f"=IF(SUM(H{spec_first_row}:H{spec_last_row})>0,SUMPRODUCT(F{spec_first_row}:F{spec_last_row},H{spec_first_row}:H{spec_last_row})/SUM(H{spec_first_row}:H{spec_last_row}),0)")
+            ws.cell(summary_row, 4, "加权客单价")
+            ws.cell(summary_row, 5, f"=IF(SUM(H{spec_first_row}:H{spec_last_row})>0,SUMPRODUCT(E{spec_first_row}:E{spec_last_row},H{spec_first_row}:H{spec_last_row})/SUM(H{spec_first_row}:H{spec_last_row}),0)")
+            ws.cell(summary_row, 6, "单笔毛利")
+            ws.cell(summary_row, 7, f"=IF(SUM(H{spec_first_row}:H{spec_last_row})>0,SUMPRODUCT(G{spec_first_row}:G{spec_last_row},H{spec_first_row}:H{spec_last_row})/SUM(H{spec_first_row}:H{spec_last_row}),0)")
+            self._set_range_fill(ws, summary_row, 1, 11, fills["section"])
+            ws.cell(summary_row, 3).number_format = '0.00%'
+            ws.cell(summary_row, 5).number_format = '¥#,##0.00'
+            ws.cell(summary_row, 7).number_format = '¥#,##0.00'
+            current_row += 2
+            ws.cell(current_row, 1, "投产比分析")
+            self._set_range_fill(ws, current_row, 1, 4, fills["roi"])
+            ws.cell(current_row, 1).font = header_font
+            current_row += 1
+            for col, label in enumerate(["指标", "数值", "说明", "可编辑"], start=1):
+                ws.cell(current_row, col, label).fill = fills["roi"]
+                ws.cell(current_row, col).font = header_font
+            current_row += 1
+            def metric(label, value="", note="", editable=False, number_format=None):
+                nonlocal current_row
+                row = current_row
+                ws.cell(row, 1, label)
+                ws.cell(row, 2, value)
+                ws.cell(row, 3, note)
+                ws.cell(row, 4, "是" if editable else "")
+                for col in range(1, 5):
+                    ws.cell(row, col).fill = input_fill if editable and col == 2 else (formula_fill if str(value).startswith("=") and col == 2 else fills["white"])
+                    ws.cell(row, col).font = normal_font
+                if number_format:
+                    ws.cell(row, 2).number_format = number_format
+                current_row += 1
+                return row
+            metric("推广方式", ctx["promotion_mode"])
+            is_bid_mode = "成交出价" in str(ctx.get("roi_input_mode") or "")
+            if is_bid_mode:
+                bid_row = metric("成交出价", self._safe_export_float(ctx["transaction_bid"]), "可手动修改", True, '¥#,##0.00')
+                roi_row = None
+            else:
+                roi_row = metric("当前投产", self._safe_export_float(ctx["current_roi"]), "可手动修改", True, "0.00")
+                bid_row = None
+            margin_row = metric("综合毛利率", f"=C{summary_row}", "来自上方规格权重公式", False, "0.00%")
+            metric("毛保本投产", f"=IF(B{margin_row}>0,1/B{margin_row},0)", "", False, "0.00")
+            return_factor = f"(1-{self._safe_export_float(ctx.get('return_rate'))}/100)"
+            net_base = f"(B{margin_row}*{return_factor}-0.006)"
+            net_be_row = metric("净保本投产", f"=IF({net_base}>0,1/{net_base},0)", "", False, "0.00")
+            effective_roi_formula = f"IF(B{bid_row}>0,E{summary_row}/B{bid_row},0)" if is_bid_mode else f"B{roi_row}"
+            metric("投产倍数", f"=IF(B{net_be_row}>0,{effective_roi_formula}/B{net_be_row},0)", "", False, "0.00")
+            metric("推广占比", f"=IF({effective_roi_formula}>0,1/{effective_roi_formula},0)", "", False, "0.00%")
+            if ctx.get("is_natural_flow"):
+                net_rate_formula = f"={net_base}"
+            elif is_bid_mode:
+                net_rate_formula = f"=IF(E{summary_row}>0,(G{summary_row}*{return_factor}-E{summary_row}*0.006-B{bid_row})/E{summary_row},0)"
+            else:
+                net_rate_formula = f"={net_base}-IF(B{roi_row}>0,1/B{roi_row},0)"
+            net_rate_row = metric("净利率", net_rate_formula, "修改当前出价或上方规格后自动变化", False, "0.00%")
+            spend_row = metric("预计花费", 100, "默认100限额，可改成任意花费", True, '¥#,##0.00')
+            if is_bid_mode:
+                expected_profit_formula = f"=IF(B{bid_row}>0,(B{spend_row}/B{bid_row})*E{summary_row}*{return_factor}*(B{margin_row}-0.006)-B{spend_row},0)"
+            else:
+                expected_profit_formula = f"=B{spend_row}*{effective_roi_formula}*{return_factor}*(B{margin_row}-0.006)-B{spend_row}"
+            metric("预计盈亏", expected_profit_formula, "按主界面预计盈亏口径，引用预计花费", False, '¥#,##0.00')
+            current_row += 1
+            record_range, record_lines = self._record_briefs_for_export(ctx["sys_id"])
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=11)
+            ws.cell(current_row, 1, f"上一周操作记录（{record_range}）")
+            self._set_range_fill(ws, current_row, 1, 11, fills["section"])
+            ws.cell(current_row, 1).font = header_font
+            current_row += 1
+            operation_styles = []
+            if record_lines:
+                spec_names = [str(spec.get("spec_name") or "").strip() for spec in specs]
+                for record_info in record_lines:
+                    date_text, content = self._operation_record_export_cells(record_info)
+                    ws.cell(current_row, 1, date_text)
+                    ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=11)
+                    ws.cell(current_row, 2, content)
+                    self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+                    contains_spec_name = any(name and name in str(record_info.get("text") or "") for name in spec_names)
+                    operation_styles.append((current_row, self._operation_record_color_for_export(record_info["date"]), bool(record_info.get("has_spec") or contains_spec_name)))
+                    current_row += 1
+            else:
+                ws.cell(current_row, 1, "-")
+                ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=11)
+                ws.cell(current_row, 2, "上一周无操作记录")
+                self._set_range_fill(ws, current_row, 1, 11, fills["white"])
+                operation_styles.append((current_row, "6B7280", False))
+                current_row += 1
+            block_end = current_row - 1
+            self._style_product_specs_export_range(ws, block_start, block_end, 1, 11)
+            for row_idx, color, bold in operation_styles:
+                self._style_operation_record_export_row(ws, row_idx, 11, color, bold, 1)
+            for row in range(block_start, block_end + 1):
+                ws.row_dimensions[row].height = max(ws.row_dimensions[row].height or 0, 28)
+                for col in range(1, 12):
+                    cell = ws.cell(row, col)
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    if not cell.font or cell.font.name is None:
+                        cell.font = normal_font
+            current_row += 2
+        ws.freeze_panes = "A1"
+        ws._image_stream_refs = image_refs
+
+    def _default_margin_excel_path(self, folder, safe_store_name):
+        today = datetime.now().strftime("%Y%m%d")
+        file_path = os.path.join(folder, f"店铺毛利_{safe_store_name}_{today}.xlsx")
+        suffix = 2
+        while os.path.exists(file_path):
+            file_path = os.path.join(folder, f"店铺毛利_{safe_store_name}_{today}_{suffix}.xlsx")
+            suffix += 1
+        return file_path
+
+    def _export_margin_excel_from_button(self):
+        return self.export_margin_excel()
+
+    def export_margin_excel(self, dialog_parent=None, file_path=None, show_success=True, progress_title="导出Excel"):
+        progress = None
+        try:
+            if isinstance(dialog_parent, bool):
+                dialog_parent = None
+            parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
+            if not OPENPYXL_AVAILABLE:
+                QMessageBox.warning(parent, "缺少依赖", "请先安装 openpyxl 库：\npip install openpyxl")
+                return False
+            detail_map = StoreMarginExcelExporter.select_detail_products(
+                parent, self.db, self.main_app, [(self.store_id, self.store_name)]
+            )
+            if detail_map is None:
+                return False
+            self.export_detail_product_ids = detail_map.get(int(self.store_id), set())
+            safe_store_name = "".join(ch for ch in self.store_name if ch not in r'\/:*?"<>|').strip() or "店铺"
+            if not file_path:
+                folder = remembered_existing_directory(parent, self.db, "选择导出保存文件夹")
+                if not folder:
+                    return False
+                file_path = self._default_margin_excel_path(folder, safe_store_name)
+            if not file_path:
+                return False
+            if not file_path.lower().endswith(".xlsx"):
+                file_path += ".xlsx"
+            progress = QProgressDialog("正在准备导出...", "取消", 0, 100, parent)
+            progress.setWindowTitle(progress_title)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+
+            def update_progress(value, text):
+                progress.setValue(int(value))
+                progress.setLabelText(text)
+                QApplication.processEvents()
+                return not progress.wasCanceled()
+
+            self._last_export_error = ""
+            self._export_error_dialog_shown = False
+            ok = self.export_margin_excel_to_path(file_path, update_progress)
+            was_canceled = progress.wasCanceled()
+            progress.setValue(100)
+            progress.close()
+            progress = None
+            if ok:
+                if show_success:
+                    QMessageBox.information(parent, "导出成功", f"数据已导出到：\n{file_path}")
+                return True
+            if show_success and not was_canceled and not getattr(self, "_export_error_dialog_shown", False):
+                errors = getattr(self, "_batch_export_errors", None)
+                detail = "\n".join(errors[-3:]) if errors else getattr(self, "_last_export_error", "")
+                if not detail:
+                    detail = "导出流程已返回失败，但未提供具体错误。"
+                QMessageBox.warning(parent, "导出失败", detail)
+            return False
+        except Exception as e:
+            if progress is not None:
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+            detail = traceback.format_exc()
+            parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
+            QMessageBox.critical(parent, "导出失败", f"导出时发生异常：\n{e}\n\n{detail}")
+            return False
+
+    def export_margin_excel_to_path(self, file_path, progress_callback=None):
+        try:
+            self._excel_export_image_cache = {}
+            self._last_export_error = ""
+            if progress_callback and not progress_callback(5, "正在创建 Excel 工作簿..."):
+                return False
+            wb = Workbook()
+            if progress_callback and not progress_callback(18, "正在写入过往数据分析..."):
+                return False
+            self._write_historical_export_sheet(wb)
+            if progress_callback and not progress_callback(42, "正在写入店铺商品权重..."):
+                return False
+            self._write_orders_export_sheet(wb)
+            if progress_callback and not progress_callback(68, "正在写入商品规格售卖情况和缩略图..."):
+                return False
+            self._write_product_specs_export_sheet(wb)
+            if progress_callback and not progress_callback(92, "正在保存 Excel 文件..."):
+                return False
+            wb.save(file_path)
+            if progress_callback:
+                progress_callback(100, "导出完成")
+            return True
+        except Exception as e:
+            self._last_export_error = traceback.format_exc()
+            if hasattr(self, "_batch_export_errors"):
+                self._batch_export_errors.append(self._last_export_error)
+            else:
+                self._export_error_dialog_shown = True
+                QMessageBox.warning(self, "导出失败", f"导出时发生错误：\n{str(e)}")
+            return False
+        finally:
+            self._excel_export_image_cache = {}
 
     def calculate_week_comparison(self, records):
         """计算并显示周环比变化"""
@@ -5748,19 +8209,6 @@ class StoreMarginDialog(QDialog):
             "note": "本周+上周范围内的当前店铺商品操作记录" if items else "本周+上周范围内没有商品操作记录",
         }
 
-    def _build_store_link_change_records(self, current, previous):
-        start_date, end_date, range_text = self._build_operation_record_range(current, previous)
-        if not start_date or not end_date:
-            return {"available": False, "range": range_text, "items": [], "note": "无有效日期范围，未读取链接变化记录"}
-        items = self._collect_store_link_change_records(start_date, end_date)
-        items.sort(key=lambda x: (x["date"], x["time"], x["product_id"]))
-        return {
-            "available": bool(items),
-            "range": range_text,
-            "items": items,
-            "note": "本周+上周范围内的当前店铺链接上架/删除记录" if items else "本周和上周没有可参考的链接变化记录",
-        }
-
     def _format_ai_report_spec(self, spec_code, spec_name, display_mode):
         spec_code = str(spec_code or "").strip()
         spec_name = str(spec_name or "").strip()
@@ -5803,7 +8251,8 @@ class StoreMarginDialog(QDialog):
             sale_price = float(sale_price or 0)
             cost_price = float(cost_price or 0)
             spec_display = self._format_ai_report_spec(spec_code, spec_name, spec_display_mode)
-            discount = max(float(coupon or 0), float(new_customer or 0))
+            store_discount, _rule = self.db.calculate_store_discount(self.store_id, sale_price)
+            discount = max(float(coupon or 0), float(new_customer or 0), float(store_discount or 0))
             final_price = max(0, sale_price - discount)
             amount = sale_price * order_count
             total_amount += amount
@@ -5890,7 +8339,6 @@ class StoreMarginDialog(QDialog):
             "historical_summary": self._build_historical_margin_summary(records),
             "sales_structure": self._build_sales_structure_summary(),
             "product_operation_records": self._build_product_operation_records(current, previous),
-            "store_link_change_records": self._build_store_link_change_records(current, previous),
             "current_order_range_label": order_range,
         }
 
@@ -6102,11 +8550,11 @@ class StoreMarginDialog(QDialog):
 输出要求：
 1. 不要使用 Markdown 格式，不要使用 Markdown 标题、表格、代码块、引用块，也不要把输入表格完整复述出来。
 2. 报告要像一段可以直接转发给别人看的文字，最多使用换行、空格、简单序号和符号来区分层次，比如“一、本周结论”“①”“-”。
-3. 先写本周整体结论，再写核心指标变化，再写售卖结构和主卖规格判断，再结合商品操作记录、店铺链接变化记录判断可能影响，最后写下周动作。
-4. 操作记录和链接变化只能作为解释线索：能对应上数据变化就说明，不能对应就不要硬凑原因。
+3. 先写本周整体结论，再写核心指标变化，再写售卖结构和主卖规格判断，再结合商品操作记录判断可能影响，最后写下周动作。
+4. 操作记录只能作为解释线索：能对应上数据变化就说明，不能对应就不要硬凑原因。
 5. 只保留必要数字和关键判断，优先总结大方向；不要长篇解释、不要客套话、不要营销腔。
 6. 订单规格数据和财务数据口径不同，出现订单数差异时只提醒一次，不要反复解释。
-7. 如果没有商品操作记录，要明确说“本周和上周没有可参考的商品操作记录”；如果没有链接变化记录，要明确说“本周和上周没有可参考的链接变化记录”，不要臆测操作原因。
+7. 如果没有商品操作记录，要明确说“本周和上周没有可参考的商品操作记录”，不要臆测操作原因。
 8. 规格相关信息必须按输入数据里的 spec_display_rule 执行：如果是规格名称，只能使用【】中的规格名称；如果是规格编码，才使用规格编码。
 """.strip()
         user_prompt = {
@@ -6266,6 +8714,45 @@ class StoreMarginDialog(QDialog):
             print(f"加载手动数据失败: {e}")
             return []
 
+    def _complete_manual_margin_data(self, data):
+        completed = dict(data or {})
+        actual_orders = int(completed.get("actual_orders", 0) or 0)
+        actual_amount = float(completed.get("actual_amount", 0) or 0)
+        gross_profit = float(completed.get("gross_profit", 0) or 0)
+        refund_amount = float(completed.get("refund_amount", 0) or 0)
+        refund_orders = int(completed.get("refund_orders", 0) or 0)
+        promotion_fee = float(completed.get("promotion_fee", 0) or 0)
+        deduction = float(completed.get("deduction", 0) or 0)
+        other_service = float(completed.get("other_service", 0) or 0)
+        other = float(completed.get("other", 0) or 0)
+
+        completed["actual_orders"] = actual_orders
+        completed["actual_amount"] = actual_amount
+        completed["gross_profit"] = gross_profit
+        completed["refund_amount"] = refund_amount
+        completed["refund_orders"] = refund_orders
+        completed["promotion_fee"] = promotion_fee
+        completed["deduction"] = deduction
+        completed["other_service"] = other_service
+        completed["other"] = other
+
+        completed["gross_margin_rate"] = (gross_profit / actual_amount * 100) if actual_amount > 0 else 0
+        completed["refund_rate_by_amount"] = (refund_amount / actual_amount * 100) if actual_amount > 0 else 0
+        completed["refund_rate_by_orders"] = (refund_orders / actual_orders * 100) if actual_orders > 0 else 0
+        completed["unit_price"] = actual_amount / actual_orders if actual_orders > 0 else 0
+        completed["promotion_ratio"] = (promotion_fee / actual_amount * 100) if actual_amount > 0 else 0
+        completed["tech_fee"] = actual_amount * 0.006
+        completed["net_profit"] = gross_profit - refund_amount - promotion_fee - deduction - other_service + other - completed["tech_fee"]
+        completed["net_margin_rate"] = (completed["net_profit"] / actual_amount * 100) if actual_amount > 0 else 0
+        completed["profit_per_order"] = completed["net_profit"] / actual_orders if actual_orders > 0 else 0
+        return completed
+
+    def _flush_imported_data_to_archive(self):
+        try:
+            self.db.conn.commit()
+        except Exception as e:
+            print(f"commit imported store margin data failed: {e}")
+
     def delete_manual_data(self, start_date):
         """删除手动录入数据"""
         reply = QMessageBox.question(self, "确认删除", "确定删除这条数据吗？")
@@ -6299,7 +8786,8 @@ class StoreMarginDialog(QDialog):
             end_date = self.date_end_input.date().toString("yyyy-MM-dd")
             data["start_date"] = start_date
             data["end_date"] = end_date
-            self.save_manual_data(data)
+            self.save_manual_data(self._complete_manual_margin_data(data))
+            self._flush_imported_data_to_archive()
             self.refresh_manual_data_display()
             self.update_current_history_label()
 
@@ -6316,23 +8804,66 @@ class StoreMarginDialog(QDialog):
         import os
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.xlsx', '.xls']:
-            import openpyxl
-            from datetime import datetime as dt
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-            ws = wb.active
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                row_data = []
-                for cell in row:
-                    if isinstance(cell, dt) and cell is not None:
-                        row_data.append(cell.strftime("%Y-%m-%d"))
-                    else:
-                        row_data.append(cell)
-                rows.append(row_data)
-            return rows
+            return self._read_excel_sheet_rows(file_path, data_only=True)
         import csv
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            return list(csv.reader(f))
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                with open(file_path, 'r', encoding=encoding, newline='') as f:
+                    return list(csv.reader(f))
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("CSV 文件编码无法识别，请使用 UTF-8 或 GB18030 编码")
+
+    def _read_excel_sheet_rows(self, file_path, data_only=False):
+        if os.path.splitext(file_path)[1].lower() == ".xls":
+            import xlrd
+            book = xlrd.open_workbook(file_path)
+            try:
+                sheet_name = self._choose_excel_sheet(book.sheet_names())
+                if sheet_name is None:
+                    return None
+                sheet = book.sheet_by_name(sheet_name)
+                rows = []
+                for row_index in range(sheet.nrows):
+                    row = []
+                    for cell in sheet.row(row_index):
+                        value = cell.value
+                        if cell.ctype == xlrd.XL_CELL_DATE:
+                            value = xlrd.xldate_as_datetime(value, book.datemode).strftime("%Y-%m-%d")
+                        row.append(value)
+                    rows.append(row)
+                return rows
+            finally:
+                book.release_resources()
+
+        import openpyxl
+        from datetime import datetime as dt
+        wb = openpyxl.load_workbook(file_path, data_only=data_only)
+        try:
+            sheet_names = [sheet.title for sheet in wb.worksheets]
+            sheet_name = self._choose_excel_sheet(sheet_names)
+            if sheet_name is None:
+                return None
+            rows = []
+            for row in wb[sheet_name].iter_rows(values_only=True):
+                rows.append([
+                    cell.strftime("%Y-%m-%d") if isinstance(cell, dt) else cell
+                    for cell in row
+                ])
+            return rows
+        finally:
+            wb.close()
+
+    def _choose_excel_sheet(self, sheet_names):
+        if not sheet_names:
+            raise ValueError("Excel 文件中没有可读取的工作表")
+        if len(sheet_names) == 1:
+            return sheet_names[0]
+        sheet_name, ok = QInputDialog.getItem(
+            self, "选择工作表", "检测到多个 Sheet，请选择要导入的工作表：",
+            sheet_names, 0, False,
+        )
+        return sheet_name if ok else None
 
     def _cell_text(self, value):
         if value is None:
@@ -6371,6 +8902,13 @@ class StoreMarginDialog(QDialog):
         except Exception:
             return None
         return None
+
+    def _format_import_order_date(self, value):
+        parsed = self._parse_order_date_value(value)
+        if not parsed:
+            return None
+        _year, month, day = parsed.split("-")
+        return f"{int(month)}/{int(day)}"
 
     def _is_effective_shipped_status(self, status_text):
         text = str(status_text or "").strip()
@@ -6469,8 +9007,8 @@ class StoreMarginDialog(QDialog):
 
     def import_margin_data_from_order_table(self):
         """表格模式：从订单明细计算毛利录入预填数据。"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择订单明细文件", "",
+        file_path, _ = remembered_open_file(
+            self, self.db, "选择订单明细文件",
             "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*.*)"
         )
         if not file_path:
@@ -6478,6 +9016,8 @@ class StoreMarginDialog(QDialog):
 
         try:
             rows = self._read_import_rows(file_path)
+            if rows is None:
+                return
             if len(rows) < 2:
                 QMessageBox.warning(self, "错误", "文件数据少于2行，无法导入")
                 return
@@ -6623,7 +9163,17 @@ class StoreMarginDialog(QDialog):
                 "gross_profit": round(total_gross_profit, 2),
                 "refund_orders": refund_orders,
             }
-            self.open_input_data_dialog_with_initial(initial_data)
+            start_date = self.date_start_input.date().toString("yyyy-MM-dd")
+            end_date = self.date_end_input.date().toString("yyyy-MM-dd")
+            data = self._complete_manual_margin_data(initial_data)
+            data["start_date"] = start_date
+            data["end_date"] = end_date
+            result = self.save_manual_data(data)
+            if result:
+                self._flush_imported_data_to_archive()
+                self.refresh_manual_data_display()
+                self.update_current_history_label()
+                self.show_toast(f"✅ 表格导入已自动保存：{start_date} ~ {end_date}")
 
         except Exception as e:
             QMessageBox.warning(self, "错误", f"表格模式导入失败: {e}")
@@ -6634,8 +9184,8 @@ class StoreMarginDialog(QDialog):
             self.import_margin_data_from_order_table()
             return
 
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择导入文件", "",
+        file_path, _ = remembered_open_file(
+            self, self.db, "选择导入文件",
             "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*.*)"
         )
         if not file_path:
@@ -6646,19 +9196,9 @@ class StoreMarginDialog(QDialog):
             ext = os.path.splitext(file_path)[1].lower()
 
             if ext in ['.xlsx', '.xls']:
-                import openpyxl
-                from datetime import datetime as dt
-                wb = openpyxl.load_workbook(file_path)
-                ws = wb.active
-                rows = []
-                for row in ws.iter_rows(values_only=True):
-                    row_data = []
-                    for cell in row:
-                        if isinstance(cell, (dt,)) and cell is not None:
-                            row_data.append(cell.strftime("%Y-%m-%d"))
-                        else:
-                            row_data.append(cell)
-                    rows.append(row_data)
+                rows = self._read_excel_sheet_rows(file_path)
+                if rows is None:
+                    return
             else:
                 import csv
                 with open(file_path, 'r', encoding='utf-8-sig') as f:
@@ -6889,6 +9429,7 @@ class StoreMarginDialog(QDialog):
 
             self.refresh_manual_data_display()
             self.update_current_history_label()
+            self._flush_imported_data_to_archive()
             if overwritten_count > 0:
                 self.show_toast(f"✅ 导入成功：新增 {imported_count - overwritten_count} 条，覆盖 {overwritten_count} 条")
             else:
@@ -6938,6 +9479,13 @@ class StoreMarginDialog(QDialog):
             else:
                 is_overwrite = False
 
+            latest_rows = self.db.safe_fetchall(
+                "SELECT MAX(end_date) FROM manual_margin_data WHERE store_id=?",
+                (self.store_id,),
+            )
+            latest_end_date = str(latest_rows[0][0] or "") if latest_rows else ""
+            clear_weekly_images = _should_clear_weekly_images(latest_end_date, end_date, is_overwrite)
+
             created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             # 使用REPLACE自动覆盖已存在的记录
@@ -6976,6 +9524,13 @@ class StoreMarginDialog(QDialog):
                 data.get("profit_per_order", 0),
                 created_time
             ))
+            if clear_weekly_images:
+                try:
+                    self.db.safe_execute("DELETE FROM store_temp_images WHERE store_id=?", (self.store_id,))
+                    if getattr(self, "weekly_images_panel", None) is not None:
+                        self.load_weekly_images()
+                except Exception as image_error:
+                    QMessageBox.warning(self, "图片清理失败", f"毛利数据已保存，但上一周期附带图片清理失败：{image_error}")
             return "overwrite" if is_overwrite else "new"
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存失败: {e}")
@@ -7003,7 +9558,14 @@ class StoreMarginDialog(QDialog):
             
             # 获取店铺的所有导入订单数据
             orders = self.db.safe_fetchall(
-                "SELECT actual_amount, order_count FROM imported_orders WHERE store_id=?",
+                """SELECT io.actual_amount, io.order_count FROM imported_orders io
+                   WHERE io.store_id=? AND EXISTS (
+                       SELECT 1 FROM products p
+                       JOIN product_specs ps ON ps.product_id=p.id AND ps.spec_code=io.spec_code
+                         AND COALESCE(ps.is_temporarily_off_shelf, 0)=0
+                       WHERE p.store_id=io.store_id AND p.name=io.product_id
+                         AND COALESCE(p.is_archived, 0)=0 AND COALESCE(p.is_violation, 0)=0
+                   )""",
                 (self.store_id,)
             )
             
@@ -7240,44 +9802,11 @@ class StoreMarginDialog(QDialog):
                 refund_ratio_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
     def get_product_margin(self, product_id):
-        specs = self.db.safe_fetchall(
-            "SELECT spec_code, sale_price, weight_percent FROM product_specs WHERE product_id=?", (product_id,)
-        )
-        if not specs:
-            return 0, 0, 0
-        prod_res = self.db.safe_fetchall(
-            "SELECT coupon_amount, new_customer_discount FROM products WHERE id=?", (product_id,)
-        )
-        coupon = (prod_res[0][0] or 0) if prod_res else 0
-        new_customer = (prod_res[0][1] or 0) if prod_res else 0
-        max_discount = max(coupon, new_customer)
-        total_weighted_margin = total_weight = total_cost = total_price = 0
-        for spec_code, sale_price, weight in specs:
-            if not sale_price or sale_price <= 0:
-                continue
-            user_id = self.get_user_id_by_sys_id(product_id)
-            order_res = self.db.safe_fetchall(
-                "SELECT order_count FROM imported_orders WHERE product_id=? AND spec_code=?",
-                (user_id, spec_code)
-            )
-            order_count = order_res[0][0] if order_res and order_res[0][0] else 0
-            weight = order_count if order_count > 0 else (weight or 0)
-            cost_res = self.db.safe_fetchall("SELECT cost_price FROM cost_library WHERE spec_code=?", (spec_code,))
-            cost = cost_res[0][0] if cost_res and cost_res[0][0] else 0
-            final_price = sale_price - max_discount
-            if final_price > 0 and cost > 0:
-                margin = (final_price - cost) / final_price
-                total_weighted_margin += margin * weight
-                total_weight += weight
-            total_cost += cost * weight
-            total_price += sale_price * weight
-        if total_weight > 0:
-            return (
-                total_cost / total_weight,
-                total_price / total_weight,
-                (total_weighted_margin / total_weight) * 100,
-            )
-        return 0, 0, 0
+        metrics = self.db.calculate_product_gross_margin_metrics(product_id)
+        price = float(metrics.get("avg_final_price") or 0)
+        profit = float(metrics.get("avg_gross_profit") or 0)
+        margin = float(metrics.get("gross_margin_pct") or 0)
+        return max(0.0, price - profit), price, margin
 
     def calculate_total_margin(self):
         total_weight = 0
@@ -7316,6 +9845,7 @@ class StoreMarginDialog(QDialog):
             self.lbl_total_margin.setStyleSheet(
                 "font-size: 20px; font-weight: bold; color: #e74c3c; background-color: #fdeaa8; padding: 10px 20px; border-radius: 8px;"
             )
+        return total_margin
 
     def open_profit_calculator(self):
         margin_text = self.lbl_total_margin.text()
@@ -7372,36 +9902,26 @@ class StoreMarginDialog(QDialog):
         self.load_products()
 
     def calculate_weights_from_orders(self):
+        self._normalize_imported_order_store_ids()
         order_data = self.db.safe_fetchall("""
-            SELECT product_id, SUM(order_count) as total_orders
-            FROM imported_orders WHERE store_id=? GROUP BY product_id
+            SELECT io.product_id, SUM(io.order_count) as total_orders
+            FROM imported_orders io
+            WHERE io.store_id=? AND EXISTS (
+                SELECT 1 FROM products p
+                JOIN product_specs ps ON ps.product_id=p.id AND ps.spec_code=io.spec_code
+                  AND COALESCE(ps.is_temporarily_off_shelf, 0)=0
+                WHERE p.store_id=io.store_id AND p.name=io.product_id
+                  AND COALESCE(p.is_archived, 0)=0 AND COALESCE(p.is_violation, 0)=0
+            )
+            GROUP BY io.product_id
         """, (self.store_id,))
         product_orders = {row[0]: row[1] for row in order_data if row[1]}
         total_store_orders = sum(product_orders.values())
         if total_store_orders <= 0:
-            for prod_id in self.product_weights:
-                self.product_weights[prod_id]["weight"] = 0
-                sys_id = self.product_weights[prod_id].get("sys_id")
-                if sys_id:
-                    self.db.safe_execute("UPDATE products SET store_weight=0 WHERE id=?", (sys_id,))
-            return
-        total_locked = sum(
-            data.get("weight", 0) for data in self.product_weights.values() if data.get("locked", 0)
-        )
-        unlocked_orders = 0
-        for prod_id, orders in product_orders.items():
-            if not self.product_weights.get(prod_id, {}).get("locked", 0):
-                unlocked_orders += orders
-        if unlocked_orders <= 0:
             return
         for prod_id in self.product_weights:
             orders = product_orders.get(prod_id, 0)
-            if self.product_weights.get(prod_id, {}).get("locked", 0):
-                continue
-            if orders <= 0:
-                weight = 0
-            else:
-                weight = (orders / unlocked_orders) * (100 - total_locked)
+            weight = (orders / total_store_orders) * 100 if orders > 0 else 0
             sys_id = self.product_weights[prod_id].get("sys_id")
             if sys_id:
                 self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (weight, sys_id))
@@ -7425,6 +9945,55 @@ class StoreMarginDialog(QDialog):
             if sys_id:
                 self.db.safe_execute("UPDATE products SET store_weight=? WHERE id=?", (avg_weight, sys_id))
         self.load_products()
+
+    def _order_table_sort_value(self, column, text):
+        text = str(text or "").strip()
+        if column not in {1, 3, 4, 5, 6, 7, 8, 9, 10, 12}:
+            return text.casefold()
+        match = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+        if not match:
+            return 0
+        if column == 1:
+            return int(float(match.group()))
+        value = float(match.group())
+        return -abs(value) if "↓" in text else value
+
+    def sort_order_table_by_column(self, column):
+        if column == 0:
+            return
+        if self._order_sort_column == column:
+            self._order_sort_order = (
+                Qt.DescendingOrder
+                if self._order_sort_order == Qt.AscendingOrder
+                else Qt.AscendingOrder
+            )
+        else:
+            self._order_sort_column = column
+            self._order_sort_order = Qt.DescendingOrder
+
+        originals = []
+        for row in range(self.table.rowCount()):
+            text = self._table_cell_text(self.table, row, column)
+            item = self.table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem()
+                self.table.setItem(row, column, item)
+            originals.append((item, item.data(Qt.DisplayRole)))
+            item.setData(Qt.DisplayRole, self._order_table_sort_value(column, text))
+
+        self.table.sortItems(column, self._order_sort_order)
+        for item, original in originals:
+            item.setData(Qt.DisplayRole, original)
+        self.table.horizontalHeader().setSortIndicator(column, self._order_sort_order)
+
+    def on_cell_clicked(self, row, col):
+        if col != 2:
+            return
+        product_item = self.table.item(row, 1)
+        if product_item:
+            prod_id = product_item.data(Qt.UserRole)
+            if prod_id:
+                self.open_spec_dialog_by_id(prod_id)
 
     def on_cell_double_clicked(self, row, col):
         if col == 1:
@@ -7594,18 +10163,19 @@ class StoreMarginDialog(QDialog):
 
     def import_orders(self):
         """导入订单功能"""
-        if not OPENPYXL_AVAILABLE:
-            QMessageBox.warning(self, "缺少依赖", "请先安装 openpyxl 库：\npip install openpyxl")
-            return
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择订单Excel文件", "", "Excel文件 (*.xlsx *.xls)")
+        file_path, _ = remembered_open_file(
+            self, self.db, "选择订单文件",
+            "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有支持的文件 (*.xlsx *.xls *.csv)"
+        )
         if not file_path:
             return
         try:
-            wb = load_workbook(file_path, data_only=True)
-            sheet = wb.active
-            headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
+            rows = self._read_import_rows(file_path)
+            if rows is None:
+                return
+            headers = [str(value).strip() if value is not None else "" for value in rows[0]]
             if not headers or all(h == "" for h in headers):
-                QMessageBox.warning(self, "错误", "Excel文件没有找到有效的表头行")
+                QMessageBox.warning(self, "错误", "文件没有找到有效的表头行")
                 return
             col_mapping = self._auto_detect_columns(headers)
             
@@ -7639,14 +10209,14 @@ class StoreMarginDialog(QDialog):
             excel_product_codes_found = set()
             total_row_count = 0
             matched_count = 0
-            for row in sheet.iter_rows(min_row=2, values_only=True):
+            for row in rows[1:]:
                 total_row_count += 1
                 if total_row_count > 10000:
                     break
                 try:
                     product_id_value = str(row[product_id_col]).strip() if product_id_col < len(row) else ""
                     spec_code_value = str(row[spec_code_col]).strip() if spec_code_col < len(row) else ""
-                    quantity_value = row[quantity_col] if quantity_col < len(row) and quantity_col is not None else None
+                    quantity_value = row[quantity_col] if quantity_col is not None and quantity_col < len(row) else None
                     date_value = None
                     if date_col is not None and date_col < len(row):
                         date_value = row[date_col]
@@ -7672,21 +10242,7 @@ class StoreMarginDialog(QDialog):
                         quantity = max(1, int(quantity_value))
                     except (ValueError, TypeError):
                         quantity = 1
-                order_date_str = None
-                if date_value is not None:
-                    if isinstance(date_value, datetime):
-                        order_date_str = date_value.strftime("%m/%d")
-                    else:
-                        date_str = str(date_value).strip()
-                        if ' ' in date_str:
-                            date_str = date_str.split()[0]
-                        import re
-                        match = re.search(r'(\d{1,2})[/-](\d{1,2})', date_str)
-                        if match:
-                            month, day = match.groups()
-                            order_date_str = f"{int(month)}/{int(day)}"
-                        else:
-                            order_date_str = date_str[:5]
+                order_date_str = self._format_import_order_date(date_value)
                 spec_codes = all_store_specs.get(prod_db_id, set())
                 spec_code_str = str(spec_code_value).strip() if spec_code_value else ""
                 if spec_code_str and spec_code_str != "None" and spec_code_str in spec_codes:
@@ -7706,7 +10262,6 @@ class StoreMarginDialog(QDialog):
                         is_refund = "退款成功" in status_value
                         if is_refund:
                             order_data[key]["refund_count"] += quantity
-            
             missing_product_codes = product_codes_in_store - excel_product_codes_found
             if missing_product_codes:
                 msg = f"以下商品ID在表格中没有订单记录：\n{', '.join(missing_product_codes)}\n\n是否继续同步（未匹配的商品链接权重将设为0）？"
@@ -7716,11 +10271,11 @@ class StoreMarginDialog(QDialog):
             import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # 先计算当前权重（用于保存到快照）
-            order_data_for_weight = self.db.safe_fetchall("""
-                SELECT product_id, SUM(order_count) as total_orders
-                FROM imported_orders WHERE store_id=? GROUP BY product_id
-            """, (self.store_id,))
-            temp_product_orders = {row[0]: row[1] for row in order_data_for_weight if row[1]}
+            temp_product_orders = {}
+            for (product_code, _spec_code), data in order_data.items():
+                temp_product_orders[product_code] = (
+                    temp_product_orders.get(product_code, 0) + data["count"]
+                )
             temp_total_orders = sum(temp_product_orders.values())
             temp_product_weights = {}
             for prod_id in self.product_weights:
@@ -7745,33 +10300,150 @@ class StoreMarginDialog(QDialog):
                 "weights": temp_product_weights
             })
             
-            self.db.safe_execute("""
-                INSERT INTO import_history (store_id, import_time, file_name, total_products, total_specs, total_orders, total_amount, snapshot_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (self.store_id, import_time, os.path.basename(file_path), total_products, total_specs, total_orders, total_amount, snapshot_data))
-            
-            self.db.safe_execute("DELETE FROM imported_orders WHERE store_id=?", (self.store_id,))
+            rows_to_insert = []
             for (product_id_val, spec_code), data in order_data.items():
                 earliest_date = min(data["dates"]) if data["dates"] else None
                 latest_date = max(data["dates"]) if data["dates"] else None
                 date_range = f"{earliest_date}~{latest_date}" if earliest_date and latest_date else None
-                self.db.safe_execute(
-                    "INSERT INTO imported_orders (store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.store_id, product_id_val, spec_code, data["count"], import_time, date_range, data.get("actual_amount", 0), data.get("refund_count", 0))
-                )
-            self.load_products()
+                rows_to_insert.append((
+                    self.store_id, product_id_val, spec_code, data["count"], import_time,
+                    date_range, data.get("actual_amount", 0), data.get("refund_count", 0),
+                ))
+            self.db.replace_imported_orders(
+                self.store_id,
+                (self.store_id, import_time, os.path.basename(file_path), total_products,
+                 total_specs, total_orders, total_amount, snapshot_data),
+                rows_to_insert,
+            )
+            self._update_waste_link_tasks_after_order_import(products_in_store, temp_product_orders)
+            self._sync_product_refund_rates_from_imported_orders()
             self.calculate_weights_from_orders()
-            self.update_compare_columns()
-            self.update_orders_display()
-            self.update_product_avg_price()
-            self.calculate_total_margin()
-            self.update_weight_inputs()
-            self.update_total_orders_label()
-            self.update_order_range_label()
-            self.main_app.load_data_safe()
+            self.load_products()
+            self._flush_imported_data_to_archive()
             self.main_app.show_toast(f"✅ 已导入 {len(order_data)} 条订单数据")
+            if hasattr(self.main_app, "update_daily_task_button_badge"):
+                self.main_app.update_daily_task_button_badge()
+            QTimer.singleShot(0, lambda: self.main_app.refresh_store_cards(self.store_id))
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入订单失败：\n{str(e)}")
+
+    def _snapshot_product_order_totals(self, snapshot_data, product_codes=None):
+        try:
+            snapshot = json.loads(snapshot_data or "{}")
+            orders = snapshot.get("orders") or {}
+        except Exception:
+            return {}
+        sorted_codes = sorted((str(code or "") for code in (product_codes or []) if code), key=len, reverse=True)
+        totals = {}
+        for key, data in orders.items():
+            key_text = str(key)
+            product_code = next((code for code in sorted_codes if key_text.startswith(code + "_")), key_text.split("_", 1)[0])
+            try:
+                count = float((data or {}).get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            totals[product_code] = totals.get(product_code, 0) + count
+        return totals
+
+    def _update_waste_link_tasks_after_order_import(self, products_in_store, current_product_orders):
+        histories = self.db.safe_fetchall(
+            "SELECT snapshot_data FROM import_history WHERE store_id=? ORDER BY id DESC LIMIT 2",
+            (self.store_id,),
+        )
+        if len(histories) < 2:
+            return
+        product_codes = [str(product_code or "") for _product_db_id, product_code in products_in_store]
+        previous_orders = self._snapshot_product_order_totals(histories[1][0], product_codes)
+        today = datetime.now()
+        created_time = today.strftime("%Y-%m-%d %H:%M:%S")
+        recovered_ids = []
+        created = 0
+        violation_ids = {
+            row[0] for row in self.db.safe_fetchall(
+                "SELECT id FROM products WHERE store_id=? AND COALESCE(is_violation, 0)=1",
+                (self.store_id,),
+            )
+        }
+        for product_db_id, product_code in products_in_store:
+            if product_db_id in violation_ids:
+                continue
+            product_code = str(product_code or "")
+            if current_product_orders.get(product_code, 0) > 0:
+                recovered_ids.append(product_db_id)
+                continue
+            if previous_orders.get(product_code, 0) > 0:
+                continue
+            exists = self.db.safe_fetchall(
+                """SELECT id FROM daily_tasks
+                   WHERE store_id=? AND product_id=? AND is_completed=0
+                     AND task_content LIKE '【废物链接】%' LIMIT 1""",
+                (self.store_id, product_db_id),
+            )
+            if exists:
+                continue
+            title_rows = self.db.safe_fetchall("SELECT title FROM products WHERE id=?", (product_db_id,))
+            title = str(title_rows[0][0] or "") if title_rows else ""
+            self.db.safe_execute(
+                """INSERT INTO daily_tasks
+                   (store_id, product_id, year, month, day, task_content, created_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self.store_id, product_db_id, today.year, today.month, today.day,
+                    f"【废物链接】连续两周导入订单表无订单。商品ID：{product_code}；标题：{title}",
+                    created_time,
+                ),
+            )
+            created += 1
+        if recovered_ids:
+            placeholders = ",".join("?" for _ in recovered_ids)
+            self.db.safe_execute(
+                f"""UPDATE daily_tasks SET is_completed=1
+                    WHERE store_id=? AND is_completed=0
+                      AND task_content LIKE '【废物链接】%'
+                      AND product_id IN ({placeholders})""",
+                (self.store_id, *recovered_ids),
+            )
+        if created and getattr(self, "main_app", None) and hasattr(self.main_app, "show_toast"):
+            self.main_app.show_toast(f"已新增 {created} 个废物链接任务")
+
+    def _sync_product_refund_rates_from_imported_orders(self):
+        """把订单规格毛利权重表里的商品退款率同步到 products.return_rate。"""
+        try:
+            rows = self.db.safe_fetchall(
+                """
+                SELECT
+                    product_id,
+                    COALESCE(SUM(COALESCE(order_count, 0)), 0) AS total_orders,
+                    COALESCE(SUM(COALESCE(refund_count, 0)), 0) AS total_refunds
+                FROM imported_orders
+                WHERE store_id=?
+                GROUP BY product_id
+                """,
+                (self.store_id,)
+            )
+            updated_rates = {}
+            for product_code, total_orders, total_refunds in rows:
+                product_code = str(product_code or "").strip()
+                total_orders = float(total_orders or 0)
+                total_refunds = float(total_refunds or 0)
+                if not product_code or total_orders <= 0:
+                    continue
+                refund_rate = max(0.0, min(100.0, total_refunds / total_orders * 100))
+                updated_rates[product_code] = refund_rate
+                self.db.safe_execute(
+                    "UPDATE products SET return_rate=? WHERE store_id=? AND name=?",
+                    (refund_rate, self.store_id, product_code)
+                )
+
+            product_spec_dialog = getattr(getattr(self, "main_app", None), "product_spec_dialog", None)
+            if product_spec_dialog is not None:
+                product_code = str(getattr(product_spec_dialog, "product_code", "") or "").strip()
+                if product_code in updated_rates and hasattr(product_spec_dialog, "return_rate_input"):
+                    product_spec_dialog.return_rate_input.setText(f"{updated_rates[product_code]:.2f}")
+                    if hasattr(product_spec_dialog, "calculate_roi_metrics"):
+                        product_spec_dialog.calculate_roi_metrics()
+        except Exception as e:
+            print(f"同步商品退款率失败: {e}")
 
     def _auto_detect_columns(self, headers):
         """自动检测列映射"""
@@ -7897,6 +10569,7 @@ class StoreMarginDialog(QDialog):
     
     def update_orders_display(self):
         """更新单量列显示"""
+        self._normalize_imported_order_store_ids()
         # 获取当前导入的数据
         current_data = self.db.safe_fetchall("""
             SELECT product_id, spec_code, order_count, refund_count
@@ -7936,8 +10609,8 @@ class StoreMarginDialog(QDialog):
                         order_label.setText("0单")
                         order_label.setStyleSheet("color: #95a5a6; font-size: 19px;")
 
-            refund_orders_label = self.refund_widgets.get(row, {}).get('orders')
-            refund_ratio_label = self.refund_widgets.get(row, {}).get('ratio')
+            refund_orders_label = self.table.cellWidget(row, 12)
+            refund_ratio_label = self.table.cellWidget(row, 13)
             if user_product_id and user_product_id in prod_refund_data:
                 spec_data = prod_refund_data[user_product_id]
                 total_orders = sum(d[1] for d in spec_data)
@@ -8056,14 +10729,23 @@ class StoreMarginDialog(QDialog):
     
     def update_total_orders_label(self):
         """更新总单量标签"""
+        self._normalize_imported_order_store_ids()
         total_data = self.db.safe_fetchall("""
-            SELECT SUM(order_count) FROM imported_orders WHERE store_id=?
+            SELECT SUM(io.order_count) FROM imported_orders io
+            WHERE io.store_id=? AND EXISTS (
+                SELECT 1 FROM products p
+                JOIN product_specs ps ON ps.product_id=p.id AND ps.spec_code=io.spec_code
+                  AND COALESCE(ps.is_temporarily_off_shelf, 0)=0
+                WHERE p.store_id=io.store_id AND p.name=io.product_id
+                  AND COALESCE(p.is_archived, 0)=0 AND COALESCE(p.is_violation, 0)=0
+            )
         """, (self.store_id,))
         total = total_data[0][0] if total_data and total_data[0][0] else 0
         self.lbl_total_orders.setText(f"总单量: {total}")
 
     def update_order_range_label(self):
         """更新当前订单时间范围标签"""
+        self._normalize_imported_order_store_ids()
         date_data = self.db.safe_fetchall("""
             SELECT order_date FROM imported_orders WHERE store_id=? AND order_date IS NOT NULL
         """, (self.store_id,))
@@ -8102,6 +10784,7 @@ class StoreMarginDialog(QDialog):
 
     def update_compare_columns(self):
         """更新对比列数据 - 按订单时间范围与上一期对比"""
+        self._normalize_imported_order_store_ids()
         # 获取当前导入的数据
         current_data = self.db.safe_fetchall("""
             SELECT product_id, spec_code, order_count, order_date
@@ -8278,10 +10961,10 @@ class StoreMarginDialog(QDialog):
                 weight_label.setText("⚪ 0.00%")
                 weight_label.setStyleSheet("color: #7f8c8d; font-size: 19px;")
             elif weight_change > 0:
-                weight_label.setText(f"🟢 ↑{weight_change:.2f}%")
+                weight_label.setText(f"↑{weight_change:.2f}%")
                 weight_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
             else:
-                weight_label.setText(f"🔴 ↓{abs(weight_change):.2f}%")
+                weight_label.setText(f"↓{abs(weight_change):.2f}%")
                 weight_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
 
             # 单量对比
@@ -8295,10 +10978,10 @@ class StoreMarginDialog(QDialog):
                 order_change = current_orders - last_orders_count
 
                 if order_change > 0:
-                    order_label.setText(f"🟢 ↑{order_change}")
+                    order_label.setText(f"↑{order_change}")
                     order_label.setStyleSheet("color: #27ae60; font-size: 19px; font-weight: bold;")
                 elif order_change < 0:
-                    order_label.setText(f"🔴 ↓{abs(order_change)}")
+                    order_label.setText(f"↓{abs(order_change)}")
                     order_label.setStyleSheet("color: #c0392b; font-size: 19px; font-weight: bold;")
                 else:
                     order_label.setText("⚪ 0")
@@ -8716,5 +11399,561 @@ class ImportHistoryDialog(QDialog):
             self.parent_window.calculate_total_margin()
             self.parent_window.update_total_orders_label()
             self.parent_window.update_order_range_label()
-            self.parent_window.main_app.load_data_safe()
+            main_app = self.parent_window.main_app
+            if hasattr(main_app, "refresh_external_products"):
+                product_ids = [
+                    row[0] for row in self.parent_window.db.safe_fetchall(
+                        "SELECT id FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
+                        (self.parent_window.store_id,),
+                    )
+                ]
+                main_app.refresh_external_products(product_ids)
+            self.parent_window._flush_imported_data_to_archive()
             self.parent_window.main_app.show_toast("✅ 已应用")
+
+
+class StoreMarginExcelExporter:
+    """Headless store-margin Excel exporter used by batch export."""
+
+    MARGIN_HEADERS = [
+        "日期", "实发订单", "实发金额", "毛利润", "毛利率", "退款金额", "金额退款率",
+        "退款订单", "订单退款率", "件单价", "推广费", "推广占比",
+        "技术服务费", "扣款", "其他服务", "其他", "净利润",
+        "净利率", "单笔利润", "日盈亏",
+    ]
+    ORDER_HEADERS = [
+        "图片", "商品 ID", "商品标题", "综合成本", "客单价", "毛利", "权重 (%)",
+        "权重对比 较上周", "单量", "单量对比 较上周", "销售额", "主卖规格",
+        "退款率", "退款占比 最多规格", "链接备注",
+    ]
+
+    @staticmethod
+    def select_detail_products(parent, db, main_app, stores):
+        dialog = QDialog(None)
+        dialog.setWindowTitle("选择详细展示链接")
+        dialog.setWindowFlags(
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.resize(920, 680)
+        apply_window_icon(dialog, "store")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        tip = QLabel("单击左侧商品气泡加入展示箱；按住 Ctrl 连续单击也会逐个加入。导出后“商品规格售卖情况”只展示右侧展示箱里的链接。")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        store_combo = QComboBox()
+        for store_id, store_name in stores:
+            store_combo.addItem(str(store_name or f"店铺{store_id}"), int(store_id))
+        if len(stores) > 1:
+            layout.addWidget(store_combo)
+
+        search = QLineEdit()
+        search.setPlaceholderText("搜索商品ID或标题")
+        sort_combo = QComboBox()
+        sort_combo.addItem("按单量", "order")
+        sort_combo.addItem("按净利率", "net_margin")
+        sort_combo.addItem("按净利润", "net_profit")
+        sort_combo.addItem("按商品类型", "category")
+        sort_combo.addItem("按毛利率", "gross_margin")
+        sort_combo.addItem("按投产", "roi")
+        sort_combo.addItem("按投产倍数", "roi_multiple")
+        sort_index = sort_combo.findData(getattr(main_app, "product_sort_mode", "order"))
+        sort_combo.setCurrentIndex(sort_index if sort_index >= 0 else 0)
+        sort_combo.setFixedWidth(140)
+        sort_combo.setToolTip("仅调整当前选择窗口的链接顺序，不改变主界面排序")
+        search_row = QHBoxLayout()
+        search_row.addWidget(search, 1)
+        search_row.addWidget(QLabel("排序："))
+        search_row.addWidget(sort_combo)
+        layout.addLayout(search_row)
+
+        lists = QHBoxLayout()
+        left_box = QVBoxLayout()
+        right_box = QVBoxLayout()
+        left_title = QLabel("当前店铺链接")
+        right_title = QLabel("展示箱（点击移除）")
+        left_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        right_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        left_box.addWidget(left_title)
+        right_box.addWidget(right_title)
+        list_widget = QListWidget()
+        selected_widget = QListWidget()
+        for widget in (list_widget, selected_widget):
+            widget.setSelectionMode(QAbstractItemView.SingleSelection)
+            widget.setResizeMode(QListWidget.Adjust)
+            widget.setUniformItemSizes(False)
+            widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+            widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+            widget.setStyleSheet("""
+                QListWidget { border: 1px solid #d1d5db; background: #f8fafc; }
+                QListWidget::item { margin: 4px; padding: 0px; border: none; background: transparent; }
+                QListWidget::item:selected { background: #dbeafe; color: #111827; }
+            """)
+        left_box.addWidget(list_widget, 1)
+        right_box.addWidget(selected_widget, 1)
+        lists.addLayout(left_box, 1)
+        lists.addLayout(right_box, 1)
+        layout.addLayout(lists, 1)
+
+        selections = {}
+        product_cache = {}
+        left_items = {}
+        bubble_width = 330
+        bubble_height = 108
+        highlight_timer = QTimer(dialog)
+        highlight_timer.setSingleShot(True)
+        highlighted_bubble = {"widget": None}
+
+        def products_for_store(store_id):
+            sort_mode = sort_combo.currentData() or "order"
+            cache_key = (store_id, sort_mode)
+            if cache_key not in product_cache:
+                rows = db.safe_fetchall(
+                    """SELECT id, name, title, image_data, sort_order, product_category_label
+                       FROM products
+                       WHERE store_id=? AND COALESCE(is_archived, 0)=0""",
+                    (store_id,),
+                )
+                if hasattr(main_app, "_sort_products_for_display"):
+                    if hasattr(main_app, "_prepare_product_card_caches"):
+                        main_app._prepare_product_card_caches(store_id)
+                    rows = main_app._sort_products_for_display(rows, sort_mode)
+                else:
+                    rows = sorted(rows, key=lambda p: (p[4] if p[4] is not None else p[0], p[0]))
+                product_cache[cache_key] = rows
+                selections.setdefault(store_id, set())
+            return product_cache[cache_key]
+
+        def current_store_id():
+            return int(store_combo.currentData())
+
+        def make_bubble(sys_id, product_code, title, image_data):
+            bubble = QWidget()
+            bubble.setObjectName("ExportProductBubble")
+            bubble.setFixedSize(bubble_width, bubble_height)
+            bubble.setProperty("normal_style", "#ExportProductBubble { background-color: #545e47; border: none; border-radius: 8px; }")
+            bubble.setProperty("highlight_style", "#ExportProductBubble { background-color: #00e5ff; border: 3px solid #111111; border-radius: 8px; }")
+            bubble.setStyleSheet(bubble.property("normal_style"))
+            outer = QHBoxLayout(bubble)
+            outer.setContentsMargins(4, 4, 4, 4)
+            outer.setSpacing(6)
+
+            img = QLabel("无图")
+            img.setFixedSize(100, 100)
+            img.setAlignment(Qt.AlignCenter)
+            img.setStyleSheet("background: #eef2f7; color: #6b7280; border-radius: 4px; font-size: 12px;")
+            if image_data:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(image_data):
+                    img.setPixmap(pixmap.scaled(100, 100, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            outer.addWidget(img)
+
+            info = QVBoxLayout()
+            info.setContentsMargins(0, 0, 0, 0)
+            info.setSpacing(2)
+            code = QLabel(str(product_code))
+            code.setStyleSheet("color: #fffdf5; font-weight: bold; font-size: 12px; background: transparent;")
+            name = QLabel(str(title or ""))
+            name.setWordWrap(False)
+            name.setFixedHeight(18)
+            name.setStyleSheet("color: #202020; font-weight: bold; font-size: 11px; background-color: rgba(255,255,255,115); border-radius: 5px; padding: 1px 4px;")
+            name.setToolTip(str(title or ""))
+
+            try:
+                metrics = main_app.get_product_gross_margin_metrics(sys_id) if hasattr(main_app, "get_product_gross_margin_metrics") else {}
+            except Exception:
+                metrics = {}
+            margin = metrics.get("gross_margin_pct")
+            margin_text = f"毛利率:{float(margin):.1f}%" if margin is not None else "毛利率:-"
+            try:
+                order_count = main_app._get_product_order_count(str(product_code), current_store_id()) if hasattr(main_app, "_get_product_order_count") else 0
+            except Exception:
+                order_count = 0
+            try:
+                net_margin = main_app._calculate_product_net_margin(sys_id) if hasattr(main_app, "_calculate_product_net_margin") else None
+            except Exception:
+                net_margin = None
+            net_text = f"净利率:{float(net_margin):.1f}%" if net_margin is not None else "净利率:-"
+            rows = db.safe_fetchall("SELECT current_roi, is_natural_flow, is_sitewide_managed FROM products WHERE id=?", (sys_id,))
+            roi, natural, sitewide = rows[0] if rows else (0, 0, 0)
+            mode = "自然流" if natural else "全站" if sitewide else f"投产:{float(roi or 0):.2f}"
+            metrics_label = QLabel(f"{margin_text}  单量:{int(order_count or 0)}单\n{net_text}  {mode}")
+            metrics_label.setStyleSheet("color: #fffdf5; font-size: 12px; font-weight: bold; background: transparent;")
+            metrics_label.setWordWrap(True)
+            info.addWidget(code)
+            info.addWidget(name)
+            info.addWidget(metrics_label)
+            info.addStretch()
+            outer.addLayout(info, 1)
+            return bubble
+
+        def set_bubble_highlight(bubble, active):
+            bubble.setStyleSheet(bubble.property("highlight_style") if active else bubble.property("normal_style"))
+
+        def reload_products():
+            store_id = current_store_id()
+            highlight_timer.stop()
+            clear_search_highlight()
+            list_widget.clear()
+            left_items.clear()
+            for sys_id, product_code, title, image_data, *_rest in products_for_store(store_id):
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, str(product_code))
+                item.setSizeHint(QSize(bubble_width + 12, bubble_height + 10))
+                list_widget.addItem(item)
+                bubble = make_bubble(sys_id, product_code, title, image_data)
+                list_widget.setItemWidget(item, bubble)
+                left_items[str(product_code)] = (item, bubble)
+                if str(title or "").strip():
+                    left_items.setdefault(str(title or "").strip().casefold(), (item, bubble))
+            left_title.setText(f"当前店铺链接（{list_widget.count()}）")
+            reload_showcase()
+
+        def clear_search_highlight():
+            bubble = highlighted_bubble.get("widget")
+            if bubble is not None:
+                try:
+                    set_bubble_highlight(bubble, False)
+                except Exception:
+                    pass
+            highlighted_bubble["widget"] = None
+
+        def apply_search_highlight():
+            query = search.text().strip()
+            clear_search_highlight()
+            if not query:
+                return
+            match = left_items.get(query) or left_items.get(query.casefold())
+            if not match:
+                return
+            item, bubble = match
+            list_widget.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+            list_widget.setCurrentItem(item)
+            set_bubble_highlight(bubble, True)
+            highlighted_bubble["widget"] = bubble
+            highlight_timer.start(2000)
+
+        def reload_showcase():
+            store_id = current_store_id()
+            selected_widget.clear()
+            selected = selections.setdefault(store_id, set())
+            products = {str(row[1]): row for row in products_for_store(store_id)}
+            for product_code in [str(row[1]) for row in products_for_store(store_id) if str(row[1]) in selected]:
+                sys_id, _code, title, image_data, *_rest = products[product_code]
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, product_code)
+                item.setSizeHint(QSize(bubble_width + 12, bubble_height + 10))
+                selected_widget.addItem(item)
+                selected_widget.setItemWidget(item, make_bubble(sys_id, product_code, title, image_data))
+            right_title.setText(f"展示箱（{selected_widget.count()}，点击移除）")
+
+        def add_to_showcase(item):
+            store_id = current_store_id()
+            selected = selections.setdefault(store_id, set())
+            selected.add(str(item.data(Qt.UserRole)))
+            reload_showcase()
+
+        def remove_from_showcase(item):
+            selections.setdefault(current_store_id(), set()).discard(str(item.data(Qt.UserRole)))
+            reload_showcase()
+
+        actions = QHBoxLayout()
+        btn_add_all = QPushButton("全部加入展示箱")
+        btn_clear = QPushButton("清空展示箱")
+        actions.addWidget(btn_add_all)
+        actions.addWidget(btn_clear)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        btn_add_all.clicked.connect(lambda: (selections.__setitem__(current_store_id(), {str(row[1]) for row in products_for_store(current_store_id())}), reload_showcase()))
+        btn_clear.clicked.connect(lambda: (selections.__setitem__(current_store_id(), set()), reload_showcase()))
+        store_combo.currentIndexChanged.connect(reload_products)
+        sort_combo.currentIndexChanged.connect(reload_products)
+        search.textChanged.connect(apply_search_highlight)
+        highlight_timer.timeout.connect(clear_search_highlight)
+        list_widget.itemClicked.connect(add_to_showcase)
+        selected_widget.itemClicked.connect(remove_from_showcase)
+        reload_products()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确认导出")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        layout.addWidget(buttons)
+
+        result = {"accepted": False}
+        loop = QEventLoop()
+
+        def finish(accepted):
+            result["accepted"] = accepted
+            dialog.hide()
+            loop.quit()
+
+        buttons.accepted.connect(lambda: finish(True))
+        buttons.rejected.connect(lambda: finish(False))
+        dialog.rejected.connect(lambda: finish(False))
+        holders = getattr(main_app, "_store_margin_export_selector_windows", [])
+        holders.append(dialog)
+        main_app._store_margin_export_selector_windows = holders
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        loop.exec_()
+
+        if not result["accepted"]:
+            return None
+        for store_id, _store_name in stores:
+            products_for_store(int(store_id))
+        return selections
+
+    def __init__(self, store_id, store_name, main_app, image_quality="clear", detail_product_ids=None):
+        self.store_id = store_id
+        self.store_name = store_name
+        self.main_app = main_app
+        self.db = main_app.db
+        self.export_image_quality = image_quality or "clear"
+        self.export_detail_product_ids = None if detail_product_ids is None else {str(value) for value in detail_product_ids}
+        self._excel_export_image_cache = {}
+        rows = self.db.safe_fetchall(
+            "SELECT id, name FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
+            (self.store_id,),
+        )
+        self.sys_id_to_user_id = {row[0]: row[1] for row in rows}
+        try:
+            self._normalize_imported_order_store_ids()
+        except Exception:
+            pass
+
+    def _write_historical_export_sheet(self, wb, sheet_name="过往数据分析", create_sheet=False):
+        ws = wb.create_sheet() if create_sheet else wb.active
+        ws.title = sheet_name
+        ws.append(self.MARGIN_HEADERS)
+        row_types = {}
+        compare_directions = {}
+        records = self.load_manual_data()
+        for index, record in enumerate(records):
+            ws.append(self._format_manual_record_for_export(record))
+            data_row = ws.max_row
+            row_types[data_row] = "data"
+            ws.row_dimensions[data_row].height = 34
+            if index > 0:
+                compare_values, directions = self._manual_compare_export_row(record, records[index - 1])
+                ws.append(compare_values)
+                compare_row = ws.max_row
+                row_types[compare_row] = "compare"
+                ws.row_dimensions[compare_row].height = 24
+                for col_idx, direction in enumerate(directions, start=1):
+                    compare_directions[(compare_row, col_idx)] = direction
+        self._style_historical_export_sheet(
+            ws,
+            row_types,
+            compare_directions,
+            {
+                1: 20, 2: 12, 3: 14, 4: 14, 5: 12,
+                6: 14, 7: 12, 8: 12, 9: 12, 10: 12,
+                11: 12, 12: 12, 13: 14, 14: 12, 15: 14,
+                16: 12, 17: 14, 18: 12, 19: 14, 20: 14,
+            },
+        )
+        ws.freeze_panes = "A2"
+        self._append_reading_mode_images_to_historical_sheet(ws)
+
+    def _product_avg_price_and_amount_for_export(self, product_code, sys_id):
+        imported_totals = self.db.safe_fetchall(
+            """SELECT COALESCE(SUM(order_count), 0), COALESCE(SUM(actual_amount), 0)
+               FROM imported_orders
+               WHERE store_id=? AND product_id=?""",
+            (self.store_id, product_code),
+        )
+        imported_orders = imported_totals[0][0] if imported_totals else 0
+        imported_amount = imported_totals[0][1] if imported_totals else 0
+        if imported_orders and imported_amount and imported_amount > 0:
+            return imported_amount / imported_orders, imported_amount
+
+        spec_sales = self.db.safe_fetchall(
+            "SELECT ps.sale_price, io.order_count FROM product_specs ps "
+            "LEFT JOIN imported_orders io ON io.product_id=? AND io.spec_code=ps.spec_code "
+            "WHERE ps.product_id=? AND COALESCE(ps.is_temporarily_off_shelf, 0)=0",
+            (product_code, sys_id),
+        )
+        total_amount = 0.0
+        total_orders = 0
+        for sale_price, order_count in spec_sales:
+            if sale_price and order_count:
+                total_amount += float(sale_price) * int(order_count)
+                total_orders += int(order_count)
+        if total_orders > 0:
+            return total_amount / total_orders, total_amount
+        return None, None
+
+    def _order_refund_summary_for_export(self, product_code):
+        spec_counts = self.db.safe_fetchall(
+            """SELECT spec_code, order_count, refund_count
+               FROM imported_orders
+               WHERE store_id=? AND product_id=?""",
+            (self.store_id, product_code),
+        )
+        if not spec_counts:
+            return "无", "无"
+        total_orders = sum(int(row[1] or 0) for row in spec_counts)
+        total_refund = sum(int(row[2] or 0) for row in spec_counts)
+        if total_orders <= 0 or total_refund <= 0:
+            return "0.00%" if total_orders > 0 else "无", "无"
+
+        refund_rate = total_refund / total_orders * 100
+        valid_spec_codes = self._get_valid_spec_codes(product_code)
+        display_spec_data = [
+            item for item in spec_counts
+            if not valid_spec_codes or (item[0] and str(item[0]).strip() in valid_spec_codes)
+        ]
+        max_refund_spec = None
+        max_refund_rate = -1
+        for spec_code, order_count, refund_count in display_spec_data:
+            order_count = int(order_count or 0)
+            refund_count = int(refund_count or 0)
+            if order_count > 0 and refund_count > 0:
+                current_rate = refund_count / order_count
+                if current_rate > max_refund_rate:
+                    max_refund_rate = current_rate
+                    max_refund_spec = spec_code
+        if max_refund_spec:
+            mode = self._get_spec_display_mode("store_margin_refund_spec_display")
+            spec_text = self._get_spec_display_text(product_code, max_refund_spec, mode)
+        else:
+            spec_text = "无"
+        return f"{refund_rate:.2f}%", spec_text
+
+    def _write_orders_export_sheet(self, wb):
+        ws = wb.create_sheet("店铺商品权重")
+        ws.append(self.ORDER_HEADERS)
+        image_refs = []
+        image_size = self._export_product_image_size()
+        products = self.db.safe_fetchall(
+            """SELECT id, name, title, image_data, sort_order, product_category_label,
+                      store_weight, store_weight_locked, product_memo
+               FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0
+                 AND COALESCE(is_violation, 0)=0""",
+            (self.store_id,),
+        )
+        if hasattr(self.main_app, "_sort_products_for_display"):
+            extra_by_id = {product[0]: product[6:] for product in products}
+            sorted_products = self.main_app._sort_products_for_display([
+                (product[0], product[1], product[2], product[3], product[4], product[5])
+                for product in products
+            ])
+            products = [
+                (*product, *extra_by_id.get(product[0], (0, 0)))
+                for product in sorted_products
+            ]
+        else:
+            products = sorted(products, key=lambda p: (p[4] if p[4] is not None else p[0], p[0]))
+
+        for product in products:
+            sys_id, product_code, title, image_data = product[0], product[1], product[2], product[3]
+            store_weight = product[6] if len(product) > 6 else 0
+            cost, price, margin = self.get_product_margin(sys_id)
+            avg_price, sales_amount = self._product_avg_price_and_amount_for_export(product_code, sys_id)
+            if avg_price is not None:
+                price = avg_price
+            order_rows = self.db.safe_fetchall(
+                """SELECT COALESCE(SUM(order_count), 0)
+                   FROM imported_orders WHERE store_id=? AND product_id=?""",
+                (self.store_id, product_code),
+            )
+            total_orders = int(order_rows[0][0] or 0) if order_rows else 0
+            main_spec_code, spec_orders = self.get_main_spec(product_code)
+            if spec_orders > 0 and main_spec_code:
+                mode = self._get_spec_display_mode("store_margin_main_spec_display")
+                main_spec = self._get_spec_display_text(product_code, main_spec_code, mode)
+            else:
+                main_spec = "无"
+            refund_rate, refund_spec = self._order_refund_summary_for_export(product_code)
+            ws.append([
+                "",
+                str(product_code or ""),
+                str(title or ""),
+                f"¥{cost:.2f}" if cost else "¥0.00",
+                f"¥{price:.2f}" if price else "-",
+                f"{margin:.2f}%" if margin else "0.00%",
+                f"{float(store_weight or 0):.2f}%",
+                "-",
+                f"{total_orders}单",
+                "-",
+                f"¥{float(sales_amount or 0):.2f}" if sales_amount else "-",
+                main_spec,
+                refund_rate,
+                refund_spec,
+                str(product[8] or "") if len(product) > 8 else "",
+            ])
+            excel_row = ws.max_row
+            self._set_square_image_cell(ws, excel_row, 1, image_size)
+            self._add_export_image(ws, image_data, f"A{excel_row}", image_size, image_refs, "商品")
+        ws._image_stream_refs = image_refs
+        self._style_excel_sheet(ws, {
+            1: self._excel_column_width_for_pixels(image_size),
+            2: 14, 3: 24, 4: 11, 5: 11, 6: 10, 7: 10,
+            8: 12, 9: 10, 10: 12, 11: 12, 12: 16, 13: 10, 14: 18, 15: 28,
+        })
+        ws.freeze_panes = "A2"
+
+    _current_store_product_codes = StoreMarginDialog._current_store_product_codes
+    _normalize_imported_order_store_ids = StoreMarginDialog._normalize_imported_order_store_ids
+    get_user_id_by_sys_id = StoreMarginDialog.get_user_id_by_sys_id
+    get_sys_id_by_user_id = StoreMarginDialog.get_sys_id_by_user_id
+    _get_spec_display_mode = StoreMarginDialog._get_spec_display_mode
+    _get_spec_display_text = StoreMarginDialog._get_spec_display_text
+    _get_valid_spec_codes = StoreMarginDialog._get_valid_spec_codes
+    get_main_spec = StoreMarginDialog.get_main_spec
+    get_product_margin = StoreMarginDialog.get_product_margin
+    load_manual_data = StoreMarginDialog.load_manual_data
+    _format_manual_record_for_export = StoreMarginDialog._format_manual_record_for_export
+    _export_period_day_text = StoreMarginDialog._export_period_day_text
+    _export_day_text = StoreMarginDialog._export_day_text
+    _manual_record_numeric_values_for_export = StoreMarginDialog._manual_record_numeric_values_for_export
+    _manual_compare_export_row = StoreMarginDialog._manual_compare_export_row
+    _style_excel_sheet = StoreMarginDialog._style_excel_sheet
+    _style_historical_export_sheet = StoreMarginDialog._style_historical_export_sheet
+    _export_month_text = StoreMarginDialog._export_month_text
+    _reading_mode_images_for_export = StoreMarginDialog._reading_mode_images_for_export
+    _add_reading_export_image = StoreMarginDialog._add_reading_export_image
+    _high_res_export_image_stream = StoreMarginDialog._high_res_export_image_stream
+    _thumbnail_export_image_stream = StoreMarginDialog._thumbnail_export_image_stream
+    _append_reading_mode_images_to_historical_sheet = StoreMarginDialog._append_reading_mode_images_to_historical_sheet
+    _safe_export_float = StoreMarginDialog._safe_export_float
+    _fmt_export_money = StoreMarginDialog._fmt_export_money
+    _fmt_export_pct = StoreMarginDialog._fmt_export_pct
+    _fmt_export_number = StoreMarginDialog._fmt_export_number
+    _split_spec_name_for_export = StoreMarginDialog._split_spec_name_for_export
+    _promotion_summary_for_export = StoreMarginDialog._promotion_summary_for_export
+    _roi_summary_for_export = StoreMarginDialog._roi_summary_for_export
+    _previous_week_range_for_export = StoreMarginDialog._previous_week_range_for_export
+    _weekday_cn_for_export = StoreMarginDialog._weekday_cn_for_export
+    _operation_record_color_for_export = StoreMarginDialog._operation_record_color_for_export
+    _style_operation_record_export_row = StoreMarginDialog._style_operation_record_export_row
+    _first_number_for_export = StoreMarginDialog._first_number_for_export
+    _brief_change_text_for_export = StoreMarginDialog._brief_change_text_for_export
+    _record_briefs_for_export = StoreMarginDialog._record_briefs_for_export
+    _products_for_specs_export = StoreMarginDialog._products_for_specs_export
+    _product_order_map_for_export = StoreMarginDialog._product_order_map_for_export
+    _product_export_context = StoreMarginDialog._product_export_context
+    _set_range_fill = StoreMarginDialog._set_range_fill
+    _style_product_specs_block = StoreMarginDialog._style_product_specs_block
+    _style_product_specs_export_range = StoreMarginDialog._style_product_specs_export_range
+    _excel_column_width_for_pixels = StoreMarginDialog._excel_column_width_for_pixels
+    _excel_row_height_for_pixels = StoreMarginDialog._excel_row_height_for_pixels
+    _set_square_image_cell = StoreMarginDialog._set_square_image_cell
+    _export_image_quality_config = StoreMarginDialog._export_image_quality_config
+    _export_product_image_size = StoreMarginDialog._export_product_image_size
+    _export_image_embed_size = StoreMarginDialog._export_image_embed_size
+    _square_image_stream = StoreMarginDialog._square_image_stream
+    _add_export_image = StoreMarginDialog._add_export_image
+    _operation_record_export_cells = StoreMarginDialog._operation_record_export_cells
+    _write_product_specs_export_sheet = StoreMarginDialog._write_product_specs_export_sheet
+    export_margin_excel_to_path = StoreMarginDialog.export_margin_excel_to_path

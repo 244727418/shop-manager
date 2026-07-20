@@ -8,6 +8,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import time
 
+try:
+    from ..window_icons import apply_window_icon
+except ImportError:
+    from window_icons import apply_window_icon
+
 SPEC_PROMPT_VERSION = "sku_axis_product_memo_deterrence_v4"
 
 
@@ -97,6 +102,7 @@ class ApiConfigDialog(QDialog):
     def __init__(self, db_manager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        apply_window_icon(self, "api")
         self.setWindowTitle("🔑 API配置")
         self.resize(550, 450)
         self.init_ui()

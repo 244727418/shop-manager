@@ -3,10 +3,6 @@
 import os
 import shutil
 import tempfile
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import pandas as pd  # type: ignore
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -41,12 +37,13 @@ def _copy_to_temp_file(file_path):
 def _read_cost_file_direct(file_path, **kwargs):
     import pandas as pd  # type: ignore
 
-    if file_path.lower().endswith(".csv"):
+    suffix = os.path.splitext(file_path)[1].lower()
+    if suffix == ".csv":
         try:
             return pd.read_csv(file_path, encoding="utf-8-sig", **kwargs)
         except UnicodeDecodeError:
             return pd.read_csv(file_path, encoding="gbk", **kwargs)
-    return pd.read_excel(file_path, engine="openpyxl", **kwargs)
+    return pd.read_excel(file_path, engine="xlrd" if suffix == ".xls" else "openpyxl", **kwargs)
 
 
 def read_cost_file(file_path, **kwargs):
@@ -219,6 +216,19 @@ class CostImportDialog(QDialog):
         self.chk_unit_by_quantity.setStyleSheet("color: #555; padding: 4px;")
         layout.addWidget(self.chk_unit_by_quantity)
 
+        update_layout = QHBoxLayout()
+        update_layout.addWidget(QLabel("已有规格更新字段:"))
+        self.chk_update_all = QCheckBox("全选")
+        self.chk_update_category = QCheckBox("商品类型")
+        self.chk_update_name = QCheckBox("商品名称")
+        self.chk_update_quantity = QCheckBox("数量")
+        self.chk_update_cost = QCheckBox("成本价")
+        for chk in (self.chk_update_all, self.chk_update_category, self.chk_update_name, self.chk_update_quantity, self.chk_update_cost):
+            chk.setChecked(True)
+            update_layout.addWidget(chk)
+        self.chk_update_all.toggled.connect(self._toggle_update_fields)
+        layout.addLayout(update_layout)
+
         self.chk_import_attribute = QCheckBox("导入产品属性")
         self.chk_import_attribute.toggled.connect(self._toggle_attribute_mapping)
         layout.addWidget(self.chk_import_attribute)
@@ -256,13 +266,15 @@ class CostImportDialog(QDialog):
     def _toggle_attribute_mapping(self, checked):
         self.attribute_widget.setVisible(bool(checked))
 
+    def _toggle_update_fields(self, checked):
+        for chk in (self.chk_update_category, self.chk_update_name, self.chk_update_quantity, self.chk_update_cost):
+            chk.setChecked(bool(checked))
+
     def _read_columns(self):
         return read_cost_file(self.file_path, nrows=0, header=0).columns.tolist()
 
     def load_columns(self):
         try:
-            import pandas as pd  # type: ignore
-
             if not os.path.exists(self.file_path):
                 raise Exception("文件路径不存在")
 
@@ -447,3 +459,11 @@ class CostImportDialog(QDialog):
 
     def should_unit_by_quantity(self):
         return self.cost_mode == "detail" and self.chk_unit_by_quantity.isChecked()
+
+    def get_update_fields(self):
+        return {
+            "category": self.chk_update_category.isChecked(),
+            "name": self.chk_update_name.isChecked(),
+            "quantity": self.chk_update_quantity.isChecked(),
+            "cost": self.chk_update_cost.isChecked(),
+        }

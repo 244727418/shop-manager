@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="7" y="8" width="50" height="48" rx="10" fill="#687886"/>
+  <path d="M18 19h28v28H18z" fill="#fff8e7"/>
+  <path d="M18 28h28M18 37h28M28 19v28M38 19v28" stroke="#d7bc7b" stroke-width="2"/>
+  <circle cx="20" cy="20" r="7" fill="#d6a34a"/>
+  <text x="20" y="24" text-anchor="middle" font-size="12" font-family="Arial" font-weight="bold" fill="#fff">¥</text>
+</svg>
