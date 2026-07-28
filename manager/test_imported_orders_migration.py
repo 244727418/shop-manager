@@ -32,7 +32,10 @@ def main():
         db = SafeDatabaseManager(path)
         info = {row[1]: row[2].upper() for row in db.cursor.execute("PRAGMA table_info(imported_orders)")}
         assert info["product_id"] == "TEXT", info
-        assert {"order_date", "actual_amount", "refund_count"} <= set(info), info
+        assert {
+            "order_date", "actual_amount", "refund_count", "refund_amount",
+            "period_start", "period_end",
+        } <= set(info), info
         db.conn.close()
         print("OK")
     finally:

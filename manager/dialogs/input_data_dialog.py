@@ -394,11 +394,11 @@ class InputDataDialog(QDialog):
         if self.refund_import_panel and self.refund_import_panel.isVisible():
             self._position_refund_import_panel()
 
-    def closeEvent(self, event):
+    def done(self, result):
         self.refund_paste_shortcut.setEnabled(False)
         if self.refund_import_panel:
             self.refund_import_panel.close()
-        super().closeEvent(event)
+        super().done(result)
 
     @staticmethod
     def _normalize_number_input(editor, text):

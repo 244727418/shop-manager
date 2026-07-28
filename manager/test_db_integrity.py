@@ -173,7 +173,7 @@ def test_order_import_replace_is_atomic(tmp_path):
         "WHEN NEW.product_id='new' BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
     history = (1, "now", "orders.xlsx", 1, 1, 2, 20.0, "{}")
-    rows = [(1, "new", "new-sku", 2, "now", None, 20.0, 0)]
+    rows = [(1, "new", "new-sku", 2, "now", None, 20.0, 0, 0.0, "2026-07-06", "2026-07-12")]
 
     with pytest.raises(sqlite3.IntegrityError):
         db.replace_imported_orders(1, history, rows)

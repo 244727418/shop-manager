@@ -2,7 +2,7 @@ import os
 import json
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 import sys
@@ -11,7 +11,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.stdout.reconfigure(encoding="utf-8")
 
 from PyQt5.QtCore import QEvent, QPoint, QRect, QTimer, Qt
-from PyQt5.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton, QTableWidget, QVBoxLayout, QWidget
+from PyQt5.QtGui import QFont, QHelpEvent
+from PyQt5.QtWidgets import QApplication, QComboBox, QDialog, QGridLayout, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton, QTableWidget, QVBoxLayout, QWidget
 from PyQt5 import sip
 
 try:
@@ -19,9 +20,9 @@ try:
     import manager.shop_manager as shop_manager_module
     from manager.pdd_browser_monitor import PddBrowserMonitor
     from manager.archive_manager import ArchiveManager
-    from manager.shop_manager import OrderedFlowLayout, ShopManagerApp, _promotion_link_visible, auto_start_command
+    from manager.shop_manager import OrderedFlowLayout, ShopManagerApp, _promotion_link_visible, _set_application_font_family, auto_start_command
     from manager.db import SafeDatabaseManager
-    from manager.widgets.product_store import ProductWidget, StoreWidget, _MetricState, _bubble_metric_foreground, _bubble_metric_typography, _net_margin_background_color
+    from manager.widgets.product_store import ProductWidget, StoreWidget, _MetricState, _bubble_metric_foreground, _bubble_metric_typography, _expected_profit_for_100, _net_margin_background_color
     from manager.dialogs.promotion_data import PromotionDataDialog
     from manager.dialogs.records import OperationRecordDialog
     from manager.dialogs.store_margin import PddProductMatchDialog, StoreMarginDialog, StoreMarginExcelExporter
@@ -30,9 +31,9 @@ except ModuleNotFoundError:
     import shop_manager as shop_manager_module
     from pdd_browser_monitor import PddBrowserMonitor
     from archive_manager import ArchiveManager
-    from shop_manager import OrderedFlowLayout, ShopManagerApp, _promotion_link_visible, auto_start_command
+    from shop_manager import OrderedFlowLayout, ShopManagerApp, _promotion_link_visible, _set_application_font_family, auto_start_command
     from db import SafeDatabaseManager
-    from widgets.product_store import ProductWidget, StoreWidget, _MetricState, _bubble_metric_foreground, _bubble_metric_typography, _net_margin_background_color
+    from widgets.product_store import ProductWidget, StoreWidget, _MetricState, _bubble_metric_foreground, _bubble_metric_typography, _expected_profit_for_100, _net_margin_background_color
     from dialogs.promotion_data import PromotionDataDialog
     from dialogs.records import OperationRecordDialog
     from dialogs.store_margin import PddProductMatchDialog, StoreMarginDialog, StoreMarginExcelExporter
@@ -76,6 +77,328 @@ class SearchCheckWindow(QMainWindow):
 
     def _scroll_to_first_search_match(self, rows):
         self.scrolled_rows = set(rows)
+
+
+def test_staggered_data_mode_render():
+    app = QApplication.instance() or QApplication([])
+
+    class StaggeredBubble(QLabel):
+        def __init__(self, prod_id, prod_code, title, _image_data, _main_app, display_mode="bubble"):
+            super().__init__(title)
+            self.prod_id = prod_id
+            self.prod_code = prod_code
+
+        def set_search_highlight(self, active):
+            self.search_highlighted = active
+
+    class StaggeredHost:
+        _render_next_data_mode_link = ShopManagerApp._render_next_data_mode_link
+
+        def _visible_product_ids(self):
+            return {1, 2}
+
+        def is_real_promotion_data_mode(self):
+            return False
+
+        def _apply_data_mode_store_visibility(self):
+            self.render_finished = True
+
+        def _update_sticky_store_header(self):
+            pass
+
+        def _current_main_view_change_token(self):
+            return (2, 1)
+
+    section = QWidget()
+    flow_layout = QVBoxLayout(section)
+    staggered_host = StaggeredHost()
+    staggered_host._data_mode_render_token = 2
+    staggered_host._data_mode_render_index = 0
+    staggered_host._data_mode_render_jobs = [
+        (10, section, flow_layout, (1, "P1", "链接一", None)),
+        (10, section, flow_layout, (2, "P2", "链接二", None)),
+    ]
+    staggered_host._data_mode_render_saved_scroll = 0
+    staggered_host.product_store_map = {1: 10, 2: 10}
+    staggered_host.bubble_product_widgets = {}
+    staggered_host.current_search_match_ids = None
+    staggered_host.db = type("DB", (), {"get_setting": lambda _self, *_args: "0"})()
+    staggered_host.data_mode_scroll = type("Scroll", (), {
+        "verticalScrollBar": lambda _self: type("Bar", (), {"setValue": lambda _self, _value: None})()
+    })()
+
+    original_product_widget = shop_manager_module.ProductWidget
+    shop_manager_module.ProductWidget = StaggeredBubble
+    try:
+        staggered_host._render_next_data_mode_link(1)
+        assert not staggered_host.bubble_product_widgets
+        staggered_host._render_next_data_mode_link(2)
+        assert list(staggered_host.bubble_product_widgets) == [1]
+        deadline = time.time() + 1
+        while not getattr(staggered_host, "render_finished", False) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert list(staggered_host.bubble_product_widgets) == [1, 2]
+        assert staggered_host.render_finished
+    finally:
+        shop_manager_module.ProductWidget = original_product_widget
+
+
+def test_search_miss_keeps_all_links_visible():
+    app = QApplication.instance() or QApplication([])
+    search = SearchCheckWindow()
+    search.search_input.setText("not-found")
+    search.show_toast = lambda message, duration: setattr(search, "toast", (message, duration))
+
+    search.apply_realtime_search()
+
+    assert search.current_search_match_ids is None
+    assert not search.table.isRowHidden(0) and not search.table.isRowHidden(1)
+    assert search.toast == ("没有找到对应的内容", 500)
+
+
+def test_store_task_ratio_uses_current_link_total():
+    app = QApplication.instance() or QApplication([])
+
+    class RatioDB:
+        def safe_fetchall(self, query, params=()):
+            assert params == (1,)
+            if "COUNT(*) FROM products" in query:
+                assert "is_archived" in query and "is_violation" not in query
+                return [(42,)]
+            return [(2, 3)]
+
+    widget = StoreWidget.__new__(StoreWidget)
+    QWidget.__init__(widget)
+    widget.store_id = 1
+    widget.display_mode = "bubble"
+    widget.db = RatioDB()
+    widget.task_ratio_widget = QWidget(widget)
+    widget.garbage_ratio_badge = QLabel(widget)
+    widget.garbage_ratio_label = QLabel(widget)
+    widget.waste_ratio_badge = QLabel(widget)
+    widget.waste_ratio_label = QLabel(widget)
+
+    widget._refresh_garbage_ratio_label()
+
+    assert "2/42" in widget.garbage_ratio_label.text()
+    assert "3/42" in widget.waste_ratio_label.text()
+    widget._store_foreground = "#fffdf5"
+    widget.sync_flag_label = QLabel(widget)
+    widget.label = QLabel(widget)
+    widget.memo_label = QLabel(widget)
+    widget.margin_label = QLabel(widget)
+    widget.net_margin_label = QLabel(widget)
+    widget.avg_price_label = QLabel(widget)
+    widget._apply_bubble_store_label_styles()
+    assert "color: #111111" in widget.garbage_ratio_label.styleSheet()
+    assert "color: #111111" in widget.waste_ratio_label.styleSheet()
+
+
+def test_font_family_switch_preserves_default_size():
+    app = QApplication.instance() or QApplication([])
+    original = QFont(app.font())
+    enlarged = QFont(original)
+    enlarged.setPointSize(13)
+    app.setFont(enlarged)
+
+    class RefreshProbe(QWidget):
+        geometry_updates = 0
+        paint_updates = 0
+
+        def updateGeometry(self):
+            self.geometry_updates += 1
+            super().updateGeometry()
+
+        def update(self):
+            self.paint_updates += 1
+            super().update()
+
+    widget = RefreshProbe()
+    try:
+        _set_application_font_family("Microsoft YaHei")
+        assert app.font().pointSize() == 13
+        assert widget.font().family() == "Microsoft YaHei"
+        assert widget.geometry_updates == 1
+        assert widget.paint_updates == 1
+    finally:
+        widget.deleteLater()
+        app.setFont(original)
+
+
+def test_expected_profit_uses_natural_sales_or_promotion_spend_basis():
+    assert round(_expected_profit_for_100(True, 0.30, 10, 4), 2) == 26.40
+    assert round(_expected_profit_for_100(False, 0.30, 10, 4), 2) == 5.60
+    assert _expected_profit_for_100(False, 0.30, 10, 0) is None
+
+
+def test_created_time_sort_defaults_descending_and_direction_toggles():
+    app = QApplication.instance() or QApplication([])
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db = SafeDatabaseManager(str(Path(temp_dir) / "sort.db"))
+        db.safe_execute("INSERT INTO stores (id, name, sort_order) VALUES (1, '店铺', 1)")
+        db.safe_execute("INSERT INTO products (store_id, name) VALUES (1, '新链接')")
+        assert db.safe_fetchall("SELECT created_at FROM products")[0][0]
+        db.conn.close()
+
+    sort_host = type("CreatedSortHost", (), {
+        "_sort_products_for_display": ShopManagerApp._sort_products_for_display,
+        "_build_product_sort_info": ShopManagerApp._build_product_sort_info,
+        "get_product_card_data": lambda self, _product_id: {},
+        "_get_product_order_count": lambda self, _code, _store_id: 0,
+        "_calculate_product_net_margin": lambda self, _product_id: None,
+    })()
+    sort_host.product_sort_mode = "created_at"
+    sort_host.product_sort_descending = True
+    sort_host._product_task_states = {}
+    products = [
+        (1, "A", "", None, 1, "", "2026-07-01 10:00:00"),
+        (2, "B", "", None, 2, "", "2026-07-03 10:00:00"),
+        (3, "C", "", None, 3, "", "2026-07-02 10:00:00"),
+    ]
+    assert [row[0] for row in sort_host._sort_products_for_display(products)] == [2, 3, 1]
+    sort_host.product_sort_descending = False
+    assert [row[0] for row in sort_host._sort_products_for_display(products)] == [1, 3, 2]
+
+    direction_host = type("DirectionHost", (), {
+        "toggle": ShopManagerApp.toggle_product_sort_direction,
+        "update": ShopManagerApp._update_product_sort_direction_button,
+        "_update_product_sort_direction_button": ShopManagerApp._update_product_sort_direction_button,
+        "_refresh_product_sort_display": lambda self: setattr(self, "refreshed", True),
+    })()
+    direction_host.product_sort_descending = True
+    direction_host.btn_product_sort_direction = QPushButton()
+    direction_host.db = type("DB", (), {
+        "set_setting": lambda _self, key, value: setattr(direction_host, "saved", (key, value)),
+    })()
+    direction_host.toggle()
+    assert not direction_host.product_sort_descending
+    assert direction_host.btn_product_sort_direction.text() == "↑ 升序"
+    assert direction_host.saved == ("product_sort_descending", "0") and direction_host.refreshed
+
+
+def test_bubble_metrics_move_into_compact_chips_and_refresh_without_duplicates():
+    app = QApplication.instance() or QApplication([])
+
+    class BubbleHost:
+        real_mode = False
+        card_data = {}
+
+        def is_real_promotion_data_mode(self):
+            return self.real_mode
+
+        def get_real_promotion_hidden_metrics(self):
+            return set()
+
+        def get_product_card_data(self, _prod_id):
+            return self.card_data
+
+    widget = ProductWidget.__new__(ProductWidget)
+    QWidget.__init__(widget)
+    widget.setFixedHeight(ProductWidget.BUBBLE_HEIGHT)
+    widget.display_mode = "bubble"
+    widget.prod_id = 1
+    widget.main_app = BubbleHost()
+    widget._search_highlight_active = False
+    widget._bubble_foreground = "#171b18"
+    widget._bubble_highlight_foreground = "#111111"
+    widget._real_visible_metric_count = 99
+    widget._bubble_avg_price = 25
+    widget._bubble_expected_profit = None
+    widget.margin_label = _MetricState("毛利率:20.00%")
+    widget.link_order_label = _MetricState("单量:42单")
+    widget.net_profit_label = _MetricState("净利率:3.00% 微盈利")
+    widget.roi_label = _MetricState()
+    widget.bubble_chips_widget = QWidget(widget)
+    widget.bubble_chips_widget.setFixedHeight(37)
+    widget.bubble_chip_labels = {
+        key: QLabel(widget.bubble_chips_widget)
+        for key in ("order", "promotion", "multiple", "status")
+    }
+    widget.bubble_metrics_widget = QWidget(widget)
+    widget.bubble_metrics_layout = QGridLayout(widget.bubble_metrics_widget)
+    widget.bubble_metric_chips = []
+    widget.bubble_metrics_label = QLabel(widget)
+
+    widget.main_app.card_data = {"current_roi": 4}
+    widget.roi_label.setText("投产:4.00<br>投产倍数:1.20倍")
+    widget._sync_bubble_metrics()
+    assert widget.bubble_chip_labels["order"].text() == "单量42"
+    assert widget.bubble_chip_labels["promotion"].text() == "推广中·稳定成本·投产4.00"
+    assert widget.bubble_chip_labels["multiple"].text() == "倍数1.20倍"
+    assert widget.bubble_chip_labels["status"].text() == "微盈利"
+    assert all("color:#111" in chip.styleSheet() and "border-radius:6px" in chip.styleSheet()
+               and "font-size" not in chip.styleSheet()
+               and "padding:1px" in chip.styleSheet()
+               for chip in widget.bubble_chip_labels.values())
+    rendered = widget.bubble_metrics_label.text().replace("\u2060", "")
+    assert "毛利率" in rendered and "净利率" in rendered and "客单价" in rendered
+    assert rendered.count("<tr>") == 2 and rendered.count("<td ") == 3
+    assert 'colspan="2"' in rendered
+    assert "background-color:transparent" in rendered and "padding:1px" in rendered
+    assert all(text not in rendered for text in ("单量", "投产:", "投产倍数", "微盈利"))
+    assert [chip.text() for chip in widget.bubble_metric_chips] == [
+        "毛利率:20.00%", "净利率:3.00%", "客单价:¥25.00",
+    ]
+    assert widget.bubble_metric_chips[0].toolTip() == "毛利率：商品毛利润占成交金额的比例。"
+    assert widget.bubble_metric_chips[1].toolTip() == "净利率：净利润占成交金额的比例。"
+    assert widget.bubble_metric_chips[2].toolTip() == "客单价：该链接平均每单的成交金额。"
+    assert all(
+        "border-radius:6px" in chip.styleSheet()
+        and "padding:1px" in chip.styleSheet()
+        and "background:transparent" not in chip.styleSheet()
+        for chip in widget.bubble_metric_chips
+    )
+
+    widget._bubble_expected_profit = 12.3
+    widget._sync_bubble_metrics()
+    rendered = widget.bubble_metrics_label.text().replace("\u2060", "")
+    assert rendered.count("<tr>") == 2 and rendered.count("<td ") == 4
+    assert "客单价" in rendered and "预计盈亏" in rendered
+    assert widget.bubble_metric_chips[3].toolTip().startswith("预计盈亏：按推广花费 100 元")
+    widget._bubble_expected_profit = None
+
+    widget.main_app.card_data = {"is_natural_flow": 1}
+    widget.roi_label.setText("无推广")
+    widget._bubble_expected_profit = 20
+    widget._sync_bubble_metrics()
+    assert widget.bubble_chip_labels["promotion"].text() == "无推广·自然流量"
+    assert not widget.bubble_chip_labels["multiple"].text()
+    assert "无推广" not in widget.bubble_metrics_label.text().replace("\u2060", "")
+    assert widget.bubble_metric_chips[-1].toolTip().startswith("预计盈亏：按自然成交额 100 元")
+    widget._bubble_expected_profit = None
+
+    widget.main_app.card_data = {"is_sitewide_managed": 1, "sitewide_roi": 3.2}
+    widget.roi_label.setText("全站:3.20<br>全站投产倍数:1.10倍")
+    widget._sync_bubble_metrics()
+    assert widget.bubble_chip_labels["promotion"].text() == "推广中·全站托管·投产3.20"
+    assert widget.bubble_chip_labels["multiple"].text() == "倍数1.10倍"
+
+    widget.main_app.card_data = {"roi_input_mode": "bid", "transaction_bid": 1.5}
+    widget.roi_label.setText("出价:¥1.50<br>保本出价:¥2.00<br>出价倍数:0.75倍")
+    widget._sync_bubble_metrics()
+    assert widget.bubble_chip_labels["promotion"].text() == "推广中·成交出价¥1.50"
+    assert widget.bubble_chip_labels["multiple"].text() == "出价倍数0.75倍"
+    assert "保本出价" not in widget.bubble_metrics_label.text()
+
+    widget.main_app.real_mode = True
+    widget.main_app.card_data = {}
+    widget.link_order_label.hide()
+    widget.net_profit_label.setText(
+        "净成交:12单 净投产比:2.10<br>净利润:¥30.00 净利率:6.00% 盈利"
+    )
+    widget.roi_label.setText(
+        "投产倍数:1.30倍 曝光占比:25.00%<br>每笔成交:¥20.00 每笔花费:¥5.00"
+    )
+    widget._sync_bubble_metrics()
+    assert widget.bubble_chip_labels["order"].text() == "净成交12"
+    assert widget.bubble_chip_labels["promotion"].text() == "真实推广·净投产比2.10"
+    assert widget.bubble_chip_labels["multiple"].text() == "倍数1.30倍"
+    assert widget.bubble_chip_labels["status"].text() == "盈利"
+    rendered = widget.bubble_metrics_label.text().replace("\u2060", "")
+    assert all(text not in rendered for text in ("净成交", "净投产比", "投产倍数", "盈利"))
+    assert "曝光占比" in rendered and "每笔花费" in rendered
+    assert widget.height() == 104
 
 
 def test_data_mode_layout_and_refresh():
@@ -180,25 +503,7 @@ def test_data_mode_layout_and_refresh():
     assert workbook.sheetnames == ["店铺A", "店铺B"]
     assert all(workbook[name]["A3"].value == "reading-mode-image" for name in workbook.sheetnames)
 
-    from PIL import Image as PilImage
-
-    source = BytesIO()
-    PilImage.new("RGB", (1600, 900), "red").save(source, format="PNG")
-    image_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
-    image_exporter.store_id = 1
-    image_exporter.export_image_quality = "light"
-    image_exporter.db = type("ImageDB", (), {
-        "safe_fetchall": lambda _self, *_args: [(0, source.getvalue(), "2026-07-14")],
-    })()
-    image_book = Workbook()
-    image_sheet = image_book.active
-    image_sheet.append(["header"] * 20)
-    original_widths = {column: image_sheet.column_dimensions[column].width for column in "CDEF"}
-    image_exporter._append_reading_mode_images_to_historical_sheet(image_sheet)
-    embedded = image_sheet._images[0]
-    assert embedded.width <= 320 and embedded.height <= 180
-    assert "C4:F4" in image_sheet.merged_cells and "C5:F5" in image_sheet.merged_cells
-    assert {column: image_sheet.column_dimensions[column].width for column in "CDEF"} == original_widths
+    test_single_file_detailed_excel_layout()
 
     host = QWidget()
     layout = OrderedFlowLayout(host, spacing=10)
@@ -305,34 +610,6 @@ def test_data_mode_layout_and_refresh():
         QMenu.exec_ = original_menu_exec
     assert context_calls == [(3, "9513241661")]
 
-    class CodeSearchMonitor:
-        def __init__(self):
-            self.calls = []
-
-        def open_goods_list_and_search_product(self, product_id, expected_store_name="", store_id=None):
-            self.calls.append((product_id, expected_store_name, store_id))
-            return {"ok": True, "status": f"已搜索 {product_id}"}
-
-    code_dialog = PddProductMatchDialog.__new__(PddProductMatchDialog)
-    QDialog.__init__(code_dialog)
-    code_dialog.monitor = CodeSearchMonitor()
-    code_dialog.combo_store = type("Combo", (), {"currentText": lambda _self: "测试店铺"})()
-    code_dialog.store_id_provider = lambda: 3
-    code_dialog.lbl_summary = QLabel()
-    code_dialog.initial_product_id = ""
-    code_dialog._auto_code_search_running = False
-    code_dialog.auto_code_search_finished.connect(code_dialog._finish_initial_code_search)
-    code_dialog.start_initial_code_search("9513241661")
-    deadline = time.time() + 2
-    while code_dialog._auto_code_search_running and time.time() < deadline:
-        app.processEvents()
-        time.sleep(0.01)
-    assert not code_dialog._auto_code_search_running
-    assert QApplication.clipboard().text() == "9513241661"
-    assert code_dialog.monitor.calls == [("9513241661", "测试店铺", 3)]
-    assert code_dialog.lbl_summary.text() == "已搜索 9513241661"
-    code_dialog.deleteLater()
-
     saved_memos = []
     saved_records = []
     memo_dialog = type("MemoRecordHost", (), {
@@ -419,7 +696,13 @@ def test_data_mode_layout_and_refresh():
 
     tooltip_widget = ProductWidget.__new__(ProductWidget)
     QWidget.__init__(tooltip_widget)
-    tooltip_widget._show_bubble_tooltip("提示内容", QPoint(10, 10))
+    metric_chip = QLabel(tooltip_widget)
+    metric_chip.setToolTip("预计盈亏：按推广花费 100 元估算，结合当前投产或成交出价计算。")
+    tooltip_widget.bubble_metric_chips = [metric_chip]
+    tooltip_widget.bubble_chip_labels = {}
+    tooltip_widget.eventFilter(metric_chip, QHelpEvent(QEvent.ToolTip, QPoint(1, 1), QPoint(10, 10)))
+    assert tooltip_widget._bubble_tooltip.text() == metric_chip.toolTip()
+    assert tooltip_widget._bubble_tooltip.size() == tooltip_widget._bubble_tooltip.sizeHint()
     assert "background: #ffffff" in tooltip_widget._bubble_tooltip.styleSheet()
     assert "color: #111111" in tooltip_widget._bubble_tooltip.styleSheet()
     tooltip_widget._hide_bubble_tooltip()
@@ -450,16 +733,19 @@ def test_data_mode_layout_and_refresh():
     task_badge_widget.display_mode = "bubble"
     task_badge_widget.reminder_badge = QLabel()
     task_badge_widget.garbage_badge = QLabel()
+    task_badge_widget.garbage_streak_badge = QLabel(task_badge_widget.garbage_badge)
     task_badge_widget.waste_badge = QLabel()
     task_badge_widget.db = type("TaskBadgeDB", (), {
         "safe_fetchall": lambda _self, query, *_args: (
             [(1,)] if "FROM task_reminders" in query
-            else [("【垃圾链接】测试",), ("【废物链接】测试",)]
+            else [("【垃圾链接】连续3次测试",), ("【废物链接】测试",)]
         )
     })()
     task_badge_widget.update_task_badge()
     assert not task_badge_widget.reminder_badge.isHidden()
     assert not task_badge_widget.garbage_badge.isHidden()
+    assert task_badge_widget.garbage_streak_badge.text() == "3"
+    assert not task_badge_widget.garbage_streak_badge.isHidden()
     assert not task_badge_widget.waste_badge.isHidden()
 
     category_widget = ProductWidget.__new__(ProductWidget)
@@ -474,13 +760,17 @@ def test_data_mode_layout_and_refresh():
     assert category_widget.category_label.width() < 90
 
     class WasteTaskDB:
-        def __init__(self, histories):
-            self.histories = histories
+        def __init__(self):
             self.writes = []
 
         def safe_fetchall(self, query, _params=()):
-            if "FROM import_history" in query:
-                return self.histories
+            if "SELECT id, created_at FROM products" in query:
+                now = datetime.now()
+                return [
+                    (1, (now - timedelta(days=2)).isoformat(sep=" ")),
+                    (2, (now - timedelta(days=8)).isoformat(sep=" ")),
+                    (3, (now - timedelta(days=8)).isoformat(sep=" ")),
+                ]
             if "SELECT title FROM products" in query:
                 return [("C",)]
             return []
@@ -488,20 +778,13 @@ def test_data_mode_layout_and_refresh():
         def safe_execute(self, query, params=()):
             self.writes.append((query, params))
 
-    snapshot = json.dumps({"orders": {"a_s": {"count": 1}, "b_s": {"count": 1}}})
     waste_host = type("WasteHost", (), {
         "store_id": 1,
         "main_app": None,
-        "_snapshot_product_order_totals": StoreMarginDialog._snapshot_product_order_totals,
     })()
-    waste_host.db = WasteTaskDB([(snapshot,)])
+    waste_host.db = WasteTaskDB()
     StoreMarginDialog._update_waste_link_tasks_after_order_import(
-        waste_host, [(1, "a"), (2, "b"), (3, "c")], {"a": 1, "b": 1}
-    )
-    assert not waste_host.db.writes
-    waste_host.db = WasteTaskDB([(snapshot,), (snapshot,)])
-    StoreMarginDialog._update_waste_link_tasks_after_order_import(
-        waste_host, [(1, "a"), (2, "b"), (3, "c")], {"a": 1, "b": 1}
+        waste_host, [(1, "a"), (2, "b"), (3, "c")], {"b": 1}
     )
     waste_inserts = [params for query, params in waste_host.db.writes if "INSERT INTO daily_tasks" in query]
     assert len(waste_inserts) == 1 and waste_inserts[0][1] == 3
@@ -513,8 +796,11 @@ def test_data_mode_layout_and_refresh():
 
         def safe_fetchall(self, query, params=()):
             self.queries.append((query, params))
-            if "ROW_NUMBER() OVER" in query:
-                return [("p", 0), ("p", 0)]  # 12 日和 10 日；11 日没有该链接记录
+            if "FROM promotion_daily_data" in query:
+                return [
+                    ("p", 0, 0, 0, 0, 10, 0, 0),
+                    ("p", 0, 0, 0, 0, 20, 0, 0),
+                ]
             if "FROM products" in query:
                 return [(1, "p", "p", 0)]
             return []
@@ -529,7 +815,8 @@ def test_data_mode_layout_and_refresh():
         "2026-07-11 12:00:00",
     )
     assert created == 1
-    assert any("INSERT INTO daily_tasks" in query for query, _params in garbage_db.created)
+    garbage_inserts = [params for query, params in garbage_db.created if "INSERT INTO daily_tasks" in query]
+    assert len(garbage_inserts) == 1 and "连续2次" in garbage_inserts[0][5]
 
     ratio_widget = StoreWidget.__new__(StoreWidget)
     QWidget.__init__(ratio_widget)
@@ -620,15 +907,15 @@ def test_data_mode_layout_and_refresh():
 
         def safe_fetchall(self, query, params=()):
             self.calls.append((query, params))
-            product_a = (101, "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, "roi", 0, "", "", "", 0, 1)
-            product_b = (202, "B", 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, "roi", 0, "", "", "", 0, 0)
+            product_a = (101, "A", 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 1, "roi", 0, "", "", "", 0, 1)
+            product_b = (202, "B", 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 2, "roi", 0, "", "", "", 0, 0)
             if "FROM products p" in query and "WHERE p.id=?" in query:
                 row = product_b if params == (202,) else product_a
                 return [row[1:]]
             if "FROM products p" in query:
                 return [product_a, product_b]
             if "FROM daily_tasks" in query:
-                return [(101, 1, 0)]
+                return [(101, 1, 0, 0, "【垃圾链接】连续2次测试")]
             if "FROM task_reminders" in query:
                 return [(101,)]
             if "GROUP BY store_id, product_id" in query:
@@ -650,7 +937,7 @@ def test_data_mode_layout_and_refresh():
     cache_host._prepare_product_card_caches(1)
     assert cache_host.get_product_card_data(202)["store_id"] == 2
     assert cache_host.get_product_card_data(101)["is_violation"] == 1
-    assert cache_host._product_task_states[101] == (True, False, True)
+    assert cache_host._product_task_states[101] == (True, False, True, "【垃圾链接】连续2次测试")
 
     cached_widget = ProductWidget.__new__(ProductWidget)
     QWidget.__init__(cached_widget)
@@ -776,6 +1063,7 @@ def test_data_mode_layout_and_refresh():
         "toggle": ShopManagerApp.toggle_real_promotion_data_mode,
         "_update_real_promotion_mode_button_style": lambda self: None,
         "_apply_real_promotion_display_settings": lambda self, value: setattr(self, "applied", value),
+        "_update_sticky_store_header": lambda self, **kwargs: None,
         "load_data_safe": lambda self: setattr(self, "rebuilt", True),
     })()
     toggle_host.btn_real_promotion_mode = type("Button", (), {"isChecked": lambda self: True})()
@@ -854,12 +1142,16 @@ def test_data_mode_layout_and_refresh():
         "apply": ShopManagerApp._apply_data_mode_store_visibility,
         "_visible_product_ids": ShopManagerApp._visible_product_ids,
         "_empty_store_visible": lambda self, store_id: store_id == 30,
+        "_update_sticky_store_header": lambda self: setattr(self, "sticky_updated", True),
     })()
     visible_host.main_view_mode = "data"
     visible_host.product_store_map = {1: 10, 2: 20}
     visible_host.visible_product_ids = {1}
     visible_host.bubble_product_widgets = {}
     visible_host.data_mode_container = QWidget()
+    visible_host.data_mode_sticky_header = QLabel()
+    visible_host._sticky_store_widget = QLabel()
+    visible_host._sticky_store_cache_key = (10,)
     visible_host.data_mode_layout = QVBoxLayout(visible_host.data_mode_container)
     first_section = QWidget()
     first_layout = QVBoxLayout(first_section)
@@ -882,6 +1174,8 @@ def test_data_mode_layout_and_refresh():
     assert not first_section.isHidden() and second_section.isHidden()
     assert not empty_section.isHidden()
     assert not first_product.isHidden() and second_product.isHidden()
+    app.processEvents()
+    assert visible_host.sticky_updated
 
     class FakeBubble(QLabel):
         def __init__(self, prod_id, prod_code, title, image_data, main_app, display_mode="bubble"):
@@ -1048,6 +1342,7 @@ def test_data_mode_layout_and_refresh():
     rename_host = type("RenameHost", (), {
         "rename": ShopManagerApp.refresh_after_store_renamed,
         "refresh_store_sheets": lambda self: setattr(self, "sheets_refreshed", True),
+        "_update_sticky_store_header": lambda self, **kwargs: None,
     })()
     rename_host._data_mode_store_sections = {}
     rename_host.row_store_map = {}
@@ -1259,6 +1554,10 @@ def test_data_mode_layout_and_refresh():
         memo_exporter = StoreMarginExcelExporter(1, "s", export_app)
         export_context = memo_exporter._product_export_context((1, "p", "p", None, 0, ""))
         assert export_context["product_memo"] == "长期备注"
+        db.safe_execute("UPDATE products SET is_violation=1 WHERE id=?", (1,))
+        violation_context = memo_exporter._product_export_context((1, "p", "p", None, 0, ""))
+        assert violation_context["product_memo"] == "长期备注；违规｜推广受限"
+        assert memo_exporter._products_for_specs_export()[0][1] == "p"
         assert StoreMarginExcelExporter.ORDER_HEADERS[-1] == "链接备注"
         db.conn.close()
     print("data mode layout OK")
@@ -1314,6 +1613,252 @@ def test_sticky_store_header_selection():
     app.processEvents()
 
 
+def test_single_file_detailed_excel_layout():
+    from openpyxl import Workbook
+    from PIL import Image as PilImage
+
+    styled_sheet = Workbook().active
+    styled_sheet.append(["实发金额", "一段需要保持单行完整显示的较长内容"])
+    StoreMarginExcelExporter._style_historical_export_sheet(
+        StoreMarginExcelExporter.__new__(StoreMarginExcelExporter), styled_sheet, {}, {}, {1: 12, 2: 12}
+    )
+    assert all(cell.font.sz == 20 for cell in styled_sheet[1])
+    assert all(cell.alignment.shrink_to_fit and not cell.alignment.wrap_text for cell in styled_sheet[1])
+    assert styled_sheet.row_dimensions[1].height is None
+    compare_values, _directions = StoreMarginExcelExporter._manual_compare_export_row(
+        StoreMarginExcelExporter.__new__(StoreMarginExcelExporter),
+        ("2026-07-08", "2026-07-14", 20, *([0] * 17)),
+        ("2026-07-01", "2026-07-07", 10, *([0] * 17)),
+    )
+    assert compare_values[1] == "↑100.0%"
+
+    source = BytesIO()
+    PilImage.new("RGB", (1600, 900), "red").save(source, format="PNG")
+    image_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
+    image_exporter.store_id = 1
+    image_exporter.export_image_quality = "light"
+    image_exporter.db = type("ImageDB", (), {
+        "safe_fetchall": lambda _self, *_args: [
+            (0, source.getvalue(), "2026-07-14"),
+            (1, source.getvalue(), "2026-07-14"),
+        ],
+    })()
+    image_sheet = Workbook().active
+    image_sheet.append(["header"] * 20)
+    image_exporter._append_reading_mode_images_to_historical_sheet(image_sheet)
+    assert image_sheet["A3"].value == "本周附带图片"
+    assert not image_sheet.merged_cells.ranges
+    assert [image.anchor for image in image_sheet._images] == ["A4", "B4"]
+    assert image_sheet.max_row == 4 and all(image_sheet.cell(4, column).value is None for column in (1, 2))
+    copied_image_book = Workbook()
+    ShopManagerApp._copy_excel_sheet_block(image_sheet, copied_image_book.active, 4)
+    assert [image.anchor for image in copied_image_book.active._images] == ["D4", "E4"]
+    copied_image_book.save(BytesIO())
+
+    source_sheet = Workbook().active
+    source_sheet["A1"] = "表头"
+    source_sheet["A2"] = 1
+    source_sheet["B2"] = "=A2+1"
+    source_sheet.merge_cells("A3:B3")
+    combined_sheet = Workbook().active
+    assert ShopManagerApp._copy_excel_sheet_block(source_sheet, combined_sheet, 4) == 7
+    assert combined_sheet["D1"].value == "表头" and combined_sheet["E2"].value == "=D2+1"
+    assert "D3:E3" in combined_sheet.merged_cells
+
+    compact_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
+    compact_exporter.export_image_quality = "light"
+    compact_exporter._products_for_specs_export = lambda: [(1, "P1", "长商品标题", None, 0, "错题本")]
+    compact_exporter._product_export_context = lambda _product: {
+        "sys_id": 1,
+        "product_id": "P1",
+        "title": "长商品标题",
+        "product_memo": "重点链接",
+        "category_label": "错题本",
+        "image_data": None,
+        "specs": [
+            {"spec_image_data": None, "spec_name": f"规格{i}", "spec_code": f"S{i}", "cost": i, "final_price": i + 5, "weight": 25, "order_count": i * 10, "refund_count": i % 2}
+            for i in range(1, 5)
+        ],
+        "promotion_mode": "稳定成本推广",
+        "roi_input_mode": "roi",
+        "current_roi": 3.2,
+        "return_rate": 5,
+        "is_natural_flow": False,
+    }
+    compact_exporter._promotion_summary_for_export = lambda _ctx: "店铺满减"
+    compact_exporter._record_briefs_for_export = lambda _sys_id: ("7/1-7/7", [])
+    compact_exporter._add_export_image = lambda *_args: None
+    compact_book = Workbook()
+    compact_exporter._write_product_specs_export_sheet(compact_book)
+    compact_sheet = compact_book["商品规格售卖情况"]
+    assert [compact_sheet.cell(1, col).value for col in range(2, 13)] == ["规格图", "规格名称", "规格编码", "成本", "实际价格", "毛利率", "毛利润", "权重", "单量", "退款订单", "退款占比"]
+    assert compact_sheet["A2"].value == "P1" and compact_sheet["A2"].fill.fgColor.rgb[-6:] == "FFF2CC"
+    assert "A3:A4" in compact_sheet.merged_cells and compact_sheet["A3"].fill.fgColor.rgb[-6:] == "DCEBFF"
+    assert compact_sheet["A3"].font.sz == 13
+    assert "A5:A6" in compact_sheet.merged_cells and compact_sheet["A5"].fill.fgColor.rgb[-6:] == "F4CCCC"
+    assert compact_sheet["B7"].value == "错题本" and compact_sheet["D7"].value == "综合毛利率"
+    assert compact_sheet["E7"].fill.fgColor.rgb[-6:] == "D9EAF7"
+    assert [compact_sheet[cell].value for cell in ("A8", "C8", "E8")] == ["推广方式", "当前投产", "综合毛利率"]
+    assert compact_sheet["D8"].fill.fgColor.rgb[-6:] == "E8F7EF" and compact_sheet["F9"].fill.fgColor.rgb[-6:] == "E8F7EF"
+    assert compact_sheet.max_row == 9 and compact_sheet["I9"].value is None
+    promotion_ctx = {"coupon": 0, "new_customer": 0, "store_discount_text": "满20减2", "is_limited_time": True, "is_marketing": False}
+    promotion_ctx["uses_store_discount"] = False
+    assert compact_exporter.__class__._promotion_summary_for_export(compact_exporter, promotion_ctx) == "限时限量购"
+    promotion_ctx["uses_store_discount"] = True
+    assert "店铺满减：满20减2" in compact_exporter.__class__._promotion_summary_for_export(compact_exporter, promotion_ctx)
+    removed_titles = {"商品ID", "商品标题", "链接备注", "规格售卖情况", "投产比分析", "指标", "数值", "说明", "可编辑"}
+    assert removed_titles.isdisjoint({cell.value for row in compact_sheet.iter_rows() for cell in row})
+    assert compact_sheet.freeze_panes == "B2"
+    compact_book.save(BytesIO())
+    shifted_book = Workbook()
+    ShopManagerApp._copy_excel_sheet_block(compact_sheet, shifted_book.active, 4)
+    assert shifted_book.active["H7"].value.startswith("=IF(SUM(L2:L5)")
+    shifted_book.save(BytesIO())
+
+    class OrderDB:
+        def safe_fetchall(self, query, _params=()):
+            if "store_weight" in query:
+                return [
+                    (1, "LOW", "low", None, 1, "", 20, 0, "", 0),
+                    (2, "HIGH", "high", None, 2, "", 80, 0, "重点链接", 1),
+                ]
+            if "GROUP BY product_id" in query:
+                return [("LOW", 2), ("HIGH", 20)]
+            if "FROM import_history" in query:
+                previous = {"weights": {"LOW": 90, "HIGH": 10}, "orders": {"LOW_S": {"count": 2}, "HIGH_S": {"count": 5}}}
+                return [("{}",), (json.dumps(previous),)]
+            raise AssertionError(query)
+
+    order_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
+    order_exporter.db = OrderDB()
+    order_exporter.store_id = 1
+    order_exporter.main_app = object()
+    order_exporter._product_avg_price_and_amount_for_export = lambda *_args: (None, None)
+    order_exporter.get_product_margin = lambda _sys_id: (0, 0, 0)
+    order_exporter.get_main_spec = lambda _code: (None, 0)
+    order_exporter._order_refund_summary_for_export = lambda _code: ("0.00%", "无")
+    order_exporter._link_profit_breakdown = lambda _code: {"available": False}
+    order_exporter._set_square_image_cell = lambda *_args: None
+    order_exporter._add_export_image = lambda *_args: None
+    order_exporter._style_excel_sheet = lambda *_args: None
+    order_exporter._export_product_image_size = lambda: 96
+    order_book = Workbook()
+    order_exporter._write_orders_export_sheet(order_book)
+    assert [order_book["店铺商品权重"][f"B{row}"].value for row in (2, 3)] == ["HIGH", "LOW"]
+    assert order_book["店铺商品权重"]["H2"].value == "↑70.00%"
+    assert order_book["店铺商品权重"]["J2"].value == "↑15"
+    assert order_book["店铺商品权重"]["L2"].value == "无"
+    assert order_book["店铺商品权重"]["P2"].value == "--"
+    assert order_book["店铺商品权重"]["Q2"].value == "重点链接；违规｜推广受限"
+    assert len(StoreMarginExcelExporter.ORDER_HEADERS) == 17
+
+    record_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
+    record_exporter._previous_week_range_for_export = lambda: (
+        datetime(2026, 7, 1).date(), datetime(2026, 7, 7).date()
+    )
+    record_exporter.db = type("RecordDB", (), {
+        "safe_fetchall": lambda _self, *_args: [
+            (2026, 7, 2, json.dumps([{"time": "09:00", "text": "较早"}])),
+            (2026, 7, 6, json.dumps([{"time": "18:00", "text": "较晚"}])),
+        ]
+    })()
+    _range_text, records = record_exporter._record_briefs_for_export(1)
+    assert [record["text"].endswith(label) for record, label in zip(records, ("较晚", "较早"))] == [True, True]
+
+    phase_exporter = StoreMarginExcelExporter.__new__(StoreMarginExcelExporter)
+    phase_exporter._write_historical_export_sheet = lambda _wb: None
+    phase_exporter._write_orders_export_sheet = lambda _wb: None
+    phase_exporter._write_product_specs_export_sheet = lambda _wb: None
+    phase_exporter._batch_export_errors = []
+    phase_updates = []
+    assert phase_exporter.export_margin_excel_to_path(
+        BytesIO(), lambda value, text: phase_updates.append((value, text)) or True
+    )
+    assert [value for value, _text in phase_updates] == [5, 15, 32, 42, 60, 70, 90, 96, 100]
+    assert any("权重、对比数据" in text for _value, text in phase_updates)
+
+
+def test_batch_export_detail_store_sequence():
+    app = QApplication.instance() or QApplication([])
+
+    class FakeDB:
+        def safe_fetchall(self, query, params=()):
+            if "SELECT id, name, title" in query:
+                store_id = params[0]
+                return [(store_id, f"P{store_id}", f"商品{store_id}", None, 0, "")]
+            return [(0, 0, 0)]
+
+    observed = {}
+    main_app = type("ExportSelectorHost", (), {
+        "product_sort_mode": "net_profit",
+        "_prepare_product_card_caches": lambda self, _store_id: None,
+        "_sort_products_for_display": lambda self, rows, mode: observed.setdefault("sort_modes", []).append(mode) or rows,
+        "get_product_gross_margin_metrics": lambda self, _product_id: {},
+        "_get_product_order_count": lambda self, _product_code, _store_id: 0,
+        "_calculate_product_net_margin": lambda self, _product_id: None,
+    })()
+
+    def drive_dialog():
+        dialog = next(widget for widget in app.topLevelWidgets() if widget.windowTitle() == "选择详细展示链接")
+        observed["visible_combos"] = len([combo for combo in dialog.findChildren(QComboBox) if combo.isVisible()])
+        observed["first_store"] = any(label.text() == "当前店铺：甲（1/2）" for label in dialog.findChildren(QLabel))
+        button = next(button for button in dialog.findChildren(QPushButton) if button.text() == "下一个店铺")
+        button.click()
+        observed["second_store"] = any(label.text() == "当前店铺：乙（2/2）" for label in dialog.findChildren(QLabel))
+        observed["last_button"] = button.text()
+        button.click()
+
+    QTimer.singleShot(0, drive_dialog)
+    selections = StoreMarginExcelExporter.select_detail_products(
+        None, FakeDB(), main_app, [(1, "甲"), (2, "乙")]
+    )
+    assert selections == {1: set(), 2: set()}
+    assert observed == {
+        "sort_modes": ["order", "order"],
+        "visible_combos": 1,
+        "first_store": True,
+        "second_store": True,
+        "last_button": "确认导出",
+    }
+
+
+def test_batch_export_mode_persistence():
+    app = QApplication.instance() or QApplication([])
+
+    class FakeDB:
+        mode = "single_detailed"
+
+        def safe_fetchall(self, *_args):
+            return [(1, "甲")]
+
+        def get_setting(self, _key, _default=None):
+            return self.mode
+
+        def set_setting(self, _key, value):
+            self.mode = value
+
+    host = QWidget()
+    host.db = FakeDB()
+    host._select_stores_for_margin_batch_export = ShopManagerApp._select_stores_for_margin_batch_export.__get__(host)
+    observed = []
+
+    def accept_with(mode):
+        dialog = next(widget for widget in app.topLevelWidgets() if widget.windowTitle() == "批量导出")
+        combo = next(combo for combo in dialog.findChildren(QComboBox) if combo.findData("single_detailed") >= 0)
+        observed.append(combo.currentData())
+        combo.setCurrentIndex(combo.findData(mode))
+        next(button for button in dialog.findChildren(QPushButton) if button.text() == "开始导出").click()
+
+    QTimer.singleShot(0, lambda: accept_with("simple"))
+    assert host._select_stores_for_margin_batch_export()["export_mode"] == "simple"
+    QTimer.singleShot(0, lambda: accept_with("simple"))
+    assert host._select_stores_for_margin_batch_export()["export_mode"] == "simple"
+    assert observed == ["single_detailed", "simple"]
+
+
 if __name__ == "__main__":
     test_data_mode_layout_and_refresh()
     test_sticky_store_header_selection()
+    test_single_file_detailed_excel_layout()
+    test_batch_export_detail_store_sequence()
+    test_batch_export_mode_persistence()

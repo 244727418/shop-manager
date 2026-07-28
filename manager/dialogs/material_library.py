@@ -669,12 +669,14 @@ class MaterialImageList(QListWidget):
 
 
 class MaterialImageViewerDialog(QDialog):
-    def __init__(self, image_path, parent=None, image_paths=None):
+    def __init__(self, image_path="", parent=None, image_paths=None, image_data=None, window_title=""):
         super().__init__(parent)
         paths = [path for path in (image_paths or []) if path and os.path.exists(path)]
         if image_path and os.path.exists(image_path) and image_path not in paths:
             paths.insert(0, image_path)
-        self.image_paths = paths or [image_path]
+        self.image_paths = paths or ([image_path] if image_path else [])
+        self.image_data = bytes(image_data or b"")
+        self.inline_window_title = str(window_title or "")
         self.current_index = max(0, self.image_paths.index(image_path)) if image_path in self.image_paths else 0
         self.pixmap = QPixmap()
         self.scale_factor = 1.0
@@ -743,9 +745,9 @@ class MaterialImageViewerDialog(QDialog):
         viewer_layout.addWidget(self.scroll_area, 1)
         viewer_layout.addWidget(self.side_next_button)
         layout.addLayout(viewer_layout, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
         self.load_current_image()
 
     def resizeEvent(self, event):
@@ -775,21 +777,26 @@ class MaterialImageViewerDialog(QDialog):
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
-        self.zoom_at(
-            1.15 if event.angleDelta().y() > 0 else 1 / 1.15,
-            self.scroll_area.viewport().mapFromGlobal(event.globalPos()),
-        )
-        event.accept()
+        if event.modifiers() & Qt.ControlModifier:
+            self.zoom_at(
+                1.15 if event.angleDelta().y() > 0 else 1 / 1.15,
+                self.scroll_area.viewport().mapFromGlobal(event.globalPos()),
+            )
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def eventFilter(self, watched, event):
         if watched in (self.scroll_area.viewport(), self.image_label):
             if event.type() == QEvent.Wheel:
-                viewport_pos = event.pos()
-                if watched is self.image_label:
-                    viewport_pos = self.image_label.mapTo(self.scroll_area.viewport(), event.pos())
-                self.zoom_at(1.15 if event.angleDelta().y() > 0 else 1 / 1.15, viewport_pos)
-                event.accept()
-                return True
+                if event.modifiers() & Qt.ControlModifier:
+                    viewport_pos = event.pos()
+                    if watched is self.image_label:
+                        viewport_pos = self.image_label.mapTo(self.scroll_area.viewport(), event.pos())
+                    self.zoom_at(1.15 if event.angleDelta().y() > 0 else 1 / 1.15, viewport_pos)
+                    event.accept()
+                    return True
+                return False
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._dragging_image = True
                 self._drag_start_pos = event.globalPos()
@@ -822,9 +829,11 @@ class MaterialImageViewerDialog(QDialog):
     def load_current_image(self):
         path = self.current_path()
         self.pixmap = QPixmap(path)
+        if self.image_data and not path:
+            self.pixmap.loadFromData(self.image_data)
         self.scale_factor = 1.0
         self.fit_to_window = True
-        self.setWindowTitle(os.path.basename(path) if path else "图片查看")
+        self.setWindowTitle(self.inline_window_title or (os.path.basename(path) if path else "图片查看"))
         self.update_pixmap()
 
     def show_previous_image(self):
@@ -903,7 +912,7 @@ class MaterialImageViewerDialog(QDialog):
         self.side_prev_button.setEnabled(len(self.image_paths) > 1)
         self.side_next_button.setEnabled(len(self.image_paths) > 1)
         self.info_label.setText(
-            f"{self.current_index + 1}/{len(self.image_paths)}  "
+            f"{self.current_index + 1}/{max(1, len(self.image_paths))}  "
             f"{self.pixmap.width()}x{self.pixmap.height()}  "
             f"{int(shown_scale * 100)}%"
         )
@@ -1640,9 +1649,10 @@ class MaterialLibraryDialog(QDialog):
     PSD_EXTENSION = ".psd"
     PRODUCT_MODE = "product"
     LINK_MODE = "link"
-    LINK_UNGROUPED = "未分组"
+    LINK_UNGROUPED = "未分类商品类型"
     LINK_NO_TYPE = "无链接类型"
     LINK_DELETED_SUFFIX = "（已删除）"
+    LINK_ARCHIVED_SUFFIX = "（已下架）"
     BULK_IMPORT_CONFIRM_THRESHOLD = 30
     BULK_MOVE_CONFIRM_THRESHOLD = 30
     IMPORT_SCAN_LIMIT = 5000
@@ -1709,12 +1719,18 @@ class MaterialLibraryDialog(QDialog):
         self._last_tab_switch_time = 0
         self.pending_pdf_path = ""
         self.pdf_worker = None
+        self.mobile_binding_dialog = None
         self.prompt_library_dialog = None
+        self._link_reference_loaded_type = ""
+        self._link_reference_loaded_path = ""
+        self._link_reference_data = {}
+        self._link_reference_current_index = -1
+        self._link_reference_loading = False
         self.mode_toast = None
         self.mode_toast_generation = 0
+        self._app_filter_installed = False
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        QApplication.instance().installEventFilter(self)
         apply_window_icon(self, "material")
         self.setWindowFlags(
             Qt.Window
@@ -1756,10 +1772,23 @@ class MaterialLibraryDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not self._app_filter_installed:
+            QApplication.instance().installEventFilter(self)
+            self._app_filter_installed = True
         self.activate_keyboard_shortcuts()
 
+    def hideEvent(self, event):
+        if self._app_filter_installed:
+            QApplication.instance().removeEventFilter(self)
+            self._app_filter_installed = False
+        super().hideEvent(event)
+
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        main_panel = QWidget(self)
+        layout = QVBoxLayout(main_panel)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(10)
         top = QHBoxLayout()
@@ -1771,6 +1800,9 @@ class MaterialLibraryDialog(QDialog):
         self.btn_copy_link_folder_path = QPushButton("\u590d\u5236\u6587\u4ef6\u5939\u8def\u5f84")
         self.remove_tab_focus(self.btn_copy_link_folder_path)
         self.btn_copy_link_folder_path.clicked.connect(self.copy_current_folder_path)
+        self.btn_mobile_upload = QPushButton("手机绑定")
+        self.remove_tab_focus(self.btn_mobile_upload)
+        self.btn_mobile_upload.clicked.connect(self.show_mobile_binding)
         self.mode_button = QPushButton("\u4ea7\u54c1\u7d20\u6750\u5e93")
         self.remove_tab_focus(self.mode_button)
         self.mode_button.setCheckable(True)
@@ -1800,6 +1832,7 @@ class MaterialLibraryDialog(QDialog):
         top.addWidget(self.path_label, 1)
         top.addWidget(self.btn_copy_link_folder_path)
         top.addWidget(self.mode_button)
+        top.addWidget(self.btn_mobile_upload)
         top.addWidget(self.btn_fetch_link_material)
         top.addWidget(self.btn_prompts)
         top.addWidget(btn_open)
@@ -1897,6 +1930,18 @@ class MaterialLibraryDialog(QDialog):
         attr_layout.addWidget(self.attribute_text, 1)
         content_row.addWidget(attr_panel)
         layout.addLayout(content_row, 1)
+        outer_layout.addWidget(main_panel, 1)
+        self.link_reference_toggle = QToolButton(self)
+        self.remove_tab_focus(self.link_reference_toggle)
+        self.link_reference_toggle.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.link_reference_toggle.setToolTip("展开链接类型通用参考")
+        self.link_reference_toggle.setFixedWidth(24)
+        self.link_reference_toggle.clicked.connect(self.toggle_link_type_reference_panel)
+        self.link_reference_toggle.setVisible(False)
+        outer_layout.addWidget(self.link_reference_toggle, 0, Qt.AlignVCenter)
+        self.link_reference_panel = self.create_link_type_reference_panel()
+        self.link_reference_panel.setVisible(False)
+        outer_layout.addWidget(self.link_reference_panel)
 
     def _make_chip_scroll(self):
         scroll = QScrollArea()
@@ -1967,6 +2012,239 @@ class MaterialLibraryDialog(QDialog):
             top_row.addWidget(self.create_link_image_column(key, title), 1)
         layout.addLayout(top_row, 1)
         return panel
+
+    def create_link_type_reference_panel(self):
+        panel = QWidget(self)
+        panel.setFixedWidth(340)
+        panel.setStyleSheet(
+            "QWidget#linkTypeReferencePanel { border-left: 1px solid #c8d0d8; background: #fbfcfd; }"
+            "QWidget#linkTypeReferencePanel QLineEdit, QWidget#linkTypeReferencePanel QTextEdit { padding: 1px; }"
+        )
+        panel.setObjectName("linkTypeReferencePanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 12, 10, 12)
+        layout.setSpacing(8)
+        title = QLabel("链接类型通用参考")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #2c3e50;")
+        self.link_reference_type_label = QLabel("请先选择链接类型")
+        self.link_reference_type_label.setWordWrap(True)
+        self.link_reference_type_label.setStyleSheet("color: #607080;")
+        self.link_reference_list = QListWidget()
+        self.link_reference_list.setMaximumHeight(180)
+        self.link_reference_list.setEditTriggers(QAbstractItemView.DoubleClicked)
+        self.link_reference_list.currentRowChanged.connect(self.on_link_type_reference_selected)
+        self.link_reference_list.itemChanged.connect(self.on_link_type_reference_renamed)
+        self.link_reference_editor = QTextEdit()
+        self.link_reference_editor.setAcceptRichText(False)
+        self.link_reference_editor.setPlaceholderText("输入或粘贴内容")
+        self.link_reference_editor.setEnabled(False)
+        self.link_reference_save_timer = QTimer(self)
+        self.link_reference_save_timer.setSingleShot(True)
+        self.link_reference_save_timer.setInterval(500)
+        self.link_reference_save_timer.timeout.connect(lambda: self.save_link_type_reference(silent=True))
+        self.link_reference_editor.textChanged.connect(self.schedule_link_type_reference_save)
+        buttons = QHBoxLayout()
+        btn_add = QPushButton("新建")
+        self.remove_tab_focus(btn_add)
+        btn_add.clicked.connect(self.add_link_type_reference)
+        btn_delete = QPushButton("删除")
+        self.remove_tab_focus(btn_delete)
+        btn_delete.clicked.connect(self.delete_link_type_reference)
+        self.link_reference_copy_button = QPushButton("复制")
+        self.remove_tab_focus(self.link_reference_copy_button)
+        self.link_reference_copy_button.clicked.connect(self.copy_link_type_reference)
+        buttons.addWidget(btn_add)
+        buttons.addWidget(btn_delete)
+        buttons.addWidget(self.link_reference_copy_button)
+        buttons.addStretch()
+        layout.addWidget(title)
+        layout.addWidget(self.link_reference_type_label)
+        layout.addWidget(self.link_reference_list)
+        layout.addWidget(self.link_reference_editor, 1)
+        layout.addLayout(buttons)
+        self.link_reference_copy_toast = QLabel("已复制", panel)
+        self.link_reference_copy_toast.setAlignment(Qt.AlignCenter)
+        self.link_reference_copy_toast.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.link_reference_copy_toast.setStyleSheet(
+            "background: rgba(35, 45, 55, 220); color: white; border-radius: 6px; padding: 5px 14px; font-weight: bold;"
+        )
+        self.link_reference_copy_toast.hide()
+        self.link_reference_copy_toast_timer = QTimer(self)
+        self.link_reference_copy_toast_timer.setSingleShot(True)
+        self.link_reference_copy_toast_timer.setInterval(500)
+        self.link_reference_copy_toast_timer.timeout.connect(self.link_reference_copy_toast.hide)
+        return panel
+
+    def link_type_reference_store_path(self):
+        root = self.root_folder_for_mode(self.LINK_MODE)
+        return os.path.join(root, ".shop_link_type_references.json") if root else ""
+
+    def schedule_link_type_reference_save(self):
+        if self._link_reference_loaded_type and not self._link_reference_loading:
+            self.link_reference_save_timer.start()
+
+    def link_type_reference_entries(self):
+        entries = self._link_reference_data.get(self._link_reference_loaded_type, [])
+        return entries if isinstance(entries, list) else []
+
+    def refresh_link_type_reference_list(self, selected_row=None):
+        entries = self.link_type_reference_entries()
+        row = self._link_reference_current_index if selected_row is None else selected_row
+        self.link_reference_list.blockSignals(True)
+        self.link_reference_list.clear()
+        for entry in entries:
+            item = QListWidgetItem(str(entry.get("title", "") or "未命名文案"))
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.link_reference_list.addItem(item)
+        row = min(max(0, row), len(entries) - 1) if entries else -1
+        self._link_reference_current_index = row
+        self.link_reference_list.setCurrentRow(row)
+        self.link_reference_list.blockSignals(False)
+        self.show_current_link_type_reference()
+
+    def show_current_link_type_reference(self):
+        entries = self.link_type_reference_entries()
+        index = self._link_reference_current_index
+        entry = entries[index] if 0 <= index < len(entries) else None
+        self._link_reference_loading = True
+        self.link_reference_editor.setPlainText(str(entry.get("content", "")) if entry else "")
+        enabled = entry is not None
+        self.link_reference_editor.setEnabled(enabled)
+        self._link_reference_loading = False
+
+    def on_link_type_reference_selected(self, row):
+        if self._link_reference_loading:
+            return
+        self.save_link_type_reference(silent=True)
+        self._link_reference_current_index = row
+        self.show_current_link_type_reference()
+
+    def on_link_type_reference_renamed(self, item):
+        if self._link_reference_loading or not item:
+            return
+        index = self.link_reference_list.row(item)
+        entries = self.link_type_reference_entries()
+        if 0 <= index < len(entries):
+            title = item.text().strip() or "未命名文案"
+            if item.text() != title:
+                self.link_reference_list.blockSignals(True)
+                item.setText(title)
+                self.link_reference_list.blockSignals(False)
+            entries[index]["title"] = title
+            self.save_link_type_reference(silent=True)
+
+    def load_link_type_reference(self, force=False):
+        reference_type = self.selected_link_type if self.library_mode == self.LINK_MODE else ""
+        path = self.link_type_reference_store_path()
+        if not force and reference_type == self._link_reference_loaded_type and path == self._link_reference_loaded_path:
+            return
+        self.link_reference_save_timer.stop()
+        self.save_link_type_reference(silent=True)
+        data = {}
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    loaded = json.load(fh)
+                data = loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                data = {}
+        self._link_reference_data = data
+        self._link_reference_loaded_type = reference_type
+        self._link_reference_loaded_path = path
+        enabled = bool(reference_type and path)
+        self.link_reference_type_label.setText(f"链接类型：{reference_type}" if reference_type else "请先选择链接类型")
+        entries = data.get(reference_type, []) if enabled else []
+        if isinstance(entries, str):
+            entries = [{"title": "未命名文案", "content": entries}] if entries else []
+        entries = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        self._link_reference_data[reference_type] = entries
+        self._link_reference_current_index = 0 if entries else -1
+        self.link_reference_list.setEnabled(enabled)
+        self.refresh_link_type_reference_list()
+
+    def save_link_type_reference(self, _checked=False, silent=False):
+        reference_type = self._link_reference_loaded_type
+        path = self._link_reference_loaded_path
+        if not reference_type or not path:
+            return False
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            entries = self.link_type_reference_entries()
+            index = self._link_reference_current_index
+            if 0 <= index < len(entries):
+                item = self.link_reference_list.item(index)
+                entries[index] = {
+                    "title": item.text().strip() if item and item.text().strip() else "未命名文案",
+                    "content": self.link_reference_editor.toPlainText(),
+                }
+            temp_path = path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as fh:
+                json.dump(self._link_reference_data, fh, ensure_ascii=False, indent=2)
+            os.replace(temp_path, path)
+            return True
+        except Exception as exc:
+            if not silent:
+                QMessageBox.warning(self, "保存失败", f"保存链接类型通用参考失败：\n{exc}")
+            return False
+
+    def add_link_type_reference(self):
+        if not self._link_reference_loaded_type:
+            QMessageBox.information(self, "提示", "请先选择一个链接类型。")
+            return
+        self.save_link_type_reference(silent=True)
+        entries = self.link_type_reference_entries()
+        entries.append({"title": "未命名文案", "content": ""})
+        self.refresh_link_type_reference_list(len(entries) - 1)
+        self.save_link_type_reference(silent=True)
+        item = self.link_reference_list.item(self._link_reference_current_index)
+        if item:
+            self.link_reference_list.editItem(item)
+
+    def delete_link_type_reference(self):
+        entries = self.link_type_reference_entries()
+        index = self._link_reference_current_index
+        if not (0 <= index < len(entries)):
+            return
+        if QMessageBox.question(self, "确认删除", "确定删除这条文案吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        entries.pop(index)
+        self.refresh_link_type_reference_list(min(index, len(entries) - 1))
+        self.save_link_type_reference(silent=True)
+
+    def copy_link_type_reference(self):
+        if self._link_reference_current_index >= 0:
+            QApplication.clipboard().setText(self.link_reference_editor.toPlainText())
+            toast = self.link_reference_copy_toast
+            toast.adjustSize()
+            button_top = self.link_reference_copy_button.mapTo(self.link_reference_panel, QPoint(0, 0)).y()
+            toast.move((self.link_reference_panel.width() - toast.width()) // 2, max(4, button_top - self.link_reference_copy_button.height()))
+            toast.raise_()
+            toast.show()
+            self.link_reference_copy_toast_timer.start()
+
+    def set_link_type_reference_panel_visible(self, visible):
+        visible = bool(visible and self.library_mode == self.LINK_MODE)
+        if self.link_reference_panel.isVisible() == visible:
+            return
+        width = self.width()
+        if visible:
+            self.load_link_type_reference(force=True)
+            self.link_reference_panel.setVisible(True)
+            self.link_reference_toggle.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+            self.link_reference_toggle.setToolTip("收起链接类型通用参考")
+            if not self.isMaximized():
+                self.resize(width + self.link_reference_panel.width(), self.height())
+        else:
+            self.link_reference_save_timer.stop()
+            self.save_link_type_reference(silent=True)
+            self.link_reference_panel.setVisible(False)
+            self.link_reference_toggle.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+            self.link_reference_toggle.setToolTip("展开链接类型通用参考")
+            if not self.isMaximized():
+                self.resize(max(self.minimumWidth(), width - self.link_reference_panel.width()), self.height())
+
+    def toggle_link_type_reference_panel(self):
+        self.set_link_type_reference_panel_visible(not self.link_reference_panel.isVisible())
 
     def create_link_image_column(self, key, title):
         column = QWidget()
@@ -2215,6 +2493,8 @@ class MaterialLibraryDialog(QDialog):
             return
         self.set_root_folder(folder, mode)
         self.refresh_root_label()
+        if mode == self.LINK_MODE and self.link_reference_panel.isVisible():
+            self.load_link_type_reference(force=True)
         if mode == self.library_mode:
             self.refresh_current_view()
 
@@ -2265,6 +2545,32 @@ class MaterialLibraryDialog(QDialog):
     def event_belongs_to_material_window(self, watched):
         return bool(hasattr(watched, "window") and watched.window() is self)
 
+    def material_image_list_for_widget(self, widget):
+        candidates = [getattr(self, "image_list", None)]
+        candidates.extend(getattr(self, "link_image_lists", {}).values())
+        while widget is not None:
+            if any(widget is candidate for candidate in candidates):
+                return widget
+            widget = widget.parentWidget() if hasattr(widget, "parentWidget") else None
+        return None
+
+    @staticmethod
+    def widget_is_within(widget, parent):
+        while widget is not None:
+            if widget is parent:
+                return True
+            widget = widget.parentWidget() if hasattr(widget, "parentWidget") else None
+        return False
+
+    def clipboard_contains_material_image(self):
+        mime_data = QApplication.clipboard().mimeData()
+        if mime_data.hasImage():
+            return True
+        paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()] if mime_data.hasUrls() else []
+        if mime_data.hasText():
+            paths.extend(self.paths_from_text(mime_data.text()))
+        return any(os.path.splitext(path)[1].lower() in self.IMAGE_EXTENSIONS for path in paths)
+
     def save_mode_state(self):
         if self.library_mode == self.PRODUCT_MODE:
             self.product_state = {
@@ -2296,6 +2602,7 @@ class MaterialLibraryDialog(QDialog):
         self.refresh_root_label()
         if is_link:
             self.restore_link_state()
+            self.set_link_type_reference_panel_visible(True)
         else:
             self.restore_product_state()
         self.schedule_refresh_images_for_current_mode()
@@ -2303,6 +2610,10 @@ class MaterialLibraryDialog(QDialog):
 
     def apply_mode_visibility(self):
         is_link = self.library_mode == self.LINK_MODE
+        if hasattr(self, "link_reference_panel") and not is_link and self.link_reference_panel.isVisible():
+            self.set_link_type_reference_panel_visible(False)
+        if hasattr(self, "link_reference_toggle"):
+            self.link_reference_toggle.setVisible(is_link)
         if hasattr(self, "mode_button"):
             self.mode_button.blockSignals(True)
             self.mode_button.setChecked(is_link)
@@ -2316,6 +2627,8 @@ class MaterialLibraryDialog(QDialog):
             self.link_sort_button.setVisible(is_link)
         if hasattr(self, "btn_fetch_link_material"):
             self.btn_fetch_link_material.setVisible(is_link)
+        if hasattr(self, "btn_mobile_upload"):
+            self.btn_mobile_upload.setVisible(not is_link)
         if hasattr(self, "image_list"):
             self.image_list.setVisible(not is_link)
         if hasattr(self, "link_image_panel"):
@@ -2423,10 +2736,9 @@ class MaterialLibraryDialog(QDialog):
         try:
             rows = self.db.safe_fetchall(
                 """SELECT p.id, COALESCE(p.name, ''), COALESCE(p.link_type, ''),
-                          p.store_id, COALESCE(s.name, ''), COALESCE(lc.name, '')
+                          p.store_id, COALESCE(s.name, ''), COALESCE(p.product_category_label, '')
                    FROM products p
                    LEFT JOIN stores s ON s.id = p.store_id
-                   LEFT JOIN link_combinations lc ON lc.id = p.link_combo_id
                    WHERE p.id=?""",
                 (product_db_id,),
             )
@@ -3046,18 +3358,26 @@ class MaterialLibraryDialog(QDialog):
             (category_label,),
         )
         normalized_name_counts = {}
+        exact_name_codes = {}
         for spec_name, spec_code, _product_attribute, _manual_sort_order, _sort_order in rows:
             original_name = str(spec_name or "").strip() or str(spec_code or "").strip() or "未命名规格"
             normalized_name = self.normalize_material_spec_name(original_name) or original_name
             normalized_name_counts.setdefault(normalized_name.lower(), set()).add(original_name)
+            exact_name_codes.setdefault(original_name.casefold(), set()).add(str(spec_code or "").strip())
         grouped = {}
         for spec_name, spec_code, product_attribute, manual_sort_order, sort_order in rows:
             original_name = str(spec_name or "").strip() or str(spec_code or "").strip() or "未命名规格"
             normalized_name = self.normalize_material_spec_name(original_name) or original_name
             normalized_key = normalized_name.lower()
-            should_merge_name = len(normalized_name_counts.get(normalized_key, set())) > 1
-            display_name = normalized_name if should_merge_name else original_name
-            key = normalized_key if should_merge_name else f"{original_name.lower()}::{str(spec_code or '').strip()}"
+            merge_by_quantity = len(normalized_name_counts.get(normalized_key, set())) > 1
+            merge_exact_name = len(exact_name_codes.get(original_name.casefold(), set())) > 1
+            display_name = normalized_name if merge_by_quantity else original_name
+            if merge_by_quantity:
+                key = normalized_key
+            elif merge_exact_name:
+                key = f"exact::{original_name.casefold()}"
+            else:
+                key = f"{original_name.casefold()}::{str(spec_code or '').strip()}"
             code = str(spec_code or "").strip()
             item = grouped.get(key)
             if not item:
@@ -3066,7 +3386,7 @@ class MaterialLibraryDialog(QDialog):
                     "code": code,
                     "primary_code": code,
                     "primary_original_name": original_name,
-                    "merged_by_quantity": should_merge_name,
+                    "merged_by_quantity": merge_by_quantity,
                     "manual_sort": manual_sort_order,
                     "sort": sort_order,
                     "codes": [],
@@ -3095,6 +3415,92 @@ class MaterialLibraryDialog(QDialog):
             item.pop("attribute_keys", None)
             item.pop("merged_by_quantity", None)
         return specs
+
+    @staticmethod
+    def mobile_catalog_id(kind, *values):
+        raw = "\0".join([kind] + [str(value or "") for value in values])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+    def mobile_catalog_snapshot(self):
+        root = self.root_folder_for_mode(self.PRODUCT_MODE)
+        if not root:
+            raise RuntimeError("请先在素材库设置产品素材库母文件夹")
+        self.load_categories(refresh=False)
+        categories = []
+        targets = {}
+        for category in self.categories:
+            label = str(category.get("label") or "")
+            specs = self.get_specs_for_category(label)
+            category_codes = sorted({
+                code
+                for spec in specs
+                for code in (spec.get("codes") or [spec.get("primary_code", "")])
+                if code
+            })
+            category_id = self.mobile_catalog_id("category", "|".join(category_codes) or label)
+            spec_rows = []
+            category_folder = os.path.join(root, self.safe_folder_name(label, "未命名类型"))
+            for spec in specs:
+                codes = [str(code) for code in (spec.get("codes") or []) if str(code)]
+                spec_id = self.mobile_catalog_id(
+                    "spec",
+                    category_id,
+                    "|".join(sorted(codes)) or spec.get("name", ""),
+                )
+                candidate_folders = [
+                    os.path.join(category_folder, folder_name)
+                    for folder_name in self.spec_alias_folder_names(spec)
+                ]
+                has_material = any(
+                    self.sorted_image_files(folder, show_psd=True) for folder in candidate_folders
+                )
+                spec_rows.append({
+                    "id": spec_id,
+                    "name": str(spec.get("name") or ""),
+                    "codes": codes,
+                    "has_material": has_material,
+                })
+                targets[f"{category_id}/{spec_id}"] = {
+                    "category_label": label,
+                    "spec_name": str(spec.get("name") or ""),
+                    "codes": codes,
+                }
+            categories.append({
+                "id": category_id,
+                "label": label,
+                "color": str(category.get("color") or "#DDEBF7"),
+                "needs_material": not spec_rows or any(not row["has_material"] for row in spec_rows),
+                "specs": spec_rows,
+            })
+        return {"catalog": {"categories": categories}, "targets": targets}
+
+    def mobile_upload_target(self, target):
+        label = str((target or {}).get("category_label") or "")
+        self.load_categories(refresh=False)
+        category = next((item for item in self.categories if item.get("label") == label), None)
+        if not category:
+            raise RuntimeError("商品类型已更新，请在手机端刷新")
+        specs = self.get_specs_for_category(label)
+        target_codes = set(str(code) for code in ((target or {}).get("codes") or []) if str(code))
+        spec = next(
+            (
+                item for item in specs
+                if target_codes.intersection(str(code) for code in (item.get("codes") or []) if str(code))
+            ),
+            None,
+        )
+        if spec is None:
+            target_name = str((target or {}).get("spec_name") or "")
+            spec = next((item for item in specs if item.get("name") == target_name), None)
+        if spec is None:
+            raise RuntimeError("商品规格已更新，请在手机端刷新")
+        self.sync_category_folder(category, specs)
+        folder = self.sync_spec_folder(category, spec) or self.spec_folder(category, spec)
+        os.makedirs(folder, exist_ok=True)
+        return {
+            "folder": folder,
+            "prefix": self.safe_folder_name(os.path.basename(folder), "未命名规格"),
+        }
 
     def clear_layout(self, layout):
         while layout.count():
@@ -3403,6 +3809,8 @@ class MaterialLibraryDialog(QDialog):
                     self.db.safe_execute("UPDATE cost_categories SET sort_order=? WHERE label=?", (index, label))
             if hasattr(self.db, "conn"):
                 self.db.conn.commit()
+            if hasattr(self.db, "set_setting"):
+                self.db.set_setting("cost_sync_local_dirty", "1")
             return True
         except Exception as e:
             try:
@@ -3460,6 +3868,36 @@ class MaterialLibraryDialog(QDialog):
         ):
             event.accept()
             return self.handle_tab_mode_switch()
+        if (
+            event.type() == QEvent.KeyPress
+            and event.matches(QKeySequence.Paste)
+            and self.event_belongs_to_material_window(watched)
+        ):
+            hovered = QApplication.widgetAt(QCursor.pos())
+            image_list = self.material_image_list_for_widget(hovered)
+            if image_list is not None:
+                self.paste_images_from_clipboard(image_list)
+                event.accept()
+                return True
+            over_reference_editor = self.widget_is_within(hovered, self.link_reference_editor)
+            if over_reference_editor:
+                if self.clipboard_contains_material_image():
+                    event.accept()
+                    return True
+                return False
+            if self.widget_is_within(watched, self.link_reference_editor):
+                event.accept()
+                return True
+        if (
+            event.type() == QEvent.MouseButtonPress
+            and getattr(self, "link_reference_panel", None) is not None
+            and self.link_reference_panel.isVisible()
+            and self._link_reference_loaded_type
+            and watched is not self.link_reference_editor
+            and not self.link_reference_editor.isAncestorOf(watched)
+        ):
+            self.link_reference_save_timer.stop()
+            self.save_link_type_reference(silent=True)
         if getattr(watched, "property", None) and watched.property("materialOrderType") in ("category", "spec"):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._chip_press_button = watched
@@ -3635,11 +4073,13 @@ class MaterialLibraryDialog(QDialog):
     def link_status_suffix(self, item):
         if item.get("deleted"):
             return self.LINK_DELETED_SUFFIX
+        if item.get("archived"):
+            return self.LINK_ARCHIVED_SUFFIX
         return ""
 
     def strip_link_status_suffix(self, name):
         text = str(name or "")
-        for suffix in (self.LINK_DELETED_SUFFIX,):
+        for suffix in (self.LINK_DELETED_SUFFIX, self.LINK_ARCHIVED_SUFFIX):
             if text.endswith(suffix):
                 return text[:-len(suffix)], suffix
         return text, ""
@@ -3776,35 +4216,42 @@ class MaterialLibraryDialog(QDialog):
     def load_link_data(self):
         if self.store_filter_combo.count() == 0:
             self.load_store_filter(self.link_store_filter_id)
+        if hasattr(self.db, "update_all_product_category_labels"):
+            self.db.update_all_product_category_labels(self.link_store_filter_id)
+        show_inactive = self.show_inactive_links_checkbox.isChecked()
         where = []
         params = []
         if self.link_store_filter_id is not None:
             where.append("p.store_id=?")
             params.append(self.link_store_filter_id)
+        if not show_inactive:
+            where.append("COALESCE(p.is_archived, 0)=0")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         try:
             rows = self.db.safe_fetchall(
                 f"""SELECT p.id, COALESCE(p.name, ''), COALESCE(p.title, ''),
                           COALESCE(p.link_type, ''), p.image_data, COALESCE(p.image_path, ''),
                           p.store_id, COALESCE(s.name, ''),
-                          COALESCE(lc.name, '')
+                          COALESCE(p.product_category_label, ''), COALESCE(cc.color, '#DDEBF7'),
+                          COALESCE(p.is_archived, 0)
                    FROM products p
                    LEFT JOIN stores s ON s.id = p.store_id
-                   LEFT JOIN link_combinations lc ON lc.id = p.link_combo_id
+                   LEFT JOIN cost_categories cc ON cc.label = p.product_category_label
                    {where_sql}
-                   ORDER BY COALESCE(s.sort_order, 0), s.id, COALESCE(lc.sort_order, 0),
-                            lc.name, COALESCE(p.link_type, ''), COALESCE(p.sort_order, 0), p.id""",
+                   ORDER BY COALESCE(cc.sort_order, 0), p.product_category_label,
+                            COALESCE(s.sort_order, 0), s.id, COALESCE(p.link_type, ''),
+                            COALESCE(p.sort_order, 0), p.id""",
                 tuple(params),
             )
         except Exception as e:
             QMessageBox.warning(self, "错误", f"读取链接素材数据失败：\n{e}")
             rows = []
-        show_inactive = self.show_inactive_links_checkbox.isChecked()
-        items = []
+        items_by_identity = {}
         current_codes = set()
-        for db_id, code, title, link_type, image_data, image_path, store_id, store_name, combo in rows:
+        for db_id, code, title, link_type, image_data, image_path, store_id, store_name, combo, category_color, archived in rows:
             code = str(code or db_id or "").strip()
-            if not code:
+            archived = bool(archived)
+            if not code or (archived and not show_inactive):
                 continue
             current_codes.add(code)
             item = {
@@ -3813,17 +4260,27 @@ class MaterialLibraryDialog(QDialog):
                 "title": str(title or ""),
                 "link_type": str(link_type or "").strip() or self.LINK_NO_TYPE,
                 "combo": str(combo or "").strip() or self.LINK_UNGROUPED,
+                "category_color": str(category_color or "#DDEBF7"),
                 "store_id": store_id,
                 "store_name": str(store_name or "").strip() or "未命名店铺",
                 "image_data": image_data,
                 "image_path": str(image_path or "").strip(),
+                "archived": archived,
                 "deleted": False,
             }
-            items.append(item)
+            identity = (store_id, code.casefold())
+            existing = items_by_identity.get(identity)
+            if existing is None or (existing.get("archived") and not archived):
+                items_by_identity[identity] = item
+        items = list(items_by_identity.values())
         if show_inactive and self.root_folder():
             items.extend(self.scan_deleted_link_folders(current_codes))
         self.link_items = items
-        self.link_combos = sorted({item["combo"] for item in items}, key=lambda value: value.lower())
+        self.link_combos = list(dict.fromkeys(item["combo"] for item in items))
+        if self.selected_link_combo and self.selected_link_combo not in self.link_combos:
+            self.selected_link_combo = ""
+            self.selected_link_type = ""
+            self.selected_link_product_ids = set()
 
     def rename_link_folder_to_status(self, item):
         target = self.link_product_folder(item, use_status=True)
@@ -3907,8 +4364,7 @@ class MaterialLibraryDialog(QDialog):
 
     def create_link_id_chip(self, item):
         text = item.get("code", "")
-        if item.get("deleted"):
-            text += self.LINK_DELETED_SUFFIX
+        text += self.link_status_suffix(item)
         store_name = str(item.get("store_name") or "").strip()
         if store_name:
             text = f"{store_name}\n{text}"
@@ -4059,9 +4515,9 @@ class MaterialLibraryDialog(QDialog):
         if showing_product:
             self.current_label.setText("\u94fe\u63a5\u7c7b\u578b\uff1a" + str(self.selected_link_type))
         elif showing_type:
-            self.current_label.setText("\u94fe\u63a5\u7ec4\u5408\uff1a" + str(self.selected_link_combo))
+            self.current_label.setText("商品类型：" + str(self.selected_link_combo))
         else:
-            self.current_label.setText("\u94fe\u63a5\u7ec4\u5408")
+            self.current_label.setText("商品类型")
 
         self.clear_layout(self.category_layout)
         self.clear_layout(self.spec_layout)
@@ -4074,9 +4530,10 @@ class MaterialLibraryDialog(QDialog):
         keyword = self.search_input.text().strip().lower()
         visible_items = self.filtered_link_items(keyword)
         if showing_combo:
-            combos = sorted({item["combo"] for item in visible_items}, key=lambda value: value.lower())
+            combos = list(dict.fromkeys(item["combo"] for item in visible_items))
             for combo in combos:
-                button = self.create_chip(combo, "#DDEBF7")
+                color = next((item.get("category_color") for item in visible_items if item["combo"] == combo), "#DDEBF7")
+                button = self.create_chip(combo, color)
                 button.setChecked(False)
                 button.clicked.connect(lambda _checked=False, value=combo: self.select_link_combo(value))
                 self.category_layout.addWidget(button)
@@ -4108,6 +4565,8 @@ class MaterialLibraryDialog(QDialog):
 
         if not self.link_items:
             self.image_count_label.setText("当前没有可显示的链接素材")
+        if self.link_reference_panel.isVisible():
+            self.load_link_type_reference()
         self.schedule_chip_layout_refresh()
 
     def select_category(self, category):
@@ -4297,11 +4756,16 @@ class MaterialLibraryDialog(QDialog):
     def show_psd_files(self):
         return bool(getattr(self, "show_psd_files_checkbox", None) and self.show_psd_files_checkbox.isChecked())
 
+    @staticmethod
+    def is_white_background_image(path):
+        stem = os.path.splitext(os.path.basename(str(path or "")))[0].strip().lower()
+        return stem.startswith("白底图") or "【白底图" in stem
+
     def image_natural_sort_key(self, path, white_first=False, mtime=None):
         name = os.path.basename(path)
         stem, _ext = os.path.splitext(name)
         normalized_stem = stem.strip().lower()
-        white_rank = 0 if white_first and normalized_stem == "白底图" else 1
+        white_rank = 0 if white_first and self.is_white_background_image(path) else 1
         parts = re.split(r"(\d+)", normalized_stem)
         natural_parts = [int(part) if part.isdigit() else part for part in parts]
         if mtime is None:
@@ -4334,6 +4798,104 @@ class MaterialLibraryDialog(QDialog):
             return [path for path, _mtime in entries]
         except Exception:
             return []
+
+    def product_material_images_for_spec_codes(self, spec_codes):
+        wanted = {str(code or "").strip() for code in spec_codes or [] if str(code or "").strip()}
+        result = {code: [] for code in wanted}
+        product_root = self.root_folder_for_mode(self.PRODUCT_MODE)
+        if not wanted or not product_root:
+            return result
+        placeholders = ",".join("?" for _ in wanted)
+        labels = {
+            str(row[0] or "").strip()
+            for row in self.db.safe_fetchall(
+                f"SELECT DISTINCT COALESCE(category_label, '') FROM cost_library WHERE spec_code IN ({placeholders})",
+                tuple(wanted),
+            )
+            if str(row[0] or "").strip()
+        }
+        self.load_categories(refresh=False)
+        categories = {str(item.get("label") or ""): item for item in self.categories}
+        for label in labels:
+            category = categories.get(label)
+            if not category:
+                continue
+            for spec in self.get_specs_for_category(label):
+                matching_codes = wanted.intersection(str(code) for code in spec.get("codes", []) if code)
+                if not matching_codes:
+                    continue
+                paths = []
+                category_folder = os.path.join(product_root, self.safe_folder_name(label, "未命名类型"))
+                folders = [
+                    os.path.join(category_folder, name)
+                    for name in self.spec_alias_folder_names(spec) + self.mapped_spec_folder_names(category, spec)
+                ]
+                for code in spec.get("codes", []) or []:
+                    mapped_path = str(self.settings.value(self.spec_folder_path_mapping_key(code), "") or "").strip()
+                    if mapped_path:
+                        folders.append(mapped_path)
+                for folder in dict.fromkeys(folders):
+                    for path in self.sorted_image_files(folder, white_first=True, show_psd=False):
+                        if path not in paths:
+                            paths.append(path)
+                for code in matching_codes:
+                    result[code] = paths
+        return result
+
+    def product_white_images_for_spec_codes(self, spec_codes):
+        result = {}
+        for code, paths in self.product_material_images_for_spec_codes(spec_codes).items():
+            white_image = next((path for path in paths if self.is_white_background_image(path)), "")
+            if white_image:
+                result[code] = white_image
+        return result
+
+    def save_cost_thumbnail_to_product_material(self, spec_code, image_data):
+        spec_code = str(spec_code or "").strip()
+        pixmap = QPixmap()
+        if not spec_code or not pixmap.loadFromData(bytes(image_data or b"")):
+            raise ValueError("图片数据无效")
+        rows = self.db.safe_fetchall(
+            """SELECT COALESCE(category_label, '') FROM cost_library WHERE spec_code=?""",
+            (spec_code,),
+        )
+        category_label = str(rows[0][0] or "").strip() if rows else ""
+        if not category_label:
+            raise ValueError("该规格没有商品类型，无法定位本机素材库")
+        if not self.ensure_root_folder():
+            return ""
+        self.load_categories(refresh=False)
+        category = next(
+            (item for item in self.categories if str(item.get("label") or "") == category_label),
+            None,
+        )
+        spec = next(
+            (
+                item for item in self.get_specs_for_category(category_label)
+                if spec_code in (item.get("codes") or [])
+                or spec_code in (item.get("code"), item.get("primary_code"))
+            ),
+            None,
+        )
+        if not category or not spec:
+            raise ValueError("本机素材库无法定位该规格")
+        folder = self.sync_spec_folder(category, spec)
+        os.makedirs(folder, exist_ok=True)
+        existing = next(
+            (
+                path for path in self.sorted_image_files(folder, white_first=True, show_psd=False)
+                if self.is_white_background_image(path)
+                and os.path.splitext(path)[1].lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+            ),
+            "",
+        )
+        target = existing or os.path.join(folder, "白底图.jpg")
+        if not pixmap.save(target):
+            raise OSError("写入本机素材库失败")
+        self.image_thumbnail_cache.clear()
+        if self.isVisible():
+            self.refresh_current_view()
+        return target
 
     def current_product_image_order_key(self):
         if self.library_mode != self.PRODUCT_MODE:
@@ -4665,15 +5227,6 @@ class MaterialLibraryDialog(QDialog):
             if match:
                 return column_key, int(match.group(1) or 0)
         return "main", 0
-
-    def is_link_auto_named_file(self, filename):
-        stem, _ext = os.path.splitext(os.path.basename(filename))
-        prefixes = ("主图", "详情页", "SKU", "??", "???")
-        return any(
-            (stem.strip().startswith(prefix + "【") and stem.strip().endswith("】"))
-            or (stem.strip().startswith(prefix + "?") and stem.strip().endswith("?"))
-            for prefix in prefixes
-        )
 
     def link_column_sort_key(self, path):
         name = os.path.basename(path).lower()
@@ -5274,6 +5827,14 @@ class MaterialLibraryDialog(QDialog):
             self.load_images_for_link_selection()
             return
         self.refresh_current_view()
+        self.notify_cost_thumbnail_scan()
+
+    def notify_cost_thumbnail_scan(self):
+        if self.library_mode != self.PRODUCT_MODE:
+            return
+        main_app = getattr(self, "main_app", None)
+        if main_app and hasattr(main_app, "request_cost_thumbnail_scan"):
+            QTimer.singleShot(0, main_app.request_cost_thumbnail_scan)
 
     def reset_image_item_text(self, item, text):
         image_list = item.listWidget() if item else self.image_list
@@ -5404,8 +5965,47 @@ class MaterialLibraryDialog(QDialog):
             return
         if self.psd_thumbnail_worker and self.psd_thumbnail_worker.isRunning():
             self.psd_thumbnail_worker.request_cancel()
-        QApplication.instance().removeEventFilter(self)
+        if self._app_filter_installed:
+            QApplication.instance().removeEventFilter(self)
+            self._app_filter_installed = False
+        if hasattr(self, "link_reference_save_timer"):
+            self.link_reference_save_timer.stop()
+            self.save_link_type_reference(silent=True)
         super().closeEvent(event)
+
+    def show_mobile_binding(self):
+        if self.library_mode != self.PRODUCT_MODE:
+            return
+        if not self.ensure_root_folder():
+            return
+        main_app = self.main_app
+        if main_app is None or not hasattr(main_app, "ensure_material_mobile_service"):
+            QMessageBox.warning(self, "手机绑定", "主程序没有初始化手机素材服务。")
+            return
+        account = (
+            main_app.archive_manager.get_active_data_account()
+            if getattr(main_app, "archive_manager", None)
+            else None
+        )
+        if not account:
+            QMessageBox.information(self, "手机绑定", "请先给当前数据绑定一个软件账号。")
+            return
+        if self.mobile_binding_dialog:
+            self.mobile_binding_dialog.close()
+        try:
+            from ..material_mobile_service import MobileBindingDialog
+            service = main_app.ensure_material_mobile_service()
+            dialog = MobileBindingDialog(service, account, self)
+            apply_window_icon(dialog, "material")
+        except Exception as exc:
+            QMessageBox.warning(self, "手机绑定启动失败", str(exc))
+            return
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda _obj=None: setattr(self, "mobile_binding_dialog", None))
+        self.mobile_binding_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def is_text_editing_focus(self):
         widget = QApplication.focusWidget()
@@ -5647,9 +6247,11 @@ class MaterialLibraryDialog(QDialog):
     def link_import_filename(self, folder, original_filename, column_key, next_indices):
         if self.library_mode != self.LINK_MODE or column_key not in ("main", "detail", "sku"):
             return original_filename
-        if self.is_link_auto_named_file(original_filename):
+        if column_key == "sku":
             return original_filename
-        return self.link_material_filename(original_filename, column_key)
+        index = self.allocate_link_column_index(folder, column_key, next_indices)
+        extension = os.path.splitext(original_filename)[1] or ".png"
+        return f"{self.link_image_column_prefix(column_key)}（{index}）{extension}"
 
     def link_move_filename(self, folder, original_filename, column_key, next_indices):
         if self.library_mode != self.LINK_MODE or column_key not in ("main", "detail", "sku"):
@@ -5891,6 +6493,7 @@ class MaterialLibraryDialog(QDialog):
                 return changed > 0
         if changed:
             self.refresh_current_view()
+            self.notify_cost_thumbnail_scan()
         return changed > 0
 
     def import_image_data(self, image_data):
@@ -5917,7 +6520,8 @@ class MaterialLibraryDialog(QDialog):
             column_key = self.active_link_import_column()
             if column_key in ("main", "detail", "sku"):
                 self.save_link_image_column(dest, column_key)
-        self.refresh_current_view()
+        self.refresh_after_image_file_change()
+        self.notify_cost_thumbnail_scan()
         return True
 
     def import_clipboard_image(self):

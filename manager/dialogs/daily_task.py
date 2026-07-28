@@ -717,7 +717,7 @@ class DailyTaskDialog(QDialog):
             self._create_task_card("🔴", "亏损链接优化", "检查所有亏损商品", f"扫描 {total} 个链接", "#ef4444", self.analyze_loss_links),
             self._create_task_card("🟠", "链接健康检查", "可调整链接 / 异常链接", f"扫描 {total} 个链接", "#f97316", self.analyze_link_health),
             self._create_task_card("🟣", "规格图片检查", "找出任意规格未上传图片", f"待检查缺图规格 {missing_count} 个", "#8b5cf6", self.analyze_missing_spec_images),
-            self._create_task_card("⚠", "废物链接", "连续两周导入无订单", f"待处理 {waste_count} 个", "#dc2626", self.analyze_waste_links),
+            self._create_task_card("⚠", "废物链接", "最近一周无订单（新链接 7 天保护）", f"待处理 {waste_count} 个", "#dc2626", self.analyze_waste_links),
             self._create_task_card("🗑", "垃圾链接", "连续两批推广无净成交", f"待处理 {garbage_count} 个", "#b91c1c", self.analyze_garbage_links),
         ]
         for card in cards:

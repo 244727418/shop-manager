@@ -56,6 +56,15 @@ def test_catalog_selection_enables_replay():
     dialog.close()
 
 
+def test_catalog_keeps_current_release_notes_available():
+    _app()
+    dialog = TutorialCatalogDialog(release_version="5.17.1", release_notes="修复更新流程")
+    assert dialog.release_notes_button.text() == "本次版本更新内容"
+    assert dialog.release_notes_button.isEnabled()
+    assert dialog.release_notes == "修复更新流程"
+    dialog.close()
+
+
 def test_catalog_numbers_topics_inside_each_category():
     _app()
     dialog = TutorialCatalogDialog()
@@ -77,6 +86,7 @@ def test_updated_tutorials_match_current_controls():
     spec_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "product_spec")
     cost_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "cost_library")
     material_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "material_library")
+    search_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "search_filters")
 
     assert SCREEN_ANCHORS["product_spec"]["discount"] == "promo_widget"
     assert SCREEN_ANCHORS["product_spec"]["batch"] == "batch_price_controls"
@@ -85,6 +95,20 @@ def test_updated_tutorials_match_current_controls():
     assert "AI选品" not in str(cost_topic)
     assert "Ctrl+Shift+S" in material_topic["steps"][1]["text"]
     assert "空格" in material_topic["steps"][2]["text"]
+    assert search_topic["steps"][-1]["anchor"] == "sort_direction"
+    assert [step["anchor"] for step in cost_topic["steps"][-3:]] == ["combo_review", "history", "lan_sync"]
+    assert "save" not in SCREEN_ANCHORS["cost"]
+    assert material_topic["steps"][-1]["anchor"] == "mobile"
+
+    store_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "store_margin")
+    assert "order_table" in [step["anchor"] for step in store_topic["steps"]]
+
+    pdd_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "pdd_tools")
+    assert [step["anchor"] for step in pdd_topic["steps"][-2:]] == ["pdd_code", "pdd_price"]
+    assert "跳转下一个未匹配" in pdd_topic["steps"][-1]["text"]
+
+    settings_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "settings_shortcuts")
+    assert settings_topic["steps"][-1]["anchor"] == "font"
 
     reports_topic = next(row for row in TUTORIAL_TOPICS if row["id"] == "reports_exports")
     report_anchors = [step["anchor"] for step in reports_topic["steps"]]

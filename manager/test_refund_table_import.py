@@ -1,8 +1,13 @@
+import os
 import zipfile
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from openpyxl import Workbook
+from PyQt5.QtWidgets import QApplication
 
 from manager.dialogs.input_data_dialog import (
+    InputDataDialog,
     _summarize_refund_rows,
     _summarize_refund_workbook,
 )
@@ -47,3 +52,16 @@ def test_refund_headers_can_be_on_adjacent_header_rows():
         ["", 99],
     ]
     assert _summarize_refund_rows(rows) == (12.5, 1)
+
+
+def test_accept_closes_refund_import_panel():
+    app = QApplication.instance() or QApplication([])
+    dialog = InputDataDialog()
+    dialog.show()
+    dialog._show_refund_import_panel(dialog.input_fields["退款金额"])
+    app.processEvents()
+    assert dialog.refund_import_panel.isVisible()
+
+    dialog.accept()
+    app.processEvents()
+    assert not dialog.refund_import_panel.isVisible()

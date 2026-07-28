@@ -7,10 +7,10 @@ import time
 from datetime import datetime, timedelta
 
 from PyQt5.QtCore import QDate, QPropertyAnimation, QRect, QTimer, Qt
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QAbstractItemView, QComboBox, QDateEdit, QDialog, QFileDialog,
-    QCheckBox, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
+    QApplication, QAbstractItemView, QComboBox, QDateEdit, QDialog, QFileDialog, QLineEdit,
+    QCheckBox, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
     QProgressDialog, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
@@ -19,6 +19,11 @@ try:
     from manager.file_dialog_memory import remembered_open_file
 except ImportError:
     from file_dialog_memory import remembered_open_file
+
+try:
+    from manager.pinyin_search import all_terms_match, split_search_terms
+except ImportError:
+    from pinyin_search import all_terms_match, split_search_terms
 
 try:
     import pandas as pd  # type: ignore
@@ -127,7 +132,21 @@ def _weekday_text(qdate):
     return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][qdate.dayOfWeek() - 1]
 
 
+def _promotion_search_match(data, search_text):
+    query = str(search_text or "").strip().casefold()
+    values = (
+        str(data.get("product_id") or "").strip(),
+        str(data.get("product_title") or "").strip(),
+        str(data.get("link_type") or "无链接类型").strip(),
+    )
+    exact = bool(query) and any(query == value.casefold() for value in values)
+    return exact, all_terms_match(split_search_terms(query), *values)
+
+
 def _promotion_quick_range(today, mode, latest_date=None):
+    if mode == "yesterday":
+        yesterday = today.addDays(-1)
+        return yesterday, yesterday
     if mode == "recent_7":
         end = today.addDays(-1)
         return end.addDays(-6), end
@@ -552,6 +571,13 @@ class PromotionDataDialog(QDialog):
         self.copy_bubble = None
         self._copy_bubble_anims = []
         self._applying_column_widths = False
+        self._search_text = ""
+        self._search_flash_product_id = ""
+        self._search_flash_on = False
+        self._search_flash_deadline = 0.0
+        self._search_flash_timer = QTimer(self)
+        self._search_flash_timer.setInterval(250)
+        self._search_flash_timer.timeout.connect(self._advance_search_flash)
         self.setWindowTitle(f"推广数据分析 - {store_name}")
         self.resize(1280, 720)
         self._build_ui()
@@ -775,6 +801,7 @@ class PromotionDataDialog(QDialog):
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDate(QDate.currentDate().addDays(-1))
+        self.date_edit.setMinimumWidth(135)
         self.date_edit.dateChanged.connect(lambda _date: self._select_single_date())
         top.addWidget(self.date_edit)
         self.date_label = QLabel("")
@@ -796,6 +823,16 @@ class PromotionDataDialog(QDialog):
         top.addWidget(self.btn_import)
         top.addWidget(self.btn_history)
         top.addWidget(self.btn_columns)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索商品ID、标题或链接类型（支持拼音）")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumWidth(270)
+        self.btn_search = QPushButton("搜索")
+        self.search_input.returnPressed.connect(self.apply_product_search)
+        self.search_input.textChanged.connect(self._reset_product_search_when_cleared)
+        self.btn_search.clicked.connect(self.apply_product_search)
+        top.addWidget(self.search_input)
+        top.addWidget(self.btn_search)
         top.addStretch()
         layout.addLayout(top)
 
@@ -807,18 +844,22 @@ class PromotionDataDialog(QDialog):
             editor.setDisplayFormat("yyyy-MM-dd")
             editor.setCalendarPopup(True)
             editor.setDate(self.date_edit.date())
+            editor.setMinimumWidth(125)
         range_row.addWidget(self.range_start_edit)
         range_row.addWidget(QLabel("至"))
         range_row.addWidget(self.range_end_edit)
         btn_query = QPushButton("查询")
+        btn_yesterday = QPushButton("昨日")
         btn_recent_7 = QPushButton("近7天")
         btn_last_week = QPushButton("上周")
         btn_this_week = QPushButton("本周")
         btn_query.clicked.connect(self._apply_selected_range)
+        btn_yesterday.clicked.connect(lambda: self._set_quick_range("yesterday"))
         btn_recent_7.clicked.connect(lambda: self._set_quick_range("recent_7"))
         btn_last_week.clicked.connect(lambda: self._set_quick_range("last_week"))
         btn_this_week.clicked.connect(lambda: self._set_quick_range("this_week"))
         range_row.addWidget(btn_query)
+        range_row.addWidget(btn_yesterday)
         range_row.addWidget(btn_recent_7)
         range_row.addWidget(btn_last_week)
         range_row.addWidget(btn_this_week)
@@ -923,6 +964,62 @@ class PromotionDataDialog(QDialog):
             str(name or "").strip(): {"sys_id": sys_id, "title": title or "", "is_natural_flow": bool(is_natural_flow)}
             for sys_id, name, title, is_natural_flow in rows
         }
+
+    def _reset_product_search_when_cleared(self, text):
+        if not str(text or "").strip() and self._search_text:
+            self._search_text = ""
+            self.load_current_date()
+
+    def apply_product_search(self):
+        self._search_text = self.search_input.text().strip()
+        self.load_current_date()
+
+    def _find_product_row(self, product_id):
+        column = self._column_for_key("product_id")
+        if column < 0:
+            return -1
+        target = str(product_id or "").strip()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, column)
+            if item and item.text().strip() == target:
+                return row
+        return -1
+
+    def _set_search_row_highlight(self, row, active):
+        brush = QBrush(QColor("#fff19a")) if active else QBrush()
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row, column)
+            if item:
+                item.setBackground(brush)
+
+    def _stop_search_flash(self):
+        self._search_flash_timer.stop()
+        row = self._find_product_row(self._search_flash_product_id) if self._search_flash_product_id else -1
+        if row >= 0:
+            self._set_search_row_highlight(row, False)
+        self._search_flash_product_id = ""
+        self._search_flash_on = False
+
+    def _start_search_flash(self, product_id):
+        self._stop_search_flash()
+        row = self._find_product_row(product_id)
+        if row < 0:
+            return
+        item = self.table.item(row, self._column_for_key("product_id"))
+        if item:
+            self.table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        self._search_flash_product_id = str(product_id or "")
+        self._search_flash_deadline = time.monotonic() + 2.0
+        self._advance_search_flash()
+        self._search_flash_timer.start()
+
+    def _advance_search_flash(self):
+        row = self._find_product_row(self._search_flash_product_id)
+        if row < 0 or time.monotonic() >= self._search_flash_deadline:
+            self._stop_search_flash()
+            return
+        self._search_flash_on = not self._search_flash_on
+        self._set_search_row_highlight(row, self._search_flash_on)
 
     def _calculate_promotion_profit_snapshot(self, product_sys_id, net_amount, cost):
         return self.db.calculate_promotion_profit_snapshot(product_sys_id, net_amount, cost)
@@ -1162,7 +1259,8 @@ class PromotionDataDialog(QDialog):
                    CASE WHEN totals.clicks<>0 THEN totals.net_orders/totals.clicks ELSE 0 END,
                    CASE WHEN totals.profit_count=totals.row_count THEN totals.net_profit END,
                    CASE WHEN totals.profit_count=totals.row_count AND totals.net_transaction_amount<>0
-                        THEN totals.net_profit/totals.net_transaction_amount*100 END
+                        THEN totals.net_profit/totals.net_transaction_amount*100 END,
+                   COALESCE(p.link_type, '')
             FROM totals
             LEFT JOIN products p ON p.store_id=? AND p.name=totals.product_id
               AND COALESCE(p.is_archived, 0)=0 AND COALESCE(p.is_violation, 0)=0
@@ -1196,6 +1294,7 @@ class PromotionDataDialog(QDialog):
             "click_conversion_rate": row[17],
             "net_profit": row[18],
             "net_margin_rate": row[19],
+            "link_type": row[20] or "",
             "_is_summary": False,
         }
 
@@ -1236,6 +1335,7 @@ class PromotionDataDialog(QDialog):
             "click_conversion_rate": net_orders / clicks if clicks else 0.0,
             "net_profit": net_profit,
             "net_margin_rate": (net_profit / net_amount * 100) if net_profit is not None and net_amount else None,
+            "link_type": "",
             "_is_summary": True,
         }
 
@@ -1280,6 +1380,7 @@ class PromotionDataDialog(QDialog):
     def load_current_date(self):
         if not hasattr(self, "table"):
             return
+        self._stop_search_flash()
         start, end = self._selected_range()
         if start > end:
             return
@@ -1288,6 +1389,13 @@ class PromotionDataDialog(QDialog):
         self._apply_main_table_columns()
         db_rows = self._fetch_current_rows()
         data_rows = [self._row_to_data(row) for row in db_rows]
+        exact_product_id = ""
+        if self._search_text:
+            exact_rows = [row for row in data_rows if _promotion_search_match(row, self._search_text)[0]]
+            if len(exact_rows) == 1:
+                exact_product_id = str(exact_rows[0].get("product_id") or "")
+            else:
+                data_rows = [row for row in data_rows if _promotion_search_match(row, self._search_text)[1]]
         summary = self._summary_row_data(data_rows)
         display_rows = ([summary] if summary else []) + data_rows
         self.table.setRowCount(len(display_rows))
@@ -1358,11 +1466,13 @@ class PromotionDataDialog(QDialog):
         day_count, record_count = counts[0] if counts else (0, 0)
         range_text = start.toString("yyyy-MM-dd") if start == end else f"{start.toString('yyyy-MM-dd')} 至 {end.toString('yyyy-MM-dd')}"
         self.status_label.setText(
-            f"{range_text}｜{day_count or 0} 天｜{len(db_rows)} 个链接｜{record_count or 0} 条数据"
+            f"{range_text}｜{day_count or 0} 天｜{len(data_rows)} 个链接｜{record_count or 0} 条数据"
         )
         self._resize_main_table_columns()
         QTimer.singleShot(0, self._resize_main_table_columns)
         self._apply_saved_main_sort()
+        if exact_product_id:
+            QTimer.singleShot(0, lambda pid=exact_product_id: self._start_search_flash(pid))
 
     def open_product_history(self, product_id, product_title=""):
         dialog = ProductPromotionHistoryDialog(self.store_id, self.store_name, product_id, product_title, self.db, self)
@@ -1389,19 +1499,22 @@ class PromotionImportHistoryDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        tip = QLabel("按导入日期汇总展示。删除会整体删除该日期下当前店铺的全部推广数据。")
+        tip = QLabel("按导入日期汇总展示。支持 Ctrl/Shift 多选，右键删除所选日期的全部推广数据。")
         tip.setWordWrap(True)
         tip.setStyleSheet("color: #666;")
         layout.addWidget(tip)
 
         self.table = QTableWidget()
         self._headers = [
-            "导入日期", "周几", "链接数", "成交花费", "净交易额", "净成交笔数", "净利润", "净利率", "导入时间", "操作"
+            "导入日期", "周几", "链接数", "成交花费", "净交易额", "净成交笔数", "净利润", "净利率", "导入时间"
         ]
         self.table.setColumnCount(len(self._headers))
         self.table.setHorizontalHeaderLabels(self._headers)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setCornerButtonEnabled(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(False)
@@ -1471,14 +1584,9 @@ class PromotionImportHistoryDialog(QDialog):
                     if compare_value is not None:
                         item.setForeground(QColor("#1b8f3a" if float(compare_value or 0) >= 0 else "#c0392b"))
                 self.table.setItem(row_idx, col, item)
-            btn_delete = QPushButton("删除")
-            btn_delete.setStyleSheet("QPushButton { color: #c0392b; font-weight: bold; }")
-            btn_delete.clicked.connect(lambda _=False, date=record_date: self.delete_date(date))
-            self.table.setCellWidget(row_idx, len(self._headers) - 1, btn_delete)
             self.table.setRowHeight(row_idx, 42)
         _resize_table_columns_by_values(
             self.table,
-            fixed_widths={len(self._headers) - 1: 48},
             default_min=34,
             default_max=120,
             fill_viewport=True,
@@ -1492,7 +1600,6 @@ class PromotionImportHistoryDialog(QDialog):
             return
         _resize_table_columns_by_values(
             self.table,
-            fixed_widths={len(self._headers) - 1: 48},
             default_min=34,
             default_max=120,
             fill_viewport=True,
@@ -1503,17 +1610,42 @@ class PromotionImportHistoryDialog(QDialog):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._resize_columns)
 
-    def delete_date(self, record_date):
+    def _selected_dates(self):
+        return sorted({
+            self.table.item(index.row(), 0).text()
+            for index in self.table.selectionModel().selectedRows(0)
+            if self.table.item(index.row(), 0)
+        }, reverse=True)
+
+    def _show_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        if not self.table.selectionModel().isRowSelected(row, self.table.rootIndex()):
+            self.table.clearSelection()
+            self.table.selectRow(row)
+        dates = self._selected_dates()
+        menu = QMenu(self)
+        action = menu.addAction(f"删除所选日期（{len(dates)}）")
+        action.triggered.connect(self.delete_selected_dates)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def delete_selected_dates(self):
+        dates = self._selected_dates()
+        if not dates:
+            return
+        target = dates[0] if len(dates) == 1 else f"所选 {len(dates)} 个导入日期"
         reply = QMessageBox.question(
             self,
             "确认删除",
-            f"确定删除 {record_date} 的全部推广数据吗？\n此操作会删除当前店铺该日期所有链接的数据。"
+            f"确定删除{target}的全部推广数据吗？\n此操作会整体删除当前店铺所选日期的所有链接数据。"
         )
         if reply != QMessageBox.Yes:
             return
+        placeholders = ",".join("?" for _ in dates)
         self.db.safe_execute(
-            "DELETE FROM promotion_daily_data WHERE store_id=? AND record_date=?",
-            (self.store_id, record_date)
+            f"DELETE FROM promotion_daily_data WHERE store_id=? AND record_date IN ({placeholders})",
+            (self.store_id, *dates)
         )
         self.load_rows()
         parent = self.parent()

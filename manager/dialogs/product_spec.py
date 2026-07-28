@@ -698,6 +698,7 @@ class ProductSpecDialog(QDialog):
         self.is_natural_flow = False
         self.is_sitewide_managed = False
         self.use_manual_spec_weight = False
+        self.use_manual_return_rate = False
         self._spec_filter_options = {1: [], 2: []}
         self._spec_filter_selected = {1: set(), 2: set()}
         self._initial_is_natural_flow = False
@@ -930,9 +931,9 @@ class ProductSpecDialog(QDialog):
         
         # ===== 营销活动 =====
         mk_widget = QWidget()
-        mk_v = QVBoxLayout(mk_widget)
-        mk_v.setContentsMargins(0, 0, 0, 0)
-        mk_v.setSpacing(3)
+        mk_h = QHBoxLayout(mk_widget)
+        mk_h.setContentsMargins(0, 0, 0, 0)
+        mk_h.setSpacing(5)
 
         self.btn_marketing = QPushButton()
         self.btn_marketing.setFixedSize(35, 35)
@@ -945,9 +946,28 @@ class ProductSpecDialog(QDialog):
             QPushButton:checked { background-color: #9b59b6; }
         """)
         self.btn_marketing.setCheckable(True)
-        self.btn_marketing.clicked.connect(self.update_tag_button_styles)
+        self.btn_marketing.clicked.connect(self._on_marketing_clicked)
 
-        mk_v.addWidget(self.btn_marketing, 0, Qt.AlignCenter)
+        self.marketing_activity_input = QLineEdit()
+        self.marketing_activity_input.setPlaceholderText("活动ID/名称...")
+        self.marketing_activity_input.setFixedWidth(150)
+        self.marketing_activity_input.setStyleSheet("padding: 3px; border: 1px solid #c39bd3; border-radius: 4px; font-size: 11px;")
+        self.marketing_activity_input.textChanged.connect(self._update_marketing_activity_tag)
+
+        self.marketing_activity_tag = QPushButton()
+        self.marketing_activity_tag.setMaximumWidth(240)
+        self.marketing_activity_tag.setCursor(Qt.PointingHandCursor)
+        self.marketing_activity_tag.setStyleSheet(
+            "QPushButton { color: #6c3483; background: #f4ecf7; border: 1px solid #af7ac5; "
+            "border-radius: 4px; padding: 3px 7px; font-weight: bold; }"
+            "QPushButton:hover { background: #e8daef; }"
+        )
+        self.marketing_activity_tag.clicked.connect(self._cancel_marketing_activity)
+        self.marketing_activity_tag.hide()
+
+        mk_h.addWidget(self.btn_marketing, 0, Qt.AlignCenter)
+        mk_h.addWidget(self.marketing_activity_input)
+        mk_h.addWidget(self.marketing_activity_tag)
         
         # ===== 最大优惠 =====
         max_widget = QWidget()
@@ -1131,6 +1151,7 @@ class ProductSpecDialog(QDialog):
         self.return_rate_input.setFixedWidth(80)
         self.return_rate_input.setStyleSheet("padding: 5px; border: 1px solid #ddd; border-radius: 3px;")
         self.return_rate_input.textChanged.connect(self.on_return_rate_changed)
+        self.return_rate_input.textEdited.connect(self._mark_manual_return_rate)
         roi_grid.addWidget(self.return_rate_input, 0, 3)
 
         roi_grid.addWidget(QLabel("毛保本投产:"), 0, 4)
@@ -2997,6 +3018,7 @@ class ProductSpecDialog(QDialog):
             self.transaction_bid_input,
             self.return_rate_input,
             self.expected_profit_spend_input,
+            self.marketing_activity_input,
         ):
             edit.textChanged.connect(self._record_undo_step)
 
@@ -3063,6 +3085,7 @@ class ProductSpecDialog(QDialog):
             "expected_profit_spend": snapshot.get("expected_profit_spend", ""),
             "limited_time": bool(snapshot.get("limited_time", False)),
             "marketing": bool(snapshot.get("marketing", False)),
+            "marketing_activity": snapshot.get("marketing_activity", ""),
             "natural_flow": bool(snapshot.get("natural_flow", False)),
             "sitewide_managed": bool(snapshot.get("sitewide_managed", False)),
             "two_level": bool(snapshot.get("two_level", False)),
@@ -3147,6 +3170,7 @@ class ProductSpecDialog(QDialog):
             "expected_profit_spend": self.expected_profit_spend_input.text(),
             "limited_time": self.btn_limited_time.isChecked(),
             "marketing": self.btn_marketing.isChecked(),
+            "marketing_activity": self.marketing_activity_input.text(),
             "natural_flow": self.btn_natural_flow.isChecked(),
             "sitewide_managed": self.btn_sitewide_managed.isChecked(),
             "two_level": self.chk_two_level_specs.isChecked(),
@@ -3206,6 +3230,7 @@ class ProductSpecDialog(QDialog):
             self.transaction_bid_input,
             self.return_rate_input,
             self.expected_profit_spend_input,
+            self.marketing_activity_input,
         ]
         buttons = [self.btn_limited_time, self.btn_marketing, self.btn_natural_flow, self.btn_sitewide_managed, self.chk_two_level_specs]
         for widget in inputs + buttons:
@@ -3239,6 +3264,7 @@ class ProductSpecDialog(QDialog):
             self.expected_profit_spend_input.setText(snapshot.get("expected_profit_spend", "100"))
             self.btn_limited_time.setChecked(bool(snapshot.get("limited_time", False)))
             self.btn_marketing.setChecked(bool(snapshot.get("marketing", False)))
+            self.marketing_activity_input.setText(snapshot.get("marketing_activity", ""))
             self.btn_natural_flow.setChecked(bool(snapshot.get("natural_flow", False)))
             self.btn_sitewide_managed.setChecked(bool(snapshot.get("sitewide_managed", False)))
             self.is_natural_flow = self.btn_natural_flow.isChecked()
@@ -3257,6 +3283,7 @@ class ProductSpecDialog(QDialog):
         self._apply_roi_bid_input_mode()
         self._update_promotion_mode_buttons()
         self.update_tag_button_styles()
+        self._update_marketing_activity_tag()
         self.update_max_discount_label()
         self._apply_manual_spec_column_backgrounds()
         for row, row_data in enumerate(snapshot.get("rows", [])):
@@ -3506,7 +3533,7 @@ class ProductSpecDialog(QDialog):
             saved_transaction_bid = 0.0
             saved_roi_input_mode = "roi"
             discount_rows = self.db.safe_fetchall(
-                "SELECT coupon_amount, new_customer_discount, current_roi, COALESCE(transaction_bid, 0), return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi'), COALESCE(use_manual_spec_weight, 0) FROM products WHERE id=?",
+                "SELECT coupon_amount, new_customer_discount, current_roi, COALESCE(transaction_bid, 0), return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, COALESCE(roi_input_mode, 'roi'), COALESCE(use_manual_spec_weight, 0), COALESCE(use_manual_return_rate, 0), COALESCE(marketing_activity, '') FROM products WHERE id=?",
                 (self.product_id,)
             )
             if discount_rows:
@@ -3521,6 +3548,8 @@ class ProductSpecDialog(QDialog):
                 is_sitewide_managed = discount_rows[0][8] if discount_rows[0][8] else 0
                 saved_roi_input_mode = discount_rows[0][9] if len(discount_rows[0]) > 9 and discount_rows[0][9] in ("roi", "bid") else "roi"
                 self.use_manual_spec_weight = bool(discount_rows[0][10]) if len(discount_rows[0]) > 10 else False
+                self.use_manual_return_rate = bool(discount_rows[0][11]) if len(discount_rows[0]) > 11 else False
+                marketing_activity = str(discount_rows[0][12] or "") if len(discount_rows[0]) > 12 else ""
                 
                 self.coupon_input.setText(str(int(round(coupon_amount))) if coupon_amount > 0 else "")
                 self.new_customer_input.setText(str(int(round(new_customer_discount))) if new_customer_discount > 0 else "")
@@ -3536,6 +3565,8 @@ class ProductSpecDialog(QDialog):
                 # 设置限时限量购和营销活动按钮状态
                 self.btn_limited_time.setChecked(bool(is_limited_time))
                 self.btn_marketing.setChecked(bool(is_marketing))
+                self.marketing_activity_input.setText(marketing_activity)
+                self._update_marketing_activity_tag()
                 self.is_natural_flow = bool(is_natural_flow)
                 self.is_sitewide_managed = bool(is_sitewide_managed) and not self.is_natural_flow
                 self._initial_is_natural_flow = self.is_natural_flow
@@ -3614,7 +3645,7 @@ class ProductSpecDialog(QDialog):
                 )
                 refund_counts = {str(code): int(count or 0) for code, count in refund_rows}
                 auto_refund_rate = self._get_imported_order_refund_rate()
-                if auto_refund_rate is not None:
+                if auto_refund_rate is not None and not self.use_manual_return_rate:
                     self.return_rate_input.setText(f"{auto_refund_rate:.2f}")
             recognized_total_orders = 0
             if has_imported_orders:
@@ -4240,10 +4271,10 @@ class ProductSpecDialog(QDialog):
         # 最佳投产 = 净保本投产 × 1.4
         best_roi = net_break_even * 1.4 if net_break_even > 0 else 0
         
-        self.lbl_gross_break_even.setText(f"{gross_break_even:.2f}")
-        self.lbl_net_break_even.setText(f"{net_break_even:.2f}")
-        self.lbl_best_roi.setText(f"{best_roi:.2f}")
-        self.lbl_scale_roi.setText(f"{net_break_even * 0.8:.2f}" if net_break_even > 0 else "--")
+        self.lbl_gross_break_even.setText(f"{gross_break_even:.2f}" if gross_break_even > 0 else "无法保本")
+        self.lbl_net_break_even.setText(f"{net_break_even:.2f}" if net_break_even > 0 else "无法保本")
+        self.lbl_best_roi.setText(f"{best_roi:.2f}" if best_roi > 0 else "无法保本")
+        self.lbl_scale_roi.setText(f"{net_break_even * 0.8:.2f}" if net_break_even > 0 else "无法放量")
         
         self.on_current_roi_changed()
     
@@ -4352,6 +4383,9 @@ class ProductSpecDialog(QDialog):
         """退款率输入变化时，重新计算所有指标"""
         if hasattr(self, 'lbl_gross_break_even'):
             self.calculate_roi_metrics()
+
+    def _mark_manual_return_rate(self, _text=None):
+        self.use_manual_return_rate = True
 
     def add_row(self):
         """添加新行"""
@@ -4907,21 +4941,6 @@ class ProductSpecDialog(QDialog):
                 if not monitor.is_devtools_alive():
                     monitor.open_merchant_page(store_id)
 
-            if hasattr(monitor, "open_goods_list_and_search_product") and product_code:
-                search_result = monitor.open_goods_list_and_search_product(
-                    product_code,
-                    expected_store_name=self._current_product_store_name(),
-                    store_id=store_id,
-                )
-                if not search_result.get("ok"):
-                    QMessageBox.information(
-                        self,
-                        "拼多多商品列表搜索",
-                        search_result.get("status") or "未能自动进入商品列表并搜索当前商品ID。",
-                    )
-                elif hasattr(self, "_show_copy_bubble"):
-                    self._show_copy_bubble(search_result.get("status") or "已自动搜索当前商品ID", fade_in_ms=120, hold_ms=900, fade_out_ms=180)
-
             try:
                 from manager.dialogs.store_margin import PddProductMatchDialog
             except ImportError:
@@ -5103,7 +5122,9 @@ class ProductSpecDialog(QDialog):
                 parts.append("  - 未填写包含规格")
             else:
                 for product in composition["items"]:
-                    parts.append(f"  - 商品名称：{product.get('name') or '-'}；产品属性：{product.get('param') or '-'}")
+                    quantity = float(product.get("quantity") or 1)
+                    qty_text = f"；包含数量：{int(quantity) if quantity.is_integer() else quantity:g}" if quantity > 1 else ""
+                    parts.append(f"  - 商品名称：{product.get('name') or '-'}；产品属性：{product.get('param') or '-'}{qty_text}")
             parts.append(f"成本：{cost or '-'}，售价：{sale_price or '-'}，券后价：{final_price or '-'}，毛利率：{margin_rate or '-'}")
             if include_weight:
                 parts.append(f"权重：{weight or '-'}")
@@ -5154,7 +5175,9 @@ class ProductSpecDialog(QDialog):
                 for product in composition["items"]:
                     name = html.escape(product.get("name") or "-")
                     param = html.escape(product.get("param") or "-")
-                    html_parts.append(f"<div style='margin-left:18px;'>- 商品名称：<b>{name}</b>；产品属性：{param}</div>")
+                    quantity = float(product.get("quantity") or 1)
+                    qty_text = f"；包含数量：{int(quantity) if quantity.is_integer() else quantity:g}" if quantity > 1 else ""
+                    html_parts.append(f"<div style='margin-left:18px;'>- 商品名称：<b>{name}</b>；产品属性：{param}{qty_text}</div>")
             detail = f"成本：{cost or '-'}，售价：{sale_price or '-'}，券后价：{final_price or '-'}，毛利率：{margin_rate or '-'}"
             if include_weight:
                 detail += f"，权重：{weight or '-'}"
@@ -5178,6 +5201,7 @@ class ProductSpecDialog(QDialog):
             return ""
         return "；".join(
             f"{item.get('name') or '-'}({item.get('param') or '-'})"
+            + (f"*{int(float(item.get('quantity') or 1))}" if float(item.get("quantity") or 1) > 1 else "")
             for item in composition["items"]
         )
 
@@ -5188,7 +5212,9 @@ class ProductSpecDialog(QDialog):
             return empty
         try:
             rows = self.db.safe_fetchall(
-                "SELECT COALESCE(spec_name, ''), COALESCE(product_attribute, '') FROM cost_library WHERE spec_code=?",
+                """SELECT COALESCE(spec_name, ''), COALESCE(product_attribute, ''),
+                          COALESCE(product_attribute_is_combo, 0), COALESCE(combo_components_json, '')
+                   FROM cost_library WHERE spec_code=?""",
                 (spec_code,),
             )
         except Exception:
@@ -5198,7 +5224,24 @@ class ProductSpecDialog(QDialog):
 
         spec_name = str(rows[0][0] or "").strip()
         product_attribute = str(rows[0][1] or "").strip()
-        is_combo = any(mark in product_attribute for mark in ("+", "＋", "﹢"))
+        is_combo = bool(rows[0][2])
+        if is_combo and rows[0][3]:
+            try:
+                components = json.loads(rows[0][3])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                components = []
+            items = []
+            for component in components:
+                component_rows = self.db.safe_fetchall(
+                    "SELECT COALESCE(spec_name, ''), COALESCE(product_attribute, '') FROM cost_library WHERE spec_code=?",
+                    (str(component.get("spec_code") or ""),),
+                )
+                if component_rows:
+                    items.append({"name": component_rows[0][0], "param": component_rows[0][1],
+                                  "quantity": component.get("quantity") or 1})
+            if items:
+                return {"found": True, "items": items}
+        is_combo = is_combo or any(mark in product_attribute for mark in ("+", "＋", "﹢"))
         if is_combo:
             parts = [part.strip() for part in re.split(r"\+|＋|﹢", product_attribute) if part.strip()]
             return {"found": True, "items": [self._split_cost_product_part(part) for part in parts]}
@@ -7577,7 +7620,7 @@ SKU名称尽量接近35字，最多不超过40字。
             self._update_expected_profit_label()
             net_margin_formula = margin_rate * (1 - return_rate / 100) - 0.006
             net_break_even = 1 / net_margin_formula if net_margin_formula > 0 else 0
-            scale_roi_text = f"{net_break_even * 0.8:.2f}" if net_break_even > 0 else "--"
+            scale_roi_text = f"{net_break_even * 0.8:.2f}" if net_break_even > 0 else "无法放量"
             if getattr(self, "is_natural_flow", False):
                 net_profit_rate = (margin_rate * (1 - return_rate / 100) - 0.006) * 100
                 self.lbl_net_profit_rate.setText(f"{net_profit_rate:.2f}%")
@@ -7663,8 +7706,8 @@ SKU名称尽量接近35字，最多不超过40字。
                 self.lbl_roi_multiple.setText(f"{roi_multiple:.2f}倍")
                 self.lbl_scale_roi.setText(f"{net_break_even * 0.8:.2f}")
             else:
-                self.lbl_roi_multiple.setText("--")
-                self.lbl_scale_roi.setText("--")
+                self.lbl_roi_multiple.setText("无法保本")
+                self.lbl_scale_roi.setText("无法放量")
 
             self.lbl_promotion_ratio.setText(f"{promotion_ratio:.2f}%")
 
@@ -7804,6 +7847,25 @@ SKU名称尽量接近35字，最多不超过40字。
         except ValueError:
             self.max_discount_label.setText("最大优惠: ¥0.00")
     
+    def _on_marketing_clicked(self, checked):
+        if not checked:
+            self.marketing_activity_input.clear()
+        self._update_marketing_activity_tag()
+        self.update_tag_button_styles()
+
+    def _update_marketing_activity_tag(self, _text=None):
+        activity = self.marketing_activity_input.text().strip()
+        self.marketing_activity_tag.setText(activity)
+        self.marketing_activity_tag.setToolTip(f"{activity}\n点击取消活动" if activity else "")
+        self.marketing_activity_tag.setVisible(bool(activity) and self.btn_marketing.isChecked())
+
+    def _cancel_marketing_activity(self):
+        self.btn_marketing.setChecked(False)
+        self.marketing_activity_input.clear()
+        self._update_marketing_activity_tag()
+        self.update_tag_button_styles()
+        self._record_undo_step()
+
     def update_tag_button_styles(self):
         """更新限时限量购和营销活动按钮的样式"""
         if self.btn_limited_time.isChecked():
@@ -7861,6 +7923,8 @@ SKU名称尽量接近35字，最多不超过40字。
         rows = self.table.rowCount()
         if rows == 0:
             return
+        if not self.chk_manual_weight.isChecked():
+            self.chk_manual_weight.setChecked(True)
         
         locked_weight_sum = 0.0
         unlocked_rows = []
@@ -8166,6 +8230,8 @@ SKU名称尽量接近35字，最多不超过40字。
                 param_changed = True
             old_limited_time = 0
             old_marketing = 0
+            old_marketing_activity = ""
+            marketing_activity = ""
             
             try:
                 coupon_amount = float(self.coupon_input.text()) if self.coupon_input.text() else 0
@@ -8241,14 +8307,17 @@ SKU名称尽量接近35字，最多不超过40字。
                 
                 is_limited_time = 1 if self.btn_limited_time.isChecked() else 0
                 is_marketing = 1 if self.btn_marketing.isChecked() else 0
+                marketing_activity = self.marketing_activity_input.text().strip() if is_marketing else ""
                 use_manual_spec_weight = 1 if self.chk_manual_weight.isChecked() else 0
+                use_manual_return_rate = 1 if self.use_manual_return_rate else 0
                 
                 old_tag_values = self.db.safe_fetchall(
-                    "SELECT is_limited_time, is_marketing FROM products WHERE id=?",
+                    "SELECT is_limited_time, is_marketing, COALESCE(marketing_activity, '') FROM products WHERE id=?",
                     (self.product_id,)
                 )
                 old_limited_time = old_tag_values[0][0] if old_tag_values and old_tag_values[0][0] else 0
                 old_marketing = old_tag_values[0][1] if old_tag_values and old_tag_values[0][1] else 0
+                old_marketing_activity = str(old_tag_values[0][2] or "") if old_tag_values else ""
                 
                 tag_changes = []
                 if is_limited_time != old_limited_time:
@@ -8257,10 +8326,10 @@ SKU名称尽量接近35字，最多不超过40字。
                         tag_changes.append("报名了限时限量购")
                     else:
                         tag_changes.append("取消了限时限量购")
-                if is_marketing != old_marketing:
+                if is_marketing != old_marketing or marketing_activity != old_marketing_activity:
                     param_changed = True
                     if is_marketing == 1:
-                        tag_changes.append("报名了营销活动")
+                        tag_changes.append(f"报名了{marketing_activity}" if marketing_activity else "报名了营销活动")
                     else:
                         tag_changes.append("取消了营销活动")
                 
@@ -8282,8 +8351,8 @@ SKU名称尽量接近35字，最多不超过40字。
                 net_break_even_roi = 1 / net_margin_formula if net_margin_formula > 0 else 0
                 
                 update_result = self.db.safe_execute(
-                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, transaction_bid=?, return_rate=?, is_limited_time=?, is_marketing=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=?, roi_input_mode=?, use_manual_spec_weight=? WHERE id=?",
-                    (coupon_amount, new_customer_discount, current_roi, transaction_bid, return_rate, is_limited_time, is_marketing, is_natural_flow, is_sitewide_managed, net_break_even_roi, roi_input_mode, use_manual_spec_weight, self.product_id)
+                    "UPDATE products SET coupon_amount=?, new_customer_discount=?, current_roi=?, transaction_bid=?, return_rate=?, is_limited_time=?, is_marketing=?, marketing_activity=?, is_natural_flow=?, is_sitewide_managed=?, net_break_even_roi=?, roi_input_mode=?, use_manual_spec_weight=?, use_manual_return_rate=? WHERE id=?",
+                    (coupon_amount, new_customer_discount, current_roi, transaction_bid, return_rate, is_limited_time, is_marketing, marketing_activity, is_natural_flow, is_sitewide_managed, net_break_even_roi, roi_input_mode, use_manual_spec_weight, use_manual_return_rate, self.product_id)
                 )
                 if update_result is None:
                     raise RuntimeError("保存投产比/成交出价失败")
@@ -8495,10 +8564,10 @@ SKU名称尽量接近35字，最多不超过40字。
                     log_parts.append(change_text)
                     metric_changes.append(self._build_metric_change("限时限量购", old_text, new_text, change_text, "limited_time", time_str))
 
-                if is_marketing != old_marketing:
-                    old_text = "已报名" if old_marketing else "未报名"
-                    new_text = "已报名" if is_marketing else "未报名"
-                    change_text = "报名了营销活动" if is_marketing else "取消了营销活动"
+                if is_marketing != old_marketing or marketing_activity != old_marketing_activity:
+                    old_text = old_marketing_activity or ("已报名" if old_marketing else "未报名")
+                    new_text = marketing_activity or ("已报名" if is_marketing else "未报名")
+                    change_text = (f"报名了{marketing_activity}" if marketing_activity else "报名了营销活动") if is_marketing else "取消了营销活动"
                     log_parts.append(change_text)
                     metric_changes.append(self._build_metric_change("营销活动", old_text, new_text, change_text, "marketing", time_str))
 

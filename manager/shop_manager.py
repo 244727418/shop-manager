@@ -1,5 +1,11 @@
 ﻿# ================= 版本信息 =================
-VERSION = "5.10.1"
+VERSION = "5.19"
+CURRENT_RELEASE_NOTES = (
+    "1. 成本库新增局域网实时同步，可创建或加入成本组织，并自动同步规格、图片、商品类型和操作历史；修复组合产品派生成本导致旧值回写的问题。\n"
+    "2. 素材库新增手机扫码上传，支持按商品类型和规格上传原图，并优化素材去重、引用及成本缩略图联动。\n"
+    "3. 优化平台规格与活动数据处理，完善添加编码页面打开、未匹配项定位、营销活动同步和抓取操作记录。\n"
+    "4. 优化订单退款率、主卖规格、销售额与链接盈亏展示，并改进商品卡片指标说明及毛利 Excel 导出。"
+)
 
 # ================= 系统标准库 =================
 import sys
@@ -17,6 +23,7 @@ import shutil
 import socket
 import threading
 import tempfile
+from copy import copy
 from datetime import datetime, timedelta
 from importlib import import_module
 
@@ -86,7 +93,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import (
     QPixmap, QColor, QIcon, QFont, QDrag, QStandardItemModel, QStandardItem,
     QFontMetrics, QDoubleValidator, QIntValidator, QRegExpValidator,
-    QPainter, QPen, QBrush, QCursor, QKeySequence, QPalette, QImage
+    QPainter, QPen, QBrush, QCursor, QKeySequence, QPalette, QImage, QFontDatabase
 )
 try:
     from PyQt5 import sip
@@ -168,6 +175,8 @@ StoreMarginExcelExporter = _LazyAttr("dialogs.store_margin", "StoreMarginExcelEx
 CostImportDialog = _LazyAttr("dialogs.cost_import", "CostImportDialog")
 CostLibraryDialog = _LazyAttr("dialogs.cost_library", "CostLibraryDialog")
 MaterialLibraryDialog = _LazyAttr("dialogs.material_library", "MaterialLibraryDialog")
+MaterialMobileService = _LazyAttr("material_mobile_service", "MaterialMobileService")
+CostSyncService = _LazyAttr("cost_sync_service", "CostSyncService")
 ApiConfigDialog = _LazyAttr("dialogs.api_config", "ApiConfigDialog")
 ProfitAnalysisDialog = _LazyAttr("dialogs.profit", "ProfitAnalysisDialog")
 ProfitCalculatorDialog = _LazyAttr("dialogs.profit", "ProfitCalculatorDialog")
@@ -224,6 +233,7 @@ try:
         is_trusted_update_manifest,
         load_pending_update,
         load_global_update_settings,
+        notify_update_agent,
         normalize_server_url,
         run_update_agent,
         save_global_update_setting,
@@ -245,6 +255,7 @@ except ImportError:
         is_trusted_update_manifest,
         load_pending_update,
         load_global_update_settings,
+        notify_update_agent,
         normalize_server_url,
         run_update_agent,
         save_global_update_setting,
@@ -275,6 +286,18 @@ if sys.platform == "win32":
     _USER32.RegisterHotKey.restype = wintypes.BOOL
     _USER32.UnregisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int)
     _USER32.UnregisterHotKey.restype = wintypes.BOOL
+
+
+def startup_release_notes(settings, current_version):
+    manifest = (settings or {}).get("last_update_manifest")
+    if not isinstance(manifest, dict):
+        return ""
+    version = str(current_version or "").strip()
+    if str(manifest.get("version") or "").strip() != version:
+        return ""
+    if str((settings or {}).get("release_notes_seen_version") or "").strip() == version:
+        return ""
+    return str(manifest.get("notes") or "").strip()
 
 
 def verify_update_admin_password(password):
@@ -580,12 +603,12 @@ class OperationRecordDelegate(TodayColumnDelegate):
         new_value = change.get("new", "") if isinstance(change, dict) else ""
         combined = f"{metric} {text} {old_value} {new_value}"
 
+        if "新建链接" in combined:
+            return "新建链接"
         if "主轮播图" in combined or "图片" in combined or "改图" in combined:
             return "改图"
         if "商品标题" in combined or "标题" in combined:
             return "改标题"
-        if "新建链接" in combined:
-            return "新建链接"
         if "链接下架" in combined or "下架" in combined:
             return "下架"
         if "恢复" in combined:
@@ -788,7 +811,51 @@ class ArchiveProgressDialog(QDialog):
         """)
 
 
+APP_FONT_PRESETS = {
+    "默认（微软雅黑）": "Microsoft YaHei",
+    "黄油体": "ZCOOL QingKe HuangYou",
+    "卡通体": "ZCOOL KuaiLe",
+    "书法体": "Ma Shan Zheng",
+    "宋体": "SimSun",
+    "黑体": "SimHei",
+    "圆体": "Resource Han Rounded CN",
+}
+BUNDLED_APP_FONT_FILES = {
+    "黄油体": "ZCOOLQingKeHuangYou-Regular.ttf",
+    "卡通体": "ZCOOLKuaiLe-Regular.ttf",
+    "书法体": "MaShanZheng-Regular.ttf",
+    "圆体": "ResourceHanRoundedCN-Regular.ttf",
+}
+
+
+def load_bundled_app_fonts():
+    manager_dir = os.path.join(sys._MEIPASS, "manager") if getattr(sys, "frozen", False) else os.path.dirname(__file__)
+    loaded = set()
+    for name, filename in BUNDLED_APP_FONT_FILES.items():
+        font_id = QFontDatabase.addApplicationFont(os.path.join(manager_dir, "fonts", filename))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if families:
+            APP_FONT_PRESETS[name] = families[0]
+            loaded.add(name)
+    return loaded
+
+
+def _set_application_font_family(family):
+    app = QApplication.instance()
+    font = app.font()
+    font.setFamily(family)
+    app.setFont(font)
+    for widget in app.allWidgets():
+        widget_font = QFont(widget.font())
+        widget_font.setFamily(family)
+        widget.setFont(widget_font)
+        widget.updateGeometry()
+        widget.update()
+
+
 class SettingsDialog(QDialog):
+    FONT_PRESETS = APP_FONT_PRESETS
+    DEFAULT_FONT = "默认（微软雅黑）"
     HOTKEY_FIELDS = [
         ("quick_hotkey_main", "主界面快速呼出", DEFAULT_GLOBAL_HOTKEYS["quick_hotkey_main"]),
         ("quick_hotkey_cost_library", "成本库快速呼出", DEFAULT_GLOBAL_HOTKEYS["quick_hotkey_cost_library"]),
@@ -843,6 +910,19 @@ class SettingsDialog(QDialog):
         """)
         self.update_admin_checkbox.setToolTip("仅主电脑勾选。勾选后可以开启局域网更新服务并推送更新。")
         layout.addWidget(self.update_admin_checkbox)
+
+        font_layout = QHBoxLayout()
+        font_layout.addWidget(QLabel("软件字体"))
+        self.font_combo = QComboBox()
+        for name, family in self.FONT_PRESETS.items():
+            self.font_combo.addItem(name)
+            self.font_combo.setItemData(self.font_combo.count() - 1, QFont(family, 11), Qt.FontRole)
+        self.font_combo.currentTextChanged.connect(
+            lambda name: self.font_combo.setFont(QFont(self.FONT_PRESETS.get(name, "Microsoft YaHei"), 11))
+        )
+        self.font_combo.setToolTip("内置字体无需安装，保存后立即应用")
+        font_layout.addWidget(self.font_combo, 1)
+        layout.addLayout(font_layout)
 
         layout.addSpacing(10)
         layout.addWidget(QLabel("<hr>"))
@@ -1004,12 +1084,15 @@ class SettingsDialog(QDialog):
         self.auto_start_checkbox.setChecked(is_enabled)
         settings = load_global_update_settings()
         self.update_admin_checkbox.setChecked(str(settings.get("update_admin_mode", "0")) == "1")
+        font_name = db.get_setting("app_font", self.DEFAULT_FONT) if db else self.DEFAULT_FONT
+        self.font_combo.setCurrentText(font_name if font_name in self.FONT_PRESETS else self.DEFAULT_FONT)
         for key, _label, default_value in self.HOTKEY_FIELDS:
             value = db.get_setting(key, default_value) if db else default_value
             self.hotkey_inputs[key].setKeySequence(QKeySequence(value or ""))
 
     def save_settings(self):
         auto_start_enabled = self.auto_start_checkbox.isChecked()
+        font_family = None
         if self.parent() and hasattr(self.parent(), "db"):
             settings = load_global_update_settings()
             was_admin = str(settings.get("update_admin_mode", "0")) == "1"
@@ -1029,6 +1112,9 @@ class SettingsDialog(QDialog):
                     return
             save_global_update_setting("update_admin_verified", "1")
             save_global_update_setting("update_admin_mode", "1" if self.update_admin_checkbox.isChecked() else "0")
+            font_name = self.font_combo.currentText()
+            self.parent().db.set_setting("app_font", font_name)
+            font_family = self.FONT_PRESETS[font_name]
             for key, _label, _default_value in self.HOTKEY_FIELDS:
                 sequence = self.hotkey_inputs[key].keySequence().toString(QKeySequence.NativeText)
                 self.parent().db.set_setting(key, sequence)
@@ -1046,9 +1132,12 @@ class SettingsDialog(QDialog):
                     "设置已保存，但以下快捷键注册失败，可能被系统或其它软件占用：\n"
                     + "\n".join(failed_hotkeys)
                 )
-            else:
-                QMessageBox.information(self, "成功", "设置已保存！")
             self.accept()
+            if font_family:
+                _set_application_font_family(font_family)
+                self.parent().repaint()
+            if not failed_hotkeys and hasattr(self.parent(), "show_toast"):
+                self.parent().show_toast("设置已保存", 500)
         else:
             QMessageBox.warning(self, "错误", "开机自启设置失败，请检查 Windows 启动项权限。")
             self.reject()
@@ -1187,6 +1276,10 @@ class ShopManagerApp(QMainWindow):
         self.startup_archive_account, startup_db_path = self.data_root_manager.resolve_startup_account()
         self.db = SafeDatabaseManager(startup_db_path) if startup_db_path else SafeDatabaseManager()
         self.db.init_default_prompts()
+        font_name = self.db.get_setting("app_font", SettingsDialog.DEFAULT_FONT)
+        _set_application_font_family(
+            SettingsDialog.FONT_PRESETS.get(font_name, SettingsDialog.FONT_PRESETS[SettingsDialog.DEFAULT_FONT])
+        )
         self.started_by_auto_start = "--autostart" in sys.argv
         auto_start_enabled = str(self.db.get_setting("auto_start_enabled", "1")) != "0"
         if not set_auto_start(auto_start_enabled):
@@ -1206,7 +1299,8 @@ class ShopManagerApp(QMainWindow):
         self.product_store_map = {}
         self.visible_product_ids = set()
         self.main_table_state = MainTableState()
-        self.product_sort_mode = self.db.get_setting("product_sort_mode", "order") or "order"
+        self.product_sort_mode = self.db.get_setting("product_sort_mode", "created_at") or "created_at"
+        self.product_sort_descending = self.db.get_setting("product_sort_descending", "1") != "0"
         self.main_view_mode = "data"
         self.bubble_product_widgets = {}
         self._data_mode_refresh_pending = False
@@ -1225,6 +1319,8 @@ class ShopManagerApp(QMainWindow):
         self.current_store_filter = set()  # 店铺筛选状态
         self.store_sheet_buttons = {}
         self.daily_task_dialog = None
+        self.material_mobile_service = None
+        self.cost_sync_service = None
         self.store_margin_dialogs = {}
         self.promotion_data_dialogs = {}
         self.record_dialogs = []
@@ -1262,11 +1358,15 @@ class ShopManagerApp(QMainWindow):
         self.update_publish_service = UpdatePublishService()
         self.update_listener = None
         self.update_download_worker = None
+        self.update_download_in_progress = False
+        self.update_download_requested_version = ""
         self.update_cache_worker = None
         self.update_progress_dialog = None
+        self.pending_downloaded_update_path = ""
         self.pending_update_manifest = None
         self._local_update_prompt_active = False
         self._dismissed_local_update_version = ""
+        self.local_update_scan_timer = None
         self.pending_test_message = ""
         self.update_notification_queue = []
         self.update_notification_active = False
@@ -1303,9 +1403,20 @@ class ShopManagerApp(QMainWindow):
         self.load_data_safe()
         self.start_global_reminder_check()
         self.update_archive_account_label()
+        if MaterialMobileService.is_enabled():
+            try:
+                self.ensure_material_mobile_service()
+            except Exception as e:
+                append_exception("material_mobile_service:start", error=e)
+        if self.db.get_cost_sync_state():
+            try:
+                self.ensure_cost_sync_service()
+            except Exception as e:
+                append_exception("cost_sync_service:start", error=e)
         self.init_shortcuts()
         self.apply_global_hotkeys(show_message=False)
         self.start_update_features()
+        QTimer.singleShot(800, self.show_release_notes_once)
         append_event("startup:finish_startup:done")
 
     def start_global_reminder_check(self):
@@ -1551,10 +1662,20 @@ class ShopManagerApp(QMainWindow):
         QTimer.singleShot(100, self.show_pending_update_notification)
 
     def _get_pdd_browser_monitor(self):
-        if not hasattr(self, "pdd_browser_monitor") or self.pdd_browser_monitor is None:
+        account = self.archive_manager.get_active_data_account() if self.archive_manager else None
+        profile_base_dir = self.archive_manager._archive_browser_dir_for_account(account) if account else None
+        if not profile_base_dir:
+            raise RuntimeError("当前数据未绑定存档账号，无法确定浏览器数据目录")
+
+        monitor = getattr(self, "pdd_browser_monitor", None)
+        if monitor and os.path.abspath(os.path.dirname(monitor.legacy_profile_root)) != os.path.abspath(profile_base_dir):
+            monitor.stop()
+            monitor = None
+        if monitor is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            self.pdd_browser_monitor = PddBrowserMonitor(base_dir)
-        return self.pdd_browser_monitor
+            monitor = PddBrowserMonitor(base_dir, profile_base_dir=profile_base_dir)
+            self.pdd_browser_monitor = monitor
+        return monitor
 
     def open_pinduoduo(self):
         store_id = self.store_combo.currentData() if hasattr(self, "store_combo") else None
@@ -1578,12 +1699,11 @@ class ShopManagerApp(QMainWindow):
         }
         title = titles.get(mode, "拼多多链接抓取")
         product_id = str(product_id or "").strip()
-        if mode == "code" and product_id:
-            QApplication.clipboard().setText(product_id)
         try:
             monitor = self._get_pdd_browser_monitor()
-            if mode != "code" or not product_id:
-                monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            monitor.activate_store_browser(store_id, open_url=True, open_new_tab=False)
+            if mode == "code" and product_id:
+                QApplication.clipboard().setText(product_id)
             try:
                 from manager.dialogs.store_margin import PddProductMatchDialog, PddPromotionStatusDialog
             except ImportError:
@@ -1611,8 +1731,8 @@ class ShopManagerApp(QMainWindow):
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()
-            if mode == "code" and product_id and hasattr(dialog, "start_initial_code_search"):
-                dialog.start_initial_code_search(product_id)
+            if mode == "code" and product_id and hasattr(dialog, "lbl_summary"):
+                dialog.lbl_summary.setText(f"已打开商家端并复制商品ID：{product_id}。请手动进入添加/编辑编码界面后开始抓取。")
             self.statusBar().showMessage(f"已打开店铺 {store_id} 的拼多多{title}窗口", 3000)
         except Exception as e:
             QMessageBox.warning(self, "拼多多链接抓取", f"打开{title}窗口失败：{e}")
@@ -1642,6 +1762,35 @@ class ShopManagerApp(QMainWindow):
             controller = TutorialController(self)
             self.tutorial_controller = controller
         controller.show_catalog()
+
+    def get_current_release_notes(self):
+        return CURRENT_RELEASE_NOTES
+
+    def show_current_release_notes(self, notes=None):
+        QMessageBox.information(
+            self,
+            f"v{self.current_version} 本次版本更新内容",
+            str(notes or self.get_current_release_notes()).strip(),
+        )
+
+    def show_release_notes_once(self):
+        settings = load_global_update_settings()
+        notes = startup_release_notes(settings, self.current_version)
+        if not notes:
+            installed = load_pending_update(
+                self.current_version,
+                verify_hash=False,
+                allow_current=True,
+            )
+            if installed and str(installed.get("version") or "").strip() == self.current_version:
+                fallback_settings = dict(settings)
+                fallback_settings["last_update_manifest"] = installed
+                notes = startup_release_notes(fallback_settings, self.current_version)
+        if not notes:
+            return False
+        save_global_update_setting("release_notes_seen_version", self.current_version)
+        self.show_current_release_notes(notes)
+        return True
 
     def resolve_tutorial_target(self, name):
         """返回当前数据卡片界面的真实教程目标。"""
@@ -1776,20 +1925,31 @@ class ShopManagerApp(QMainWindow):
         return self, False, "该功能会打开外部程序或立即执行操作，教程仅展示入口，不会实际触发。"
 
     def start_update_features(self):
-        """只在主程序运行时接收局域网更新广播。"""
+        """接收前台广播，并监测后台代理已下载的更新。"""
         if self.update_listener is None:
             self.update_listener = UpdateBroadcastListener(self)
             self.update_listener.updateReceived.connect(self.on_update_broadcast_received)
             self.update_listener.start()
+        QTimer.singleShot(250, self.check_local_update_package_on_startup)
         QTimer.singleShot(500, self.ensure_update_agent_task)
+        if self.local_update_scan_timer is None:
+            self.local_update_scan_timer = QTimer(self)
+            self.local_update_scan_timer.setInterval(3000)
+            self.local_update_scan_timer.timeout.connect(self.check_local_update_package_on_startup)
+            self.local_update_scan_timer.start()
 
     def ensure_update_agent_task(self):
         settings = load_global_update_settings()
-        if str(settings.get("auto_update_enabled", "0")) != "0":
-            save_global_update_setting("auto_update_enabled", "0")
+        publisher = str(settings.get("update_publish_enabled", "0")) == "1"
+        trusted = bool(
+            str(settings.get("trusted_update_server_id") or "").strip()
+            and str(settings.get("trusted_update_server_url") or "").strip()
+        )
+        if trusted and str(settings.get("auto_update_enabled", "0")) != "1":
+            save_global_update_setting("auto_update_enabled", "1")
 
         def configure_task():
-            if str(settings.get("update_publish_enabled", "0")) == "1":
+            if publisher or trusted:
                 ok, error = install_update_agent_task(run_now=True)
                 if not ok:
                     append_event(f"update:agent_task_failed error={error}")
@@ -1808,15 +1968,15 @@ class ShopManagerApp(QMainWindow):
             if not is_trusted_update_manifest(manifest, settings):
                 QMessageBox.warning(self, "已拦截更新", "更新来源与首次绑定的主电脑不一致。")
                 return None
-            return False
+            return True
 
         source = str(manifest.get("server_host") or manifest.get("_sender_ip") or "局域网主电脑")
         reply = QMessageBox.question(
             self,
             "信任更新主电脑",
-            f"是否信任主电脑“{source}”并接收本次更新通知？\n\n"
-            "信任只用于确认更新来源，不会开启后台下载。\n"
-            "每次下载仍需在软件打开时由你确认。",
+            f"是否信任主电脑“{source}”并自动接收更新？\n\n"
+            "信任后，即使主软件未打开，后台更新助手也会下载经过 SHA256 校验的 EXE。\n"
+            "下载完成后再由你选择立即重启或稍后自行重启。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -1824,8 +1984,11 @@ class ShopManagerApp(QMainWindow):
             return None
         try:
             bind_trusted_update_source(manifest)
-            self.show_toast("已信任主电脑，请确认是否下载更新", 1800)
-            return False
+            ok, error = install_update_agent_task(run_now=True)
+            if not ok:
+                raise RuntimeError(error or "后台更新助手启动失败")
+            self.show_toast("已信任主电脑，正在后台下载更新", 1800)
+            return True
         except Exception as e:
             QMessageBox.warning(self, "信任失败", f"更新来源保存失败：{e}")
             return None
@@ -1833,6 +1996,8 @@ class ShopManagerApp(QMainWindow):
     def check_local_update_package_on_startup(self, manual=False):
         if self._local_update_prompt_active:
             return True
+        if not manual and (not self.isVisible() or self.isMinimized()):
+            return False
         pending_candidate = load_pending_update(self.current_version, verify_hash=False)
         if pending_candidate and (
             not manual
@@ -1854,18 +2019,6 @@ class ShopManagerApp(QMainWindow):
             return False
         self._local_update_prompt_active = True
         try:
-            reply = QMessageBox.question(
-                self,
-                "检测到更新版本",
-                f"根目录检测到更新版本 v{remote_version}。\n\n"
-                "请确认当前数据已经保存。\n"
-                "是否关闭当前版本并打开新版本？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply != QMessageBox.Yes:
-                self._dismissed_local_update_version = remote_version
-                return True
             if pending_candidate:
                 validated = load_pending_update(self.current_version)
                 if not validated or str(validated.get("version") or "") != remote_version:
@@ -1878,16 +2031,46 @@ class ShopManagerApp(QMainWindow):
                 target_path = os.path.join(app_dir(), filename)
                 if os.path.abspath(target_path).lower() == os.path.abspath(sys.executable).lower():
                     target_path = os.path.join(app_dir(), f"shop_manager_v{remote_version}.exe")
-                temp_path = target_path + ".ready"
-                shutil.copy2(source_path, temp_path)
-                os.replace(temp_path, target_path)
-            self._update_exe_to_launch = target_path
-            self.quit_application()
+                temp_dir = os.path.join(app_dir(), ".update_tmp")
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_path = os.path.join(temp_dir, f"{filename}.{os.getpid()}.ready")
+                try:
+                    shutil.copy2(source_path, temp_path)
+                    os.replace(temp_path, target_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    try:
+                        os.rmdir(temp_dir)
+                    except OSError:
+                        pass
+            if self._ask_update_restart(target_path, remote_version):
+                self.quit_application()
+            else:
+                self._dismissed_local_update_version = remote_version
         except Exception as e:
             QMessageBox.warning(self, "更新准备失败", str(e))
         finally:
             self._local_update_prompt_active = False
         return True
+
+    def _ask_update_restart(self, target_path, remote_version=""):
+        self._update_exe_to_launch = target_path
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("更新下载完成")
+        version_text = f" v{remote_version}" if remote_version else ""
+        dialog.setText(
+            f"新版本{version_text}已下载并校验完成：\n"
+            f"{os.path.basename(target_path)}\n\n请选择重启时间。"
+        )
+        restart_button = dialog.addButton("立即重启", QMessageBox.AcceptRole)
+        dialog.addButton("稍后自行重启", QMessageBox.RejectRole)
+        dialog.setDefaultButton(restart_button)
+        dialog.exec_()
+        restart_now = dialog.clickedButton() is restart_button
+        if not restart_now:
+            self.show_toast("稍后退出软件时将自动打开新版本", 2200)
+        return restart_now
 
     def verify_developer_password(self):
         settings = load_global_update_settings()
@@ -2050,7 +2233,7 @@ class ShopManagerApp(QMainWindow):
             QTimer.singleShot(0, self.show_pending_update_notification)
 
     def on_update_broadcast_received(self, manifest):
-        """收到主电脑推送后逐条提示，不合并连续推送。"""
+        """在线时收到可信更新广播后直接下载。"""
         if self.is_local_update_broadcast(manifest):
             return
         if manifest.get("message_kind") == "test":
@@ -2060,13 +2243,28 @@ class ShopManagerApp(QMainWindow):
             })
             return
         self.remember_update_manifest(manifest)
-        if is_newer_version(str(manifest.get("version", "")).strip(), self.current_version):
-            self.enqueue_update_notification({
-                "type": "update",
-                "manifest": manifest,
-            })
+        remote_version = str(manifest.get("version", "")).strip()
+        if is_newer_version(remote_version, self.current_version):
+            if (
+                self.update_download_in_progress
+                or self.update_download_requested_version
+                or self.pending_downloaded_update_path
+            ):
+                return
+            self.update_download_requested_version = remote_version
+            try:
+                self.handle_update_manifest(manifest, show_no_update=False, auto_download=True)
+            finally:
+                if not self.update_download_in_progress:
+                    self.update_download_requested_version = ""
 
     def show_pending_update_notification(self):
+        if self.pending_downloaded_update_path:
+            target_path = self.pending_downloaded_update_path
+            self.pending_downloaded_update_path = ""
+            if self._ask_update_restart(target_path):
+                self.quit_application()
+            return
         if self.update_notification_active:
             return
         if self.update_notification_queue:
@@ -2092,7 +2290,7 @@ class ShopManagerApp(QMainWindow):
             self.pending_update_manifest = None
             self.handle_update_manifest(manifest, show_no_update=False)
 
-    def handle_update_manifest(self, manifest, show_no_update=False):
+    def handle_update_manifest(self, manifest, show_no_update=False, auto_download=False):
         self.remember_update_manifest(manifest)
         remote_version = str(manifest.get("version", "")).strip()
         if not remote_version:
@@ -2103,6 +2301,15 @@ class ShopManagerApp(QMainWindow):
             return
         trust_state = self._trust_update_source_if_needed(manifest)
         if trust_state is None:
+            return
+        if trust_state:
+            start_update_agent_task()
+            payload = dict(manifest)
+            notify_update_agent(payload)
+            QTimer.singleShot(1000, lambda: notify_update_agent(payload))
+            return
+        if auto_download:
+            self.download_update_package(manifest)
             return
         filename = manifest.get("filename") or os.path.basename(manifest.get("url", ""))
         message = (
@@ -2122,25 +2329,40 @@ class ShopManagerApp(QMainWindow):
             self.download_update_package(manifest)
 
     def download_update_package(self, manifest):
-        self.update_progress_dialog = QProgressDialog("正在下载更新...", "取消", 0, 100, self)
-        self.update_progress_dialog.setWindowTitle("下载更新")
-        self.update_progress_dialog.setWindowModality(Qt.WindowModal)
-        self.update_progress_dialog.setMinimumDuration(0)
-        self.update_progress_dialog.setAutoClose(False)
-        self.update_progress_dialog.setAutoReset(False)
-        self.update_progress_dialog.setValue(0)
+        if self.update_download_in_progress:
+            return
+        self.update_download_in_progress = True
+        self.update_download_requested_version = str(manifest.get("version", "")).strip()
+        try:
+            self.update_progress_dialog = QProgressDialog("正在下载更新...", "", 0, 100, self)
+            self.update_progress_dialog.setWindowTitle("下载更新")
+            self.update_progress_dialog.setWindowModality(Qt.WindowModal)
+            self.update_progress_dialog.setMinimumDuration(0)
+            self.update_progress_dialog.setAutoClose(False)
+            self.update_progress_dialog.setAutoReset(False)
+            self.update_progress_dialog.setCancelButton(None)
+            self.update_progress_dialog.setValue(0)
+            self.update_progress_dialog.show()
 
-        self.update_download_worker = UpdateDownloadWorker(manifest, app_dir(), self)
-        self.update_download_worker.progressChanged.connect(
-            lambda value: self._set_update_progress(
-                int(value * 0.8),
-                f"正在下载新版本：{value}%",
+            self.update_download_worker = UpdateDownloadWorker(manifest, app_dir(), self)
+            self.update_download_worker.progressChanged.connect(
+                lambda value: self._set_update_progress(
+                    value,
+                    f"正在后台下载新版本：{value}%",
+                )
             )
-        )
-        self.update_download_worker.finishedOk.connect(self.on_update_download_finished)
-        self.update_download_worker.failed.connect(self.on_update_download_failed)
-        self.update_progress_dialog.canceled.connect(self.update_download_worker.terminate)
-        self.update_download_worker.start()
+            self.update_download_worker.finishedOk.connect(self.on_update_download_finished)
+            self.update_download_worker.failed.connect(self.on_update_download_failed)
+            self.update_download_worker.finished.connect(self.on_update_download_worker_stopped)
+            self.update_download_worker.start()
+        except Exception as e:
+            self.update_download_in_progress = False
+            self.update_download_requested_version = ""
+            self.update_download_worker = None
+            if self.update_progress_dialog:
+                self.update_progress_dialog.close()
+                self.update_progress_dialog = None
+            QMessageBox.warning(self, "下载失败", f"无法启动更新下载：{e}")
 
     def _set_update_progress(self, value, text):
         dialog = self.update_progress_dialog
@@ -2153,15 +2375,34 @@ class ShopManagerApp(QMainWindow):
 
     def on_update_download_finished(self, target_path):
         if self.update_progress_dialog:
-            self.update_progress_dialog.setWindowTitle("正在安装更新")
-            self.update_progress_dialog.setCancelButton(None)
-            self._set_update_progress(82, "下载完成，正在准备更新，请勿操作...")
-        self._update_exe_to_launch = target_path
-        self.quit_application()
+            self._set_update_progress(100, "新版本下载完成")
+            self.update_progress_dialog.close()
+            self.update_progress_dialog = None
+        self.pending_downloaded_update_path = target_path
+
+    def on_update_download_worker_stopped(self):
+        worker = self.update_download_worker
+        self.update_download_worker = None
+        self.update_download_in_progress = False
+        self.update_download_requested_version = ""
+        if worker is not None:
+            worker.deleteLater()
+        if not self.pending_downloaded_update_path:
+            return
+        if self.isVisible() and not self.isMinimized():
+            QTimer.singleShot(0, self.show_pending_update_notification)
+        elif self.tray_icon:
+            self.tray_icon.showMessage(
+                "更新下载完成",
+                "打开软件后可选择是否重启到新版本",
+                QSystemTrayIcon.Information,
+                3000,
+            )
 
     def on_update_download_failed(self, error):
         if self.update_progress_dialog:
             self.update_progress_dialog.close()
+            self.update_progress_dialog = None
         QMessageBox.warning(self, "下载失败", f"下载更新失败：{error}")
 
     def show_shortcuts_dialog(self):
@@ -2654,13 +2895,16 @@ class ShopManagerApp(QMainWindow):
     def _refresh_account_bound_controls_from_db(self):
         """从当前数据库恢复会随账号变化的控件状态。"""
         try:
-            self.product_sort_mode = self.db.get_setting("product_sort_mode", "order") or "order"
+            self.product_sort_mode = self.db.get_setting("product_sort_mode", "created_at") or "created_at"
+            self.product_sort_descending = self.db.get_setting("product_sort_descending", "1") != "0"
             if hasattr(self, "product_sort_combo"):
                 idx = self.product_sort_combo.findData(self.product_sort_mode)
                 if idx >= 0:
                     self.product_sort_combo.blockSignals(True)
                     self.product_sort_combo.setCurrentIndex(idx)
                     self.product_sort_combo.blockSignals(False)
+            if hasattr(self, "btn_product_sort_direction"):
+                self._update_product_sort_direction_button()
 
             if hasattr(self, "btn_real_promotion_mode"):
                 self.btn_real_promotion_mode.blockSignals(True)
@@ -2695,6 +2939,7 @@ class ShopManagerApp(QMainWindow):
             return True, db_path
 
         try:
+            self.stop_cost_sync_service()
             self._update_account_switch_progress(progress, 45, "正在关闭当前账号窗口...")
             self._close_account_scoped_windows()
             self._clear_account_scoped_ui_state()
@@ -2724,6 +2969,7 @@ class ShopManagerApp(QMainWindow):
                 if self.main_view_mode == "data":
                     self._update_account_switch_progress(progress, 80, "正在生成主界面气泡...")
                     self._refresh_data_mode_view()
+                self.restart_cost_sync_service()
                 self._update_account_switch_progress(progress, 95, "正在恢复账号界面状态...")
                 append_event("account_switch:done direct_profile")
                 return True, profile_path
@@ -2749,6 +2995,7 @@ class ShopManagerApp(QMainWindow):
             if self.main_view_mode == "data":
                 self._update_account_switch_progress(progress, 80, "正在生成主界面气泡...")
                 self._refresh_data_mode_view()
+            self.restart_cost_sync_service()
             self._update_account_switch_progress(progress, 95, "正在恢复账号界面状态...")
             append_event("account_switch:done copied_profile")
             return True, db_path
@@ -2763,6 +3010,7 @@ class ShopManagerApp(QMainWindow):
                 self.db = SafeDatabaseManager()
                 if self.archive_manager:
                     self.archive_manager.db = self.db
+                self.restart_cost_sync_service()
             except Exception:
                 pass
             return False, str(e)
@@ -2978,6 +3226,9 @@ class ShopManagerApp(QMainWindow):
 
     def quit_application(self):
         """退出应用"""
+        if self.update_download_in_progress:
+            self.show_toast("更新正在下载，请等待下载完成", 1800)
+            return
         if self._is_quitting:
             return
         self._is_quitting = True
@@ -3106,6 +3357,11 @@ finally {
         QApplication.quit()
 
     def _cleanup_before_quit(self):
+        self.stop_cost_sync_service()
+        service = getattr(self, "material_mobile_service", None)
+        if service is not None:
+            service.stop()
+            self.material_mobile_service = None
         monitor = getattr(self, "pdd_browser_monitor", None)
         if monitor is not None and hasattr(monitor, "stop"):
             monitor.stop()
@@ -3142,6 +3398,7 @@ finally {
                 # 最小化到任务栏（默认行为，不做额外处理）
                 pass
         elif event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            QTimer.singleShot(100, self.check_local_update_package_on_startup)
             QTimer.singleShot(100, self.show_pending_update_notification)
         super().changeEvent(event)
 
@@ -3246,7 +3503,7 @@ finally {
         """)
         self.btn_store_filter.clicked.connect(self.show_store_filter_menu)
 
-        self.tag_filter_menu = QFrame(self)
+        self.tag_filter_menu = QFrame(self, Qt.Popup | Qt.FramelessWindowHint)
         self.tag_filter_menu.hide()
         self.tag_filter_menu.setStyleSheet("""
             QFrame {
@@ -3525,6 +3782,7 @@ finally {
         toolbar.addWidget(btn_next)
 
         self.product_sort_combo = QComboBox()
+        self.product_sort_combo.addItem("按创建时间", "created_at")
         self.product_sort_combo.addItem("按单量", "order")
         self.product_sort_combo.addItem("按净利率", "net_margin")
         self.product_sort_combo.addItem("按净利润", "net_profit")
@@ -3548,6 +3806,12 @@ finally {
             }
         """)
         toolbar.addWidget(self.product_sort_combo)
+
+        self.btn_product_sort_direction = QPushButton()
+        self.btn_product_sort_direction.setFixedSize(58, 30)
+        self.btn_product_sort_direction.clicked.connect(self.toggle_product_sort_direction)
+        self._update_product_sort_direction_button()
+        toolbar.addWidget(self.btn_product_sort_direction)
 
         toolbar.addStretch()
 
@@ -3748,6 +4012,7 @@ finally {
             self.btn_tutorial: "查看软件全部功能，并进入不会保存数据的分步新手教程。",
             self.btn_tag_filter: "按商品类型、活动状态、推广方式、垃圾/废物标签和盈亏状态筛选链接。",
             self.btn_store_filter: "选择需要显示的店铺；店铺管理也可使用顶部店铺标签右键菜单。",
+            self.btn_product_sort_direction: "切换当前链接排序的升序和降序。",
             self.btn_clear_category_filter: "清除当前商品类型关键字筛选。",
             self.btn_filter_coupon: "只显示设置了优惠券的链接。",
             self.btn_filter_new_customer: "只显示设置了新客立减的链接。",
@@ -3767,7 +4032,7 @@ finally {
             btn_daily_task: "打开每日任务，查看待办、废物链接和垃圾链接。",
             btn_export: "批量导出店铺毛利，可选择详细版或单文件多 Sheet 简化版。",
             self.btn_api_config: "配置 AI API 密钥和各类提示词。",
-            self.btn_view_cost: "打开成本库，管理规格编码、成本和链接组合。",
+            self.btn_view_cost: "打开成本库，管理规格编码、成本和商品类型链接。",
             self.btn_material_library: "打开素材库，管理商品类型和产品素材。",
             self.btn_real_promotion_mode: "切换真实推广数据模式；每个店铺显示自己最近一次导入的数据。",
             self.btn_update_center: "输入开发者密码后，管理并推送局域网更新。",
@@ -3981,6 +4246,7 @@ finally {
                 border-color: #5f8a62;
             }
         """)
+        self.btn_product_sort_direction.setStyleSheet(self._outline_button_style("#6b7280", "#6b7280"))
 
     def _store_sheet_button_style(self, active=False):
         if active:
@@ -4912,7 +5178,6 @@ finally {
                 background-color: {hover};
             }}
         """)
-
     def _apply_main_view_mode(self, refresh=True):
         if not hasattr(self, "main_view_stack"):
             return
@@ -4939,9 +5204,6 @@ finally {
             self.show_toast(f"纯数据模式刷新失败: {e}")
         finally:
             self._data_mode_refresh_pending = False
-            self._product_margin_metrics_cache = None
-            self._product_card_data_cache = None
-            self._main_view_change_token = self._current_main_view_change_token()
 
     def _visible_product_ids(self):
         if hasattr(self, "visible_product_ids"):
@@ -5050,6 +5312,8 @@ finally {
     def _refresh_data_mode_view(self):
         if not hasattr(self, "data_mode_layout"):
             return
+        self._data_mode_render_token = getattr(self, "_data_mode_render_token", 0) + 1
+        render_token = self._data_mode_render_token
         self._prepare_product_card_caches()
         saved_scroll = self.data_mode_scroll.verticalScrollBar().value()
         self.data_mode_sticky_header.hide()
@@ -5060,14 +5324,13 @@ finally {
         self._data_mode_store_sections = {}
         visible_ids = self._visible_product_ids()
         stores = self.db.safe_fetchall("SELECT id, name FROM stores ORDER BY sort_order")
-        search_ids = getattr(self, "current_search_match_ids", None)
         real_mode = self.is_real_promotion_data_mode()
-        show_data_only = real_mode and self.db.get_setting("real_promotion_show_ordered_data_only", "1") == "1"
         self._latest_promotion_data_cache = {} if real_mode else None
+        render_jobs = []
 
         for store_id, store_name in stores:
             all_products = self._sort_products_for_display(self.db.safe_fetchall(
-                "SELECT id, name, title, image_data, sort_order, product_category_label "
+                "SELECT id, name, title, image_data, sort_order, product_category_label, created_at "
                 "FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                 (store_id,),
             ))
@@ -5076,28 +5339,63 @@ finally {
                 continue
 
             section, flow_layout = self._create_data_mode_store_section(store_id, store_name)
-            for product in products:
-                product_id, product_code, title, image_data = product[:4]
-                self.product_store_map[product_id] = store_id
+            if products:
+                section.hide()
+            render_jobs.extend((store_id, section, flow_layout, product) for product in products)
+
+        self._data_mode_render_jobs = render_jobs
+        self._data_mode_render_index = 0
+        self._data_mode_render_saved_scroll = saved_scroll
+        QTimer.singleShot(0, lambda token=render_token: self._render_next_data_mode_link(token))
+
+    def _render_next_data_mode_link(self, render_token):
+        if render_token != getattr(self, "_data_mode_render_token", None):
+            return
+        index = self._data_mode_render_index
+        jobs = self._data_mode_render_jobs
+        if index >= len(jobs):
+            self._apply_data_mode_store_visibility()
+            saved_scroll = self._data_mode_render_saved_scroll
+            QTimer.singleShot(0, lambda value=saved_scroll: self.data_mode_scroll.verticalScrollBar().setValue(value))
+            QTimer.singleShot(0, self._update_sticky_store_header)
+            self._product_margin_metrics_cache = None
+            self._product_card_data_cache = None
+            self._main_view_change_token = self._current_main_view_change_token()
+            append_event(f"ui:data_mode_render:done count={len(jobs)}")
+            return
+
+        store_id, section, flow_layout, product = jobs[index]
+        self._data_mode_render_index += 1
+        product_id, product_code, title, image_data = product[:4]
+        try:
+            if (
+                _qobject_alive(section)
+                and self.product_store_map.get(product_id) == store_id
+                and not _qobject_alive(self.bubble_product_widgets.get(product_id))
+            ):
                 bubble = ProductWidget(
                     product_id, product_code, title, image_data, self, display_mode="bubble"
                 )
                 flow_layout.addWidget(bubble)
-                if show_data_only:
-                    data = self.get_latest_promotion_data(store_id, product_code)
-                    bubble.setVisible(_promotion_link_visible(data, show_data_only))
-                bubble.set_search_highlight(search_ids is not None and product_id in search_ids)
                 self.bubble_product_widgets[product_id] = bubble
-            if show_data_only and not any(
-                not bubble.isHidden() for bubble in section.findChildren(ProductWidget)
-            ):
-                section.hide()
+                visible = product_id in self._visible_product_ids()
+                show_data_only = (
+                    self.is_real_promotion_data_mode()
+                    and self.db.get_setting("real_promotion_show_ordered_data_only", "1") == "1"
+                )
+                if visible and show_data_only:
+                    visible = _promotion_link_visible(
+                        self.get_latest_promotion_data(store_id, product_code), show_data_only
+                    )
+                bubble.setVisible(visible)
+                search_ids = getattr(self, "current_search_match_ids", None)
+                bubble.set_search_highlight(search_ids is not None and product_id in search_ids)
+                if visible:
+                    section.show()
+        except Exception as e:
+            append_exception(f"ui:data_mode_render:product_failed product_id={product_id}", error=e)
 
-        QTimer.singleShot(
-            0,
-            lambda value=saved_scroll: self.data_mode_scroll.verticalScrollBar().setValue(value),
-        )
-        QTimer.singleShot(0, self._update_sticky_store_header)
+        QTimer.singleShot(20, lambda token=render_token: self._render_next_data_mode_link(token))
 
     def refresh_after_product_added(self, product_id, store_id):
         append_event(f"ui:product_added_refresh:start product_id={product_id} store_id={store_id}")
@@ -5275,7 +5573,12 @@ finally {
             )
         self.data_mode_layout.invalidate()
         self.data_mode_container.updateGeometry()
-        self._update_sticky_store_header(force=True)
+        sticky = getattr(self, "data_mode_sticky_header", None)
+        if _qobject_alive(sticky):
+            sticky.hide()
+            self._sticky_store_widget = None
+            self._sticky_store_cache_key = None
+            QTimer.singleShot(0, self._update_sticky_store_header)
         return True
 
     def toggle_real_promotion_data_mode(self, *_args):
@@ -5841,11 +6144,25 @@ finally {
     def on_product_sort_changed(self):
         if not hasattr(self, "product_sort_combo"):
             return
-        mode = self.product_sort_combo.currentData() or "order"
+        mode = self.product_sort_combo.currentData() or "created_at"
         if mode == self.product_sort_mode:
             return
         self.product_sort_mode = mode
         self.db.set_setting("product_sort_mode", mode)
+        self._refresh_product_sort_display()
+
+    def _update_product_sort_direction_button(self):
+        descending = getattr(self, "product_sort_descending", True)
+        self.btn_product_sort_direction.setText("↓ 降序" if descending else "↑ 升序")
+        self.btn_product_sort_direction.setToolTip("当前最新/数值较大在前" if descending else "当前最早/数值较小在前")
+
+    def toggle_product_sort_direction(self):
+        self.product_sort_descending = not getattr(self, "product_sort_descending", True)
+        self.db.set_setting("product_sort_descending", "1" if self.product_sort_descending else "0")
+        self._update_product_sort_direction_button()
+        self._refresh_product_sort_display()
+
+    def _refresh_product_sort_display(self):
         if self.main_view_mode == "data":
             self._prepare_product_card_caches()
             try:
@@ -5879,7 +6196,7 @@ finally {
                 if item.widget() is None or _qobject_alive(item.widget())
             ]
             products = self._sort_products_for_display(self.db.safe_fetchall(
-                "SELECT id, name, title, image_data, sort_order, product_category_label "
+                "SELECT id, name, title, image_data, sort_order, product_category_label, created_at "
                 "FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                 (store_id,),
             ))
@@ -5917,14 +6234,27 @@ finally {
 
     def refresh_external_products(self, product_ids):
         """Refresh products changed by independent dialogs without rebuilding the main view."""
-        ids = list(dict.fromkeys(int(pid) for pid in (product_ids or []) if pid))
-        if not ids:
+        pending = getattr(self, "_pending_external_product_refreshes", set())
+        pending.update(int(pid) for pid in (product_ids or []) if pid)
+        self._pending_external_product_refreshes = pending
+        if not pending or getattr(self, "_external_product_refresh_scheduled", False):
             return
+        self._external_product_refresh_scheduled = True
+        QTimer.singleShot(0, self._drain_external_product_refreshes)
+
+    def _drain_external_product_refreshes(self):
         if self.is_loading:
-            QTimer.singleShot(150, lambda values=ids: self.refresh_external_products(values))
+            QTimer.singleShot(150, self._drain_external_product_refreshes)
             return
-        for product_id in ids:
+        pending = getattr(self, "_pending_external_product_refreshes", set())
+        batch = list(pending)[:4]
+        for product_id in batch:
+            pending.discard(product_id)
             self.force_refresh_product_widget(product_id)
+        if pending:
+            QTimer.singleShot(16, self._drain_external_product_refreshes)
+        else:
+            self._external_product_refresh_scheduled = False
 
     def _calculate_product_net_margin(self, product_id):
         try:
@@ -5971,8 +6301,9 @@ finally {
             return None
 
     def _build_product_sort_info(self, product, mode=None):
-        product_id, product_code, _title, _image_data, sort_order, category_label = product
-        mode = mode or self.product_sort_mode or "order"
+        product_id, product_code, _title, _image_data, sort_order, category_label = product[:6]
+        created_at = str(product[6] or "") if len(product) > 6 else ""
+        mode = mode or self.product_sort_mode or "created_at"
         category_label = str(category_label or "").strip()
         if mode == "category":
             calculated_category = self.db.calculate_product_category_label(product_id)
@@ -5997,6 +6328,7 @@ finally {
             "roi": sort_metrics.get("roi"),
             "roi_multiple": sort_metrics.get("roi_multiple"),
             "category_label": category_label,
+            "created_at": created_at,
             "fallback_order": fallback_order,
             "product_id": product_id,
         }
@@ -6076,7 +6408,7 @@ finally {
         rows = self.db.safe_fetchall(
             """SELECT p.id, p.name, p.coupon_amount, p.new_customer_discount, p.current_roi,
                       p.return_rate, p.net_break_even_roi, p.is_limited_time,
-                      p.is_marketing, p.is_natural_flow, p.is_sitewide_managed,
+                      p.is_marketing, COALESCE(p.marketing_activity, ''), p.is_natural_flow, p.is_sitewide_managed,
                       p.store_id, COALESCE(p.roi_input_mode, 'roi'),
                       COALESCE(p.transaction_bid, 0), p.product_category_label,
                       p.link_type, p.product_memo, COALESCE(s.sitewide_roi, 0),
@@ -6088,7 +6420,7 @@ finally {
         )
         fields = (
             "product_code", "coupon_amount", "new_customer_discount", "current_roi", "return_rate",
-            "net_break_even_roi", "is_limited_time", "is_marketing", "is_natural_flow",
+            "net_break_even_roi", "is_limited_time", "is_marketing", "marketing_activity", "is_natural_flow",
             "is_sitewide_managed", "store_id",
             "roi_input_mode", "transaction_bid", "product_category_label", "link_type",
             "product_memo", "sitewide_roi", "is_violation",
@@ -6101,14 +6433,15 @@ finally {
             self._product_card_data_cache = card_data
             self._product_margin_metrics_cache = self.db.calculate_products_gross_margin_metrics(product_ids)
             task_flags = {
-                product_id: (bool(garbage), bool(waste), bool(pending))
-                for product_id, garbage, waste, pending in self.db.safe_fetchall(
+                product_id: (bool(garbage), bool(waste), bool(pending), garbage_content or "")
+                for product_id, garbage, waste, pending, garbage_content in self.db.safe_fetchall(
                     """SELECT product_id,
                               MAX(CASE WHEN task_content LIKE ? THEN 1 ELSE 0 END),
                               MAX(CASE WHEN task_content LIKE ? THEN 1 ELSE 0 END),
-                              MAX(CASE WHEN task_content NOT LIKE ? AND task_content NOT LIKE ? THEN 1 ELSE 0 END)
+                              MAX(CASE WHEN task_content NOT LIKE ? AND task_content NOT LIKE ? THEN 1 ELSE 0 END),
+                              MAX(CASE WHEN task_content LIKE ? THEN task_content ELSE '' END)
                        FROM daily_tasks WHERE is_completed=0 GROUP BY product_id""",
-                    ("【垃圾链接】%", "【废物链接】%", "【垃圾链接】%", "【废物链接】%"),
+                    ("【垃圾链接】%", "【废物链接】%", "【垃圾链接】%", "【废物链接】%", "【垃圾链接】%"),
                 )
             }
             reminder_ids = {
@@ -6120,6 +6453,7 @@ finally {
                 product_id: (
                     *task_flags.get(product_id, (False, False, False))[:2],
                     task_flags.get(product_id, (False, False, False))[2] or product_id in reminder_ids,
+                    task_flags.get(product_id, (False, False, False, ""))[3],
                 )
                 for product_id in product_ids
             }
@@ -6152,15 +6486,16 @@ finally {
             placeholders = ",".join("?" for _ in product_ids)
             ids = tuple(product_ids)
             task_flags = {
-                product_id: (bool(garbage), bool(waste), bool(pending))
-                for product_id, garbage, waste, pending in self.db.safe_fetchall(
+                product_id: (bool(garbage), bool(waste), bool(pending), garbage_content or "")
+                for product_id, garbage, waste, pending, garbage_content in self.db.safe_fetchall(
                     f"""SELECT product_id,
                                MAX(CASE WHEN task_content LIKE ? THEN 1 ELSE 0 END),
                                MAX(CASE WHEN task_content LIKE ? THEN 1 ELSE 0 END),
-                               MAX(CASE WHEN task_content NOT LIKE ? AND task_content NOT LIKE ? THEN 1 ELSE 0 END)
+                               MAX(CASE WHEN task_content NOT LIKE ? AND task_content NOT LIKE ? THEN 1 ELSE 0 END),
+                               MAX(CASE WHEN task_content LIKE ? THEN task_content ELSE '' END)
                         FROM daily_tasks WHERE is_completed=0
                           AND product_id IN ({placeholders}) GROUP BY product_id""",
-                    ("【垃圾链接】%", "【废物链接】%", "【垃圾链接】%", "【废物链接】%", *ids),
+                    ("【垃圾链接】%", "【废物链接】%", "【垃圾链接】%", "【废物链接】%", "【垃圾链接】%", *ids),
                 )
             }
             reminder_ids = {
@@ -6173,6 +6508,7 @@ finally {
                 self._product_task_states[product_id] = (
                     *task_flags.get(product_id, (False, False, False))[:2],
                     task_flags.get(product_id, (False, False, False))[2] or product_id in reminder_ids,
+                    task_flags.get(product_id, (False, False, False, ""))[3],
                 )
 
         if not isinstance(getattr(self, "_product_order_count_cache", None), dict):
@@ -6196,7 +6532,7 @@ finally {
         rows = self.db.safe_fetchall(
             """SELECT p.name, p.coupon_amount, p.new_customer_discount, p.current_roi,
                       p.return_rate, p.net_break_even_roi, p.is_limited_time,
-                      p.is_marketing, p.is_natural_flow, p.is_sitewide_managed,
+                      p.is_marketing, COALESCE(p.marketing_activity, ''), p.is_natural_flow, p.is_sitewide_managed,
                       p.store_id, COALESCE(p.roi_input_mode, 'roi'),
                       COALESCE(p.transaction_bid, 0), p.product_category_label,
                       p.link_type, p.product_memo, COALESCE(s.sitewide_roi, 0),
@@ -6208,7 +6544,7 @@ finally {
             return {}
         fields = (
             "product_code", "coupon_amount", "new_customer_discount", "current_roi", "return_rate",
-            "net_break_even_roi", "is_limited_time", "is_marketing", "is_natural_flow",
+            "net_break_even_roi", "is_limited_time", "is_marketing", "marketing_activity", "is_natural_flow",
             "is_sitewide_managed", "store_id",
             "roi_input_mode", "transaction_bid", "product_category_label", "link_type",
             "product_memo", "sitewide_roi", "is_violation",
@@ -6232,7 +6568,7 @@ finally {
         return cache[product_id]
 
     def _sort_products_for_display(self, products_raw, mode=None):
-        mode = mode or self.product_sort_mode or "order"
+        mode = mode or self.product_sort_mode or "created_at"
         infos = [self._build_product_sort_info(product, mode) for product in products_raw]
         product_ids = [info["product_id"] for info in infos]
         task_states = getattr(self, "_product_task_states", None)
@@ -6263,7 +6599,9 @@ finally {
             info["task_sort_group"] = int(task_sort_groups.get(info["product_id"], 0) or 0)
             if info["task_sort_group"] == 2 and info["net_margin"] is None:
                 info["net_margin"] = self._calculate_product_net_margin(info["product_id"])
-        if mode == "net_margin":
+        if mode == "created_at":
+            infos.sort(key=lambda info: (info["created_at"], info["product_id"]), reverse=True)
+        elif mode == "net_margin":
             infos.sort(
                 key=lambda info: (
                     1 if info["net_margin"] is None else 0,
@@ -6316,6 +6654,8 @@ finally {
             )
         else:
             infos.sort(key=self._product_metric_sort_key)
+        if not getattr(self, "product_sort_descending", True):
+            infos.reverse()
         infos.sort(
             key=lambda info: (
                 info["task_sort_group"],
@@ -6358,7 +6698,7 @@ finally {
                 self.main_table_state.add_store(row_idx, store_id, store_name, self.STORE_ROW_HEIGHT)
                 row_idx += 1
                 products = self.db.safe_fetchall(
-                    "SELECT id, name, title, image_data, sort_order, product_category_label "
+                    "SELECT id, name, title, image_data, sort_order, product_category_label, created_at "
                     "FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                     (store_id,),
                 )
@@ -6531,7 +6871,7 @@ finally {
                 row_idx += 1
                 
                 products_raw = self.db.safe_fetchall(
-                    "SELECT id, name, title, image_data, sort_order, product_category_label FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
+                    "SELECT id, name, title, image_data, sort_order, product_category_label, created_at FROM products WHERE store_id=? AND COALESCE(is_archived, 0)=0",
                     (store_id,),
                 )
                 products = self._sort_products_for_display(products_raw) if render_operation_view else products_raw
@@ -6970,8 +7310,6 @@ finally {
             metric = str(metric or "操作记录").strip()
             if str(change_type).startswith("pdd_price"):
                 metric, text = "改价", f"改价：{new or text.split('：', 1)[-1]}"
-            elif str(change_type).startswith("pdd_link"):
-                metric, text = "修改商品规格", "修改商品规格"
             elif str(change_type).startswith("pdd_promotion"):
                 metric, text = "修改推广", f"修改推广：{old} → {new}"
             record = {
@@ -7146,7 +7484,7 @@ finally {
             
             # 插入数据库
             self.db.safe_execute(
-                "INSERT INTO products (store_id, name, title, coupon_amount, new_customer_discount, image_path, sort_order, product_memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                "INSERT INTO products (store_id, name, title, coupon_amount, new_customer_discount, image_path, sort_order, product_memo, is_natural_flow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (store_id, product_id, product_title, 
                  float(coupon_amount) if coupon_amount else None,
                  float(new_customer_discount) if new_customer_discount else None,
@@ -7210,6 +7548,7 @@ finally {
             product_ids = [pid for pid in self.row_data_map.values() if pid]
             if not product_ids:
                 self.clear_search_filter()
+                self.show_toast("没有找到对应的内容", 500)
                 return
 
             placeholders = ",".join(["?"] * len(product_ids))
@@ -7231,10 +7570,16 @@ finally {
                         return
 
             terms = self._split_search_terms(query)
-            self.current_search_match_ids = {
+            matching_ids = {
                 pid for pid, name, title, memo in rows
                 if all_terms_match(terms, name, title, memo)
             }
+            if not matching_ids:
+                if had_search_filter:
+                    self.apply_tag_filter(close_menu=False, show_message=False)
+                self.show_toast("没有找到对应的内容", 500)
+                return
+            self.current_search_match_ids = matching_ids
             self.apply_tag_filter(close_menu=False, show_message=False)
             matching_rows = {
                 row for row, pid in self.row_data_map.items()
@@ -7566,9 +7911,9 @@ finally {
         btn_rect = self.btn_tag_filter.rect()
         global_pos = self.btn_tag_filter.mapToGlobal(QPoint(0, btn_rect.bottom()))
         self.tag_filter_menu.adjustSize()
-        pos = self.mapFromGlobal(global_pos)
-        max_x = max(0, self.width() - self.tag_filter_menu.width() - 8)
-        self.tag_filter_menu.move(min(pos.x(), max_x), pos.y())
+        window_left = self.mapToGlobal(QPoint(8, 0)).x()
+        window_right = self.mapToGlobal(QPoint(self.width() - self.tag_filter_menu.width() - 8, 0)).x()
+        self.tag_filter_menu.move(max(window_left, min(global_pos.x(), window_right)), global_pos.y())
         self.tag_filter_menu.show()
         self.tag_filter_menu.raise_()
         QTimer.singleShot(0, self.category_filter_input.setFocus)
@@ -8134,6 +8479,67 @@ finally {
         text = str(value or "").strip() or "店铺"
         return "".join(ch for ch in text if ch not in r'\/:*?"<>|').strip() or "店铺"
 
+    @staticmethod
+    def _copy_excel_sheet_block(source, target, start_column):
+        from openpyxl.formula.translate import Translator
+        from openpyxl.utils import column_index_from_string, get_column_letter
+        from openpyxl.utils.cell import coordinate_to_tuple
+
+        column_offset = start_column - 1
+        for row in source.iter_rows():
+            for source_cell in row:
+                target_cell = target.cell(source_cell.row, source_cell.column + column_offset)
+                value = source_cell.value
+                if source_cell.data_type == "f":
+                    try:
+                        value = Translator(value, origin=source_cell.coordinate).translate_formula(target_cell.coordinate)
+                    except Exception:
+                        pass
+                target_cell.value = value
+                if source_cell.has_style:
+                    target_cell.font = copy(source_cell.font)
+                    target_cell.fill = copy(source_cell.fill)
+                    target_cell.border = copy(source_cell.border)
+                    target_cell.alignment = copy(source_cell.alignment)
+                    target_cell.number_format = source_cell.number_format
+                    target_cell.protection = copy(source_cell.protection)
+                if source_cell.hyperlink:
+                    target_cell._hyperlink = copy(source_cell.hyperlink)
+                if source_cell.comment:
+                    target_cell.comment = copy(source_cell.comment)
+
+        for merged in source.merged_cells.ranges:
+            target.merge_cells(
+                start_row=merged.min_row,
+                start_column=merged.min_col + column_offset,
+                end_row=merged.max_row,
+                end_column=merged.max_col + column_offset,
+            )
+        for column_name, dimension in source.column_dimensions.items():
+            target.column_dimensions[get_column_letter(column_index_from_string(column_name) + column_offset)].width = dimension.width
+        for row_index, dimension in source.row_dimensions.items():
+            if dimension.height:
+                target.row_dimensions[row_index].height = max(target.row_dimensions[row_index].height or 0, dimension.height)
+
+        image_refs = getattr(target, "_image_stream_refs", [])
+        image_refs.extend(getattr(source, "_image_stream_refs", []))
+        for source_image in source._images:
+            image = copy(source_image)
+            if isinstance(source_image.anchor, str):
+                row, column = coordinate_to_tuple(source_image.anchor)
+                image.anchor = f"{get_column_letter(column + column_offset)}{row}"
+            else:
+                anchor = copy(source_image.anchor)
+                anchor._from = copy(source_image.anchor._from)
+                anchor._from.col += column_offset
+                if hasattr(source_image.anchor, "to"):
+                    anchor.to = copy(source_image.anchor.to)
+                    anchor.to.col += column_offset
+                image.anchor = anchor
+            target.add_image(image)
+        target._image_stream_refs = image_refs
+        return start_column + source.max_column + 1
+
     def _select_stores_for_margin_batch_export(self):
         stores = self.db.safe_fetchall(
             "SELECT id, name FROM stores ORDER BY sort_order, id"
@@ -8159,17 +8565,22 @@ finally {
         version_row.addWidget(QLabel("导出版本:"))
         version_combo = QComboBox()
         version_combo.addItem("详细版本（每店独立完整文件）", "detailed")
+        version_combo.addItem("单文件详细版（每店一个 Sheet）", "single_detailed")
         version_combo.addItem("简化版本（单文件、多店铺 Sheet）", "simple")
+        saved_mode_index = version_combo.findData(self.db.get_setting("batch_margin_export_mode", "detailed"))
+        version_combo.setCurrentIndex(max(0, saved_mode_index))
         version_row.addWidget(version_combo, 1)
         layout.addLayout(version_row)
 
         def update_tip():
-            tip.setText(
-                "选择需要导出的店铺。简化版本会生成一个 Excel 文件，每个店铺一个 Sheet，"
-                "只包含过往数据分析和阅览模式图片。"
-                if version_combo.currentData() == "simple"
-                else "选择需要导出的店铺。详细版本会为每个店铺生成独立的完整毛利 Excel 文件。"
-            )
+            mode = version_combo.currentData()
+            if mode == "simple":
+                text = "选择需要导出的店铺。简化版本会生成一个 Excel 文件，每个店铺一个 Sheet，只包含过往数据分析和阅览模式图片。"
+            elif mode == "single_detailed":
+                text = "选择需要导出的店铺。单文件详细版每店一个 Sheet，过往数据、店铺权重和所选链接从左到右排列。"
+            else:
+                text = "选择需要导出的店铺。详细版本会为每个店铺生成独立的完整毛利 Excel 文件。"
+            tip.setText(text)
 
         version_combo.currentIndexChanged.connect(update_tip)
         update_tip()
@@ -8223,6 +8634,7 @@ finally {
         if dialog.exec_() != QDialog.Accepted:
             return None
 
+        self.db.set_setting("batch_margin_export_mode", version_combo.currentData() or "detailed")
         selected = []
         for i in range(list_widget.count()):
             item = list_widget.item(i)
@@ -8256,6 +8668,9 @@ finally {
         )
         if detail_map is None:
             return
+        if export_mode == "single_detailed":
+            self._batch_export_single_detailed_margin_excel(selected_stores, image_quality, detail_map)
+            return
 
         folder = remembered_existing_directory(self, self.db, "选择批量导出保存文件夹")
         if not folder:
@@ -8267,7 +8682,7 @@ finally {
             "light": "轻量版",
         }
         quality_name = quality_names.get(image_quality, "均衡版")
-        progress = QProgressDialog(f"正在逐个导出详细版本... 图片：{quality_name}", "取消", 0, len(selected_stores), self)
+        progress = QProgressDialog(f"正在逐个导出详细版本... 图片：{quality_name}", "取消", 0, len(selected_stores) * 100, self)
         progress.setWindowTitle("批量导出")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -8301,7 +8716,8 @@ finally {
                 exporter._batch_export_errors = []
 
                 def update_store_progress(value, text, idx=index, total=len(selected_stores), name=store_name):
-                    progress.setLabelText(f"{name} ({idx}/{total})｜图片：{quality_name}：{text}")
+                    progress.setValue((idx - 1) * 100 + int(value))
+                    progress.setLabelText(f"{name} ({idx}/{total})｜{int(value)}%｜图片：{quality_name}｜{text}")
                     QApplication.processEvents()
                     return not progress.wasCanceled()
 
@@ -8317,7 +8733,7 @@ finally {
             except Exception as e:
                 failed.append((store_name, traceback.format_exc()))
             finally:
-                progress.setValue(index)
+                progress.setValue(index * 100)
                 QApplication.processEvents()
 
         progress.close()
@@ -8351,7 +8767,8 @@ finally {
         if not file_path.lower().endswith(".xlsx"):
             file_path += ".xlsx"
 
-        progress = QProgressDialog("正在生成简化版批量导出...", "取消", 0, len(selected_stores), self)
+        total_progress = len(selected_stores) * 100 + 10
+        progress = QProgressDialog("正在生成简化版批量导出...", "取消", 0, total_progress, self)
         progress.setWindowTitle("批量导出")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -8365,7 +8782,9 @@ finally {
         for index, (store_id, store_name) in enumerate(selected_stores, start=1):
             if progress.wasCanceled():
                 break
-            progress.setLabelText(f"正在写入：{store_name} ({index}/{len(selected_stores)})")
+            base_progress = (index - 1) * 100
+            progress.setValue(base_progress + 5)
+            progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜5%｜正在创建店铺 Sheet...")
             QApplication.processEvents()
             base_name = re.sub(r"[\\/*?:\[\]]", "_", str(store_name or f"店铺{store_id}")).strip() or f"店铺{store_id}"
             base_name = base_name[:31]
@@ -8385,14 +8804,19 @@ finally {
                     image_quality=image_quality,
                     detail_product_ids=set(),
                 )
+                progress.setValue(base_progress + 25)
+                progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜25%｜正在读取过往数据...")
+                QApplication.processEvents()
                 exporter._write_historical_export_sheet(wb, sheet_name=sheet_name, create_sheet=True)
+                progress.setValue(base_progress + 90)
+                progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜90%｜正在嵌入本周图片并调整格式...")
                 exported_count += 1
             except Exception:
                 failed.append((store_name, traceback.format_exc()))
                 for new_sheet in set(wb.sheetnames) - before_sheets:
                     wb.remove(wb[new_sheet])
             finally:
-                progress.setValue(index)
+                progress.setValue(index * 100)
                 QApplication.processEvents()
 
         canceled = progress.wasCanceled()
@@ -8400,13 +8824,146 @@ finally {
             wb.remove(default_sheet)
         if exported_count:
             try:
+                progress.setValue(len(selected_stores) * 100 + 5)
+                progress.setLabelText("所有店铺已汇总，正在保存 Excel 文件...")
+                QApplication.processEvents()
                 wb.save(file_path)
+                progress.setValue(total_progress)
             except Exception as e:
                 progress.close()
                 QMessageBox.critical(self, "批量导出失败", f"保存 Excel 文件失败：\n{e}")
                 return
         progress.close()
 
+        if not exported_count:
+            QMessageBox.warning(self, "批量导出失败", "没有成功生成任何店铺 Sheet。")
+            return
+        message = f"成功导出 {exported_count} 个店铺到：\n{file_path}"
+        if canceled:
+            message += "\n已保存取消前完成的店铺。"
+        if failed:
+            detail = "\n".join(f"- {name}: {error.splitlines()[-1]}" for name, error in failed[:8])
+            QMessageBox.warning(self, "批量导出完成", f"{message}\n\n失败 {len(failed)} 个：\n{detail}")
+        else:
+            QMessageBox.information(self, "批量导出完成", message)
+
+    def _batch_export_single_detailed_margin_excel(self, selected_stores, image_quality, detail_map):
+        from openpyxl import Workbook
+
+        today = datetime.now().strftime("%Y%m%d")
+        file_path, _ = remembered_save_file(
+            self,
+            self.db,
+            "保存单文件详细版",
+            f"批量导出_单文件详细版_{today}.xlsx",
+            "Excel 文件 (*.xlsx)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+
+        total_progress = len(selected_stores) * 100 + 10
+        progress = QProgressDialog("正在生成单文件详细版...", "取消", 0, total_progress, self)
+        progress.setWindowTitle("批量导出")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        wb = Workbook()
+        default_sheet = wb.active
+        used_names = set()
+        exported_count = 0
+        failed = []
+
+        for index, (store_id, store_name) in enumerate(selected_stores, start=1):
+            if progress.wasCanceled():
+                break
+            base_progress = (index - 1) * 100
+            progress.setValue(base_progress + 3)
+            progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜3%｜正在创建店铺 Sheet...")
+            QApplication.processEvents()
+            target = None
+            try:
+                base_name = re.sub(r"[\\/*?:\[\]]", "_", str(store_name or f"店铺{store_id}")).strip() or f"店铺{store_id}"
+                base_name = base_name[:31]
+                sheet_name = base_name
+                suffix = 2
+                while sheet_name.casefold() in used_names:
+                    suffix_text = f"_{suffix}"
+                    sheet_name = f"{base_name[:31 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
+                used_names.add(sheet_name.casefold())
+                target = wb.create_sheet(sheet_name)
+                exporter = StoreMarginExcelExporter(
+                    store_id,
+                    store_name,
+                    self,
+                    image_quality=image_quality,
+                    detail_product_ids=detail_map.get(int(store_id), set()),
+                )
+                exporter._excel_export_image_cache = {}
+                source_book = Workbook()
+                progress.setValue(base_progress + 15)
+                progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜15%｜正在读取过往数据和本周图片...")
+                QApplication.processEvents()
+                exporter._write_historical_export_sheet(source_book)
+                progress.setValue(base_progress + 35)
+                progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜35%｜正在按单量计算权重和对比数据...")
+                QApplication.processEvents()
+                exporter._write_orders_export_sheet(source_book)
+                progress.setValue(base_progress + 52)
+                progress.setLabelText(f"{store_name} ({index}/{len(selected_stores)})｜52%｜正在整理已选展示链接...")
+                products = exporter._products_for_specs_export()
+                original_detail_ids = exporter.export_detail_product_ids
+                detail_products = products or [None]
+                for product_index, product in enumerate(detail_products, start=1):
+                    exporter.export_detail_product_ids = {str(product[1])} if product else set()
+                    detail_progress = 52 + int(product_index / len(detail_products) * 28)
+                    product_name = str(product[1]) if product else "无选中链接"
+                    progress.setValue(base_progress + detail_progress)
+                    progress.setLabelText(
+                        f"{store_name} ({index}/{len(selected_stores)})｜{detail_progress}%｜"
+                        f"正在生成链接 {product_name} ({product_index}/{len(detail_products)})..."
+                    )
+                    QApplication.processEvents()
+                    exporter._write_product_specs_export_sheet(source_book)
+                exporter.export_detail_product_ids = original_detail_ids
+
+                next_column = 1
+                source_sheets = source_book.worksheets
+                for source_index, source in enumerate(source_sheets, start=1):
+                    merge_progress = 80 + int(source_index / len(source_sheets) * 15)
+                    progress.setValue(base_progress + merge_progress)
+                    progress.setLabelText(
+                        f"{store_name} ({index}/{len(selected_stores)})｜{merge_progress}%｜"
+                        f"正在横向合并板块 {source_index}/{len(source_sheets)}：{source.title}..."
+                    )
+                    QApplication.processEvents()
+                    next_column = self._copy_excel_sheet_block(source, target, next_column)
+                target.freeze_panes = "A2"
+                exported_count += 1
+            except Exception:
+                failed.append((store_name, traceback.format_exc()))
+                if target is not None:
+                    wb.remove(target)
+            finally:
+                progress.setValue(index * 100)
+                QApplication.processEvents()
+
+        canceled = progress.wasCanceled()
+        wb.remove(default_sheet)
+        if exported_count:
+            try:
+                progress.setValue(len(selected_stores) * 100 + 5)
+                progress.setLabelText("所有店铺已汇总，正在写入图片、公式并保存 Excel...")
+                QApplication.processEvents()
+                wb.save(file_path)
+                progress.setValue(total_progress)
+            except Exception as e:
+                progress.close()
+                QMessageBox.critical(self, "批量导出失败", f"保存 Excel 文件失败：\n{e}")
+                return
+        progress.close()
         if not exported_count:
             QMessageBox.warning(self, "批量导出失败", "没有成功生成任何店铺 Sheet。")
             return
@@ -8547,13 +9104,15 @@ finally {
             count_changed = 0
             count_unit_converted = 0
             count_code_replaced = 0
-            import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             replaced_old_codes = set()
             changed_cost_spec_codes = set()
+            combo_component_spec_codes = set()
             
             # 批量插入准备 (为了提高速度，可以每100条提交一次，这里为了简单逐条处理但加了事务优化)
             # 实际上 safe_execute 已经是逐条提交，对于几万行数据可能会慢，但最稳定
             
+            if hasattr(self.db, "set_cost_history_source"):
+                self.db.set_cost_history_source("import")
             self.db.conn.execute("BEGIN TRANSACTION") # 开启事务，极大提高写入速度
 
             for idx in range(total_rows):
@@ -8593,7 +9152,8 @@ finally {
 
                     product_attribute = ""
                     product_attribute_is_combo = 0
-                    if attribute_cols and not re.search(r"\+|＋|﹢", spec_name or ""):
+                    is_combo_name = self.db.is_cost_combo_name(spec_name) if hasattr(self.db, "is_cost_combo_name") else bool(re.search(r"\+|＋|﹢", spec_name or ""))
+                    if attribute_cols and not is_combo_name:
                         attr_parts = []
                         for key in ("size", "pages", "print"):
                             attr_info = attribute_cols.get(key)
@@ -8645,7 +9205,9 @@ finally {
                         cost_calc_mode = "total"
 
                     old_rows = self.db.cursor.execute(
-                        "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                        """SELECT cost_price, COALESCE(product_attribute_is_combo, 0),
+                                  product_cost, COALESCE(cost_calc_mode, 'total')
+                           FROM cost_library WHERE spec_code=?""",
                         (spec_code,)
                     ).fetchall()
                     if not old_rows and spec_name:
@@ -8661,21 +9223,32 @@ finally {
                         ).fetchall()
                         old_code = next((str(row[0] or "").strip() for row in match_rows if str(row[0] or "").strip() not in replaced_old_codes), "")
                         if old_code:
-                            self.db.cursor.execute("UPDATE cost_library SET spec_code=? WHERE spec_code=?", (spec_code, old_code))
-                            self.db.cursor.execute("UPDATE cost_history SET spec_code=? WHERE spec_code=?", (spec_code, old_code))
+                            self.db.rename_cost_spec_code(
+                                old_code, spec_code, manage_transaction=False, mark_dirty=False
+                            )
                             replaced_old_codes.add(old_code)
                             count_code_replaced += 1
                             old_rows = self.db.cursor.execute(
-                                "SELECT cost_price FROM cost_library WHERE spec_code=?",
+                                """SELECT cost_price, COALESCE(product_attribute_is_combo, 0),
+                                          product_cost, COALESCE(cost_calc_mode, 'total')
+                                   FROM cost_library WHERE spec_code=?""",
                                 (spec_code,)
                             ).fetchall()
                     cost_row_exists = bool(old_rows)
                     old_cost = float(old_rows[0][0]) if old_rows and old_rows[0][0] is not None else None
-                    update_cost = bool(update_fields.get("cost", True))
+                    existing_is_combo = bool(old_rows and old_rows[0][1])
+                    old_product_cost = float(old_rows[0][2]) if old_rows and old_rows[0][2] is not None else None
+                    update_cost = bool(update_fields.get("cost", True)) and not existing_is_combo
                     cost_changed = (not cost_row_exists) or (
                         update_cost and (old_cost is None or abs(cost_price - old_cost) > 0.001)
                     )
-                    should_record_history = update_cost and old_cost is not None and abs(cost_price - old_cost) > 0.001
+                    old_unit_cost = old_product_cost if cost_mode == "detail" else old_cost
+                    new_unit_cost = product_cost if cost_mode == "detail" else cost_price
+                    should_record_history = (
+                        cost_mode == "detail" and update_cost
+                        and old_unit_cost is not None and new_unit_cost is not None
+                        and abs(float(new_unit_cost) - float(old_unit_cost)) > 0.001
+                    )
 
                     self.db.cursor.execute(
                         """INSERT INTO cost_library
@@ -8714,28 +9287,22 @@ finally {
                          int(update_fields.get("quantity", True)),
                          int(update_fields.get("category", True)),
                          int(update_fields.get("category", True)),
-                         int(update_fields.get("cost", True)),
-                         int(update_fields.get("cost", True)),
-                         int(update_fields.get("cost", True)),
-                         int(update_fields.get("cost", True)),
-                         int(update_fields.get("cost", True)),
-                         int(update_fields.get("cost", True)),
+                         int(update_cost),
+                         int(update_cost),
+                         int(update_cost),
+                         int(update_cost),
+                         int(update_cost),
+                         int(update_cost),
                          int(import_product_attribute), int(import_product_attribute), int(import_product_attribute))
                     )
 
                     if should_record_history:
-                        change_amount = cost_price - old_cost
-                        change_percent = (cost_price - old_cost) / old_cost * 100 if old_cost else None
-                        self.db.cursor.execute(
-                            """INSERT INTO cost_history
-                               (spec_code, old_cost_price, new_cost_price, change_amount, change_percent, source, import_time)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                            (spec_code, old_cost, cost_price, change_amount, change_percent, "import", import_time)
-                        )
                         count_history += 1
                         count_changed += 1
                     if cost_changed:
                         changed_cost_spec_codes.add(spec_code)
+                    if cost_mode == "detail" and update_cost:
+                        combo_component_spec_codes.add(spec_code)
                     
                     count_success += 1
                     
@@ -8753,6 +9320,15 @@ finally {
             
             # 提交剩余事务
             self.db.conn.commit()
+            if hasattr(self.db, "detect_cost_combo_candidates"):
+                self.db.detect_cost_combo_candidates()
+            if hasattr(self.db, "recalculate_cost_combinations_for_components"):
+                changed_cost_spec_codes.update(
+                    self.db.recalculate_cost_combinations_for_components(
+                        combo_component_spec_codes, record_history=True, source="import"
+                    )
+                )
+            self.db.set_setting("cost_sync_local_dirty", "1")
             self.db.normalize_cost_category_colors()
             self.db.update_all_product_category_labels()
             self.statusBar().showMessage("导入完成！", 3000)
@@ -8763,8 +9339,8 @@ finally {
                    f"📊 文件总行数：{total_rows}\n"
                    f"✅ 成功入库：{count_success} 条\n"
                    f"🔁 编码替换：{count_code_replaced} 条\n"
-                   f"🕘 历史记录：{count_history} 条\n"
-                   f"📈 价格变化：{count_changed} 条\n"
+                   f"🕘 产品成本历史：{count_history} 条\n"
+                   f"📈 产品成本变化：{count_changed} 条\n"
                    f"⏭️ 跳过空行：{count_skip} 条\n"
                    f"❌ 处理异常：{count_error} 条\n\n"
                    f"数据已更新至数据库 cost_library 表。")
@@ -8796,14 +9372,20 @@ finally {
                                  f"2. 确保选中了正确的列。\n"
                                  f"3. 尝试将文件另存为新的 .xlsx 文件。")
             self.statusBar().showMessage("导入失败", 3000)
+        finally:
+            if hasattr(self.db, "set_cost_history_source"):
+                self.db.set_cost_history_source("manual")
 
     def finish_cost_import_refresh(self, changed_spec_codes=()):
         self.sync_material_library_after_cost_import()
+        codes = list(dict.fromkeys(str(code) for code in changed_spec_codes if code))
         dialog = getattr(self, "cost_library_dialog", None)
         if self._is_qobject_alive(dialog) and hasattr(dialog, "load_data"):
-            dialog.load_data()
+            if hasattr(dialog, "refresh_external_changes"):
+                dialog.refresh_external_changes(codes, [], False)
+            else:
+                dialog.load_data()
         product_ids = set()
-        codes = list(dict.fromkeys(str(code) for code in changed_spec_codes if code))
         for start in range(0, len(codes), 900):
             batch = codes[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
@@ -8857,7 +9439,8 @@ finally {
             return
         dialog = CostLibraryDialog(self.db, main_window=self, parent=None)
         apply_window_icon(dialog, "cost")
-        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        # Keep the populated table cached while this account is active.
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
         dialog.destroyed.connect(lambda _=None: setattr(self, "cost_library_dialog", None))
         self.cost_library_dialog = dialog
         dialog.show()
@@ -8899,8 +9482,200 @@ finally {
             dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        if hasattr(dialog, "activate_keyboard_shortcuts"):
-            dialog.activate_keyboard_shortcuts()
+
+    def _ensure_material_library_backend(self):
+        dialog = getattr(self, "material_library_dialog", None)
+        if _qobject_alive(dialog) and getattr(dialog, "db", None) is self.db:
+            return dialog
+        dialog = MaterialLibraryDialog(self.db, self)
+        apply_window_icon(dialog, "material")
+        dialog.destroyed.connect(lambda _=None: setattr(self, "material_library_dialog", None))
+        self.material_library_dialog = dialog
+        return dialog
+
+    def _provide_material_mobile_context(self, action, payload):
+        account = self.archive_manager.get_active_data_account() if self.archive_manager else None
+        if not account:
+            raise RuntimeError("电脑当前数据没有绑定软件账号")
+        session = {
+            "account_id": str(account.get("id") or ""),
+            "account_name": str(account.get("name") or ""),
+        }
+        if action == "session":
+            return session
+        dialog = self._ensure_material_library_backend()
+        if action == "catalog":
+            return dialog.mobile_catalog_snapshot()
+        if action == "target":
+            return dialog.mobile_upload_target(payload.get("target") or {})
+        if action == "uploaded":
+            if dialog.isVisible():
+                QTimer.singleShot(0, dialog.refresh_current_view)
+            QTimer.singleShot(0, self.request_cost_thumbnail_scan)
+            return {"ok": True}
+        raise RuntimeError("未知的手机素材请求")
+
+    def ensure_material_mobile_service(self):
+        service = getattr(self, "material_mobile_service", None)
+        if service is None:
+            service = MaterialMobileService(self._provide_material_mobile_context, parent=self)
+            self.material_mobile_service = service
+        account = self.archive_manager.get_active_data_account() if self.archive_manager else None
+        service.set_active_account(account)
+        service.start()
+        return service
+
+    def _provide_cost_sync_context(self, action, payload):
+        if action == "state":
+            return self.db.get_cost_sync_state()
+        if action == "local_snapshot":
+            return {"snapshot": self.db.build_cost_sync_snapshot()}
+        if action == "merge_snapshots":
+            return {
+                "snapshot": self.db.merge_cost_sync_snapshots(
+                    payload.get("current") or {}, payload.get("incoming") or {}
+                )
+            }
+        if action == "load_pending":
+            try:
+                pending = json.loads(self.db.get_setting("cost_sync_pending_json", "") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pending = {}
+            return {"snapshot": pending}
+        if action == "save_pending":
+            self.db.set_setting(
+                "cost_sync_pending_json",
+                json.dumps(payload.get("snapshot") or {}, ensure_ascii=False, separators=(",", ":")),
+            )
+            return {"ok": True}
+        if action == "skip_initial_diff":
+            return {"skip": self.db.get_setting("cost_sync_skip_initial_diff", "0") == "1"}
+        if action == "clear_skip_initial_diff":
+            self.db.set_setting("cost_sync_skip_initial_diff", "0")
+            return {"ok": True}
+        if action == "clear_local_dirty":
+            self.db.set_setting("cost_sync_local_dirty", "0")
+            return {"ok": True}
+        if action == "remember_host":
+            self.db.update_cost_sync_state(coordinator_host=payload.get("coordinator_host") or "")
+            return {"ok": True}
+        if action == "snapshot":
+            state = self.db.get_cost_sync_state()
+            try:
+                snapshot = json.loads(state.get("snapshot_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+            return {
+                "revision": int(state.get("revision") or 0),
+                "snapshot": snapshot,
+                "snapshot_hash": state.get("snapshot_hash") or "",
+                "publisher_id": state.get("publisher_id") or "",
+                "published_at": state.get("published_at") or "",
+            }
+        if action == "publish":
+            publisher_id = payload.get("publisher_id") or ""
+            result = self.db.publish_cost_sync_snapshot(
+                payload.get("snapshot") or {}, publisher_id
+            )
+            service = getattr(self, "cost_sync_service", None)
+            if not service or publisher_id != service.device_id:
+                QTimer.singleShot(0, lambda data=dict(result): self._finish_cost_sync_changes(data))
+            result = dict(result)
+            result.pop("snapshot", None)
+            return result
+        if action == "apply_remote":
+            result = self.db.apply_remote_cost_sync_snapshot(
+                payload.get("snapshot") or {},
+                payload.get("revision") or 0,
+                payload.get("snapshot_hash") or "",
+                payload.get("publisher_id") or "",
+                payload.get("published_at") or "",
+                bool(payload.get("replace_local")),
+            )
+            QTimer.singleShot(0, lambda data=dict(result): self._finish_cost_sync_changes(data))
+            return result
+        raise RuntimeError("未知的成本同步请求")
+
+    def _finish_cost_sync_changes(self, result):
+        changed_codes = list(dict.fromkeys(result.get("changed_codes") or []))
+        image_changed_codes = list(dict.fromkeys(result.get("image_changed_codes") or []))
+        if changed_codes or image_changed_codes:
+            image_changed_codes = list(dict.fromkeys(
+                image_changed_codes + self.db.inherit_single_multiplier_combo_thumbnails()
+            ))
+        categories_changed = bool(result.get("categories_changed"))
+        history_changed_count = int(result.get("history_changed_count") or 0)
+        if not changed_codes and not image_changed_codes and not categories_changed and not history_changed_count:
+            return
+        product_count = len(set(changed_codes) | set(image_changed_codes))
+        if product_count:
+            sync_message = f"已接收同步 {product_count} 个产品规格"
+        elif categories_changed:
+            sync_message = "已接收商品类型同步更新"
+        else:
+            sync_message = f"已接收同步 {history_changed_count} 条历史操作"
+        hint_shown = False
+        dialog = getattr(self, "cost_library_dialog", None)
+        if self._is_qobject_alive(dialog) and hasattr(dialog, "load_data"):
+            if hasattr(dialog, "refresh_external_changes"):
+                dialog.refresh_external_changes(
+                    changed_codes, image_changed_codes, categories_changed
+                )
+            else:
+                dialog.load_data()
+            if hasattr(dialog, "show_sync_hint"):
+                dialog.show_sync_hint(sync_message)
+                hint_shown = True
+        if not hint_shown and hasattr(self, "show_toast"):
+            self.show_toast(sync_message, 1500)
+        if not changed_codes and not categories_changed:
+            return
+        try:
+            self.db.update_all_product_category_labels()
+        except Exception as exc:
+            append_exception("cost_sync:update_product_categories", error=exc)
+        self.sync_material_library_after_cost_import()
+        product_ids = set()
+        for start in range(0, len(changed_codes), 900):
+            batch = changed_codes[start:start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            product_ids.update(
+                row[0] for row in self.db.safe_fetchall(
+                    f"""SELECT DISTINCT ps.product_id
+                        FROM product_specs ps
+                        JOIN products p ON p.id=ps.product_id
+                        WHERE ps.spec_code IN ({placeholders})
+                          AND COALESCE(p.is_archived, 0)=0""",
+                    batch,
+                )
+            )
+        self.refresh_external_products(product_ids)
+
+    def ensure_cost_sync_service(self):
+        service = getattr(self, "cost_sync_service", None)
+        if service is None:
+            service = CostSyncService(self._provide_cost_sync_context, parent=self)
+            self.cost_sync_service = service
+        self.db.cost_sync_change_callback = service.notify_local_change
+        service.start()
+        return service
+
+    def stop_cost_sync_service(self):
+        service = getattr(self, "cost_sync_service", None)
+        if service is not None:
+            if getattr(self.db, "cost_sync_change_callback", None) == service.notify_local_change:
+                self.db.cost_sync_change_callback = None
+            service.stop()
+            service.deleteLater()
+            self.cost_sync_service = None
+
+    def restart_cost_sync_service(self):
+        self.stop_cost_sync_service()
+        if self.db.get_cost_sync_state():
+            try:
+                self.ensure_cost_sync_service()
+            except Exception as exc:
+                append_exception("cost_sync_service:restart", error=exc)
 
     def open_product_material_library(self, spec_code):
         """打开素材库并跳转到指定成本库规格目录"""
@@ -8918,6 +9693,41 @@ finally {
         dialog.activateWindow()
         if hasattr(dialog, "activate_keyboard_shortcuts"):
             dialog.activate_keyboard_shortcuts()
+
+    def material_images_for_cost_specs(self, spec_codes, white_only=False):
+        dialog = self._ensure_material_library_backend()
+        if white_only:
+            return dialog.product_white_images_for_spec_codes(spec_codes)
+        return dialog.product_material_images_for_spec_codes(spec_codes)
+
+    def save_cost_thumbnail_to_material(self, spec_code, image_data):
+        return self._ensure_material_library_backend().save_cost_thumbnail_to_product_material(
+            spec_code, image_data
+        )
+
+    def request_cost_thumbnail_scan(self):
+        dialog = getattr(self, "cost_library_dialog", None)
+        if self._is_qobject_alive(dialog) and hasattr(dialog, "refresh_missing_thumbnails"):
+            dialog.refresh_missing_thumbnails()
+            return
+        self.db.inherit_single_multiplier_combo_thumbnails()
+        missing_codes = [
+            str(row[0]) for row in self.db.safe_fetchall(
+                """SELECT spec_code FROM cost_library
+                   WHERE COALESCE(spec_code, '')<>''
+                     AND COALESCE(product_attribute_is_combo, 0)=0
+                     AND LENGTH(COALESCE(thumbnail_data, X''))=0"""
+            )
+        ]
+        if not missing_codes:
+            return
+        for spec_code, path in self.material_images_for_cost_specs(
+            missing_codes, white_only=True
+        ).items():
+            image_data = CostLibraryDialog._thumbnail_bytes_from_path(path)
+            if image_data:
+                self.db.set_cost_thumbnail(spec_code, image_data, only_if_empty=True)
+        self.db.inherit_single_multiplier_combo_thumbnails()
 
     def open_product_material_library_for_link(self, product_db_id):
         """打开素材库，并按链接规格定位到产品素材或商品类型素材。"""
@@ -8954,6 +9764,7 @@ finally {
 
     def update_archive_account_label(self):
         """更新当前本地数据归属账号显示标签"""
+        active_account = None
         try:
             if hasattr(self, 'archive_manager') and self.archive_manager:
                 active_account = self.archive_manager.get_active_data_account()
@@ -8971,6 +9782,9 @@ finally {
                 self.lbl_archive_account.setStyleSheet("color: #888; font-size: 11px; padding: 0 5px;")
         except Exception as e:
             print(f"更新存档账号标签失败: {e}")
+        service = getattr(self, "material_mobile_service", None)
+        if service is not None:
+            service.set_active_account(active_account)
 
     def show_api_config_dialog(self):
         """打开API配置窗口"""
@@ -9079,6 +9893,7 @@ if __name__ == "__main__":
     
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    load_bundled_app_fonts()
     install_window_icon_filter(app)
     tooltip_palette = app.palette()
     tooltip_palette.setColor(QPalette.Inactive, QPalette.ToolTipBase, QColor("#ffffff"))

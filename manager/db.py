@@ -6,10 +6,13 @@
 import os
 import sys
 import re
+import base64
 import json
 import sqlite3
 import hashlib
+import hmac
 import math
+import time
 from datetime import datetime
 
 try:
@@ -53,7 +56,12 @@ class SafeDatabaseManager:
         },
     }
     COMMON_SETTING_PREFIXES = ("ai_", "quick_hotkey_", "update_")
-    COMMON_SETTING_KEYS = {"auto_start_enabled", "cost_library_mode", "cost_misc_fee", "cost_shipping_rules_json"}
+    COMMON_SETTING_KEYS = {"auto_start_enabled", "app_font"}
+    ACCOUNT_COST_SETTING_KEYS = (
+        "cost_library_mode",
+        "cost_misc_fee",
+        "cost_shipping_rules_json",
+    )
 
     def __init__(self, db_name="shop_manager.db"):
         try:
@@ -71,6 +79,7 @@ class SafeDatabaseManager:
             self.conn.execute("PRAGMA foreign_keys = ON")
             self.cursor = self.conn.cursor()
             self.init_db()
+            self._migrate_legacy_common_cost_settings()
         except Exception as e:
             if append_exception:
                 append_exception("database initialization", e)
@@ -85,7 +94,8 @@ class SafeDatabaseManager:
                                 (id INTEGER PRIMARY KEY, name TEXT, sort_order INTEGER, memo TEXT, store_discount_rules TEXT)''')
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS products 
                                 (id INTEGER PRIMARY KEY, store_id INTEGER, name TEXT, 
-                                url TEXT, image_path TEXT, sort_order INTEGER)''')
+                                url TEXT, image_path TEXT, sort_order INTEGER,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS records 
                                 (product_id INTEGER, year INTEGER, month INTEGER, day INTEGER, 
                                 records_json TEXT, PRIMARY KEY(product_id, year, month, day))''')
@@ -175,6 +185,8 @@ class SafeDatabaseManager:
                     print("✅ 已添加return_rate字段到products表")
                 except Exception as e:
                     print(f"添加return_rate字段失败: {e}")
+            if 'use_manual_return_rate' not in columns:
+                self.cursor.execute("ALTER TABLE products ADD COLUMN use_manual_return_rate INTEGER DEFAULT 0")
 
             if 'is_limited_time' not in columns:
                 try:
@@ -189,6 +201,8 @@ class SafeDatabaseManager:
                     print("✅ 已添加is_marketing字段到products表")
                 except Exception as e:
                     print(f"添加is_marketing字段失败: {e}")
+            if 'marketing_activity' not in columns:
+                self.cursor.execute("ALTER TABLE products ADD COLUMN marketing_activity TEXT DEFAULT ''")
 
             if 'is_natural_flow' not in columns:
                 try:
@@ -271,6 +285,19 @@ class SafeDatabaseManager:
             if 'is_violation' not in columns:
                 self.cursor.execute("ALTER TABLE products ADD COLUMN is_violation INTEGER DEFAULT 0")
                 print("已添加is_violation字段到products表")
+            if 'created_at' not in columns:
+                self.cursor.execute("ALTER TABLE products ADD COLUMN created_at TEXT")
+                self.cursor.execute(
+                    "UPDATE products SET created_at=datetime('2000-01-01', printf('+%d seconds', id)) "
+                    "WHERE COALESCE(created_at, '')=''"
+                )
+                print("已添加created_at字段到products表")
+            self.cursor.execute('''CREATE TRIGGER IF NOT EXISTS products_fill_created_at
+                                   AFTER INSERT ON products
+                                   WHEN COALESCE(NEW.created_at, '')=''
+                                   BEGIN
+                                       UPDATE products SET created_at=CURRENT_TIMESTAMP WHERE id=NEW.id;
+                                   END''')
 
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_library 
                                 (spec_code TEXT PRIMARY KEY, spec_name TEXT, cost_price REAL, test_price REAL,
@@ -286,6 +313,50 @@ class SafeDatabaseManager:
                                 change_percent REAL,
                                 source TEXT NOT NULL,
                                 import_time TEXT NOT NULL)''')
+
+            self.cursor.execute("PRAGMA table_info(cost_history)")
+            history_columns = {col[1] for col in self.cursor.fetchall()}
+            for column, definition in (
+                ("event_id", "TEXT"),
+                ("spec_name", "TEXT"),
+                ("operation_type", "TEXT DEFAULT 'price'"),
+                ("old_value", "TEXT"),
+                ("new_value", "TEXT"),
+                ("event_time_ms", "INTEGER"),
+            ):
+                if column not in history_columns:
+                    self.cursor.execute(f"ALTER TABLE cost_history ADD COLUMN {column} {definition}")
+            self.cursor.execute(
+                "UPDATE cost_history SET event_id=LOWER(HEX(RANDOMBLOB(16))) WHERE COALESCE(event_id, '')=''"
+            )
+            self.cursor.execute(
+                """UPDATE cost_history
+                   SET spec_name=COALESCE(NULLIF(spec_name, ''),
+                       (SELECT spec_name FROM cost_library WHERE cost_library.spec_code=cost_history.spec_code), ''),
+                       operation_type=COALESCE(NULLIF(operation_type, ''), 'price'),
+                        old_value=COALESCE(old_value, CAST(old_cost_price AS TEXT)),
+                        new_value=COALESCE(new_value, CAST(new_cost_price AS TEXT)),
+                        event_time_ms=COALESCE(event_time_ms,
+                            CAST((JULIANDAY(import_time, 'utc')-2440587.5)*86400000 AS INTEGER))"""
+            )
+            self.cursor.execute(
+                "DELETE FROM cost_history WHERE COALESCE(operation_type, 'price')='price'"
+            )
+            self.cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_history_event_id ON cost_history(event_id)"
+            )
+            self.cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cost_history_time_type ON cost_history(event_time_ms, operation_type)"
+            )
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_history_control (
+                id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1,
+                source TEXT NOT NULL DEFAULT 'manual')''')
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO cost_history_control (id, enabled, source) VALUES (1, 1, 'manual')"
+            )
+            self.cursor.execute(
+                "UPDATE cost_history_control SET enabled=1, source='manual' WHERE id=1"
+            )
 
             self.cursor.execute("PRAGMA table_info(cost_library)")
             cost_columns = [col[1] for col in self.cursor.fetchall()]
@@ -349,6 +420,10 @@ class SafeDatabaseManager:
                     print("已添加product_attribute_is_combo字段到cost_library表")
                 except Exception as e:
                     print(f"添加product_attribute_is_combo字段失败: {e}")
+            if 'combo_components_json' not in cost_columns:
+                self.cursor.execute("ALTER TABLE cost_library ADD COLUMN combo_components_json TEXT")
+            if 'combo_reviewed' not in cost_columns:
+                self.cursor.execute("ALTER TABLE cost_library ADD COLUMN combo_reviewed INTEGER DEFAULT 0")
             if 'manual_sort_order' not in cost_columns:
                 try:
                     self.cursor.execute("ALTER TABLE cost_library ADD COLUMN manual_sort_order INTEGER")
@@ -385,6 +460,109 @@ class SafeDatabaseManager:
                     print("已添加cost_calc_mode字段到cost_library表")
                 except Exception as e:
                     print(f"添加cost_calc_mode字段失败: {e}")
+            if 'thumbnail_data' not in cost_columns:
+                self.cursor.execute("ALTER TABLE cost_library ADD COLUMN thumbnail_data BLOB")
+            if 'thumbnail_manual' not in cost_columns:
+                self.cursor.execute("ALTER TABLE cost_library ADD COLUMN thumbnail_manual INTEGER DEFAULT 0")
+
+            self.cursor.executescript('''
+                DROP TRIGGER IF EXISTS cost_library_operation_history;
+                CREATE TRIGGER cost_library_operation_history AFTER UPDATE ON cost_library
+                WHEN COALESCE((SELECT enabled FROM cost_history_control WHERE id=1), 1)=1
+                BEGIN
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         old_cost_price, new_cost_price, change_amount, change_percent,
+                         source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''),
+                           'product_cost', CAST(OLD.product_cost AS TEXT), CAST(NEW.product_cost AS TEXT),
+                           OLD.product_cost, NEW.product_cost,
+                           NEW.product_cost - OLD.product_cost,
+                           CASE WHEN OLD.product_cost<>0
+                                THEN (NEW.product_cost - OLD.product_cost) * 100.0 / OLD.product_cost
+                           END,
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                     WHERE COALESCE(NEW.product_attribute_is_combo, 0)=0
+                       AND LOWER(COALESCE(NEW.cost_calc_mode, 'total'))='detail'
+                       AND OLD.product_cost IS NOT NULL AND NEW.product_cost IS NOT NULL
+                       AND ABS(OLD.product_cost-NEW.product_cost)>0.000001;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'code',
+                           COALESCE(OLD.spec_code, ''), COALESCE(NEW.spec_code, ''), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.spec_code IS NOT NEW.spec_code;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'name',
+                           COALESCE(OLD.spec_name, ''), COALESCE(NEW.spec_name, ''), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.spec_name IS NOT NEW.spec_name;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'attribute',
+                           COALESCE(OLD.product_attribute, ''), COALESCE(NEW.product_attribute, ''), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.product_attribute IS NOT NEW.product_attribute;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'image',
+                           CASE WHEN LENGTH(COALESCE(OLD.thumbnail_data, X''))>0 THEN '已有图片' ELSE '无图片' END,
+                           CASE WHEN LENGTH(COALESCE(NEW.thumbnail_data, X''))>0 THEN '已有图片' ELSE '无图片' END,
+                           COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.thumbnail_data IS NOT NEW.thumbnail_data;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'category',
+                           COALESCE(OLD.category_label, ''), COALESCE(NEW.category_label, ''), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.category_label IS NOT NEW.category_label;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'quantity',
+                           COALESCE(OLD.quantity, ''), COALESCE(NEW.quantity, ''), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE OLD.quantity IS NOT NEW.quantity;
+
+                    INSERT INTO cost_history
+                        (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                         new_cost_price, source, import_time, event_time_ms)
+                    SELECT LOWER(HEX(RANDOMBLOB(16))), NEW.spec_code, COALESCE(NEW.spec_name, ''), 'weight',
+                           CAST(OLD.unit_weight AS TEXT), CAST(NEW.unit_weight AS TEXT), COALESCE(NEW.cost_price, 0),
+                           COALESCE((SELECT source FROM cost_history_control WHERE id=1), 'manual'),
+                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now', 'localtime'),
+                           CAST((JULIANDAY('now')-2440587.5)*86400000 AS INTEGER)
+                    WHERE COALESCE(NEW.product_attribute_is_combo, 0)=0
+                      AND OLD.unit_weight IS NOT NEW.unit_weight;
+                END;
+            ''')
 
             try:
                 # 老版本数据库可能没有 spec_code 唯一约束；先保留最新 rowid，再补唯一索引。
@@ -429,6 +607,9 @@ class SafeDatabaseManager:
                                 is_temporarily_off_shelf INTEGER DEFAULT 0,
                                 spec_image_data BLOB,
                                 FOREIGN KEY (product_id) REFERENCES products (id))''')
+            self.cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_product_specs_spec_code ON product_specs(spec_code)"
+            )
 
             self.cursor.execute("PRAGMA table_info(product_specs)")
             spec_columns = [col[1] for col in self.cursor.fetchall()]
@@ -517,6 +698,22 @@ class SafeDatabaseManager:
                 created_at TEXT,
                 updated_at TEXT,
                 UNIQUE(store_id))''')
+
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS cost_sync_state (
+                group_id TEXT PRIMARY KEY,
+                group_name TEXT,
+                role TEXT NOT NULL DEFAULT 'client',
+                coordinator_host TEXT,
+                secret TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
+                snapshot_json TEXT,
+                snapshot_hash TEXT,
+                publisher_id TEXT,
+                published_at TEXT,
+                xlsx_path TEXT,
+                mapping_json TEXT,
+                file_signature TEXT
+            )''')
             self.conn.commit()
 
             self.cursor.execute("PRAGMA table_info(daily_records)")
@@ -549,6 +746,9 @@ class SafeDatabaseManager:
                 order_date TEXT,
                 actual_amount REAL DEFAULT 0,
                 refund_count INTEGER DEFAULT 0,
+                refund_amount REAL,
+                period_start TEXT,
+                period_end TEXT,
                 UNIQUE(store_id, product_id, spec_code))''')
             
             # 创建订单导入历史记录表
@@ -593,6 +793,17 @@ class SafeDatabaseManager:
                     print("✅ 已添加refund_count字段到imported_orders表")
                 except Exception as e:
                     print(f"添加refund_count字段失败: {e}")
+            for column_name, column_type in (
+                ('refund_amount', 'REAL'),
+                ('period_start', 'TEXT'),
+                ('period_end', 'TEXT'),
+            ):
+                if column_name not in imported_columns:
+                    try:
+                        self.cursor.execute(f"ALTER TABLE imported_orders ADD COLUMN {column_name} {column_type}")
+                        print(f"✅ 已添加{column_name}字段到imported_orders表")
+                    except Exception as e:
+                        print(f"添加{column_name}字段失败: {e}")
 
             self.cursor.execute("PRAGMA table_info(imported_orders)")
             imported_info = self.cursor.fetchall()
@@ -765,9 +976,9 @@ class SafeDatabaseManager:
             self.conn.commit()
             if migrated_off_shelf_column:
                 self.repair_missing_promotion_profits()
-            if self.get_setting("garbage_link_detection_v3_rebuilt", "0") != "1":
+            if self.get_setting("garbage_link_detection_v4_rebuilt", "0") != "1":
                 self.reconcile_garbage_link_tasks()
-                self.set_setting("garbage_link_detection_v3_rebuilt", "1")
+                self.set_setting("garbage_link_detection_v4_rebuilt", "1")
         except Exception as e:
             self.conn.rollback()
             raise RuntimeError(f"数据库表创建失败：{e}") from e
@@ -780,7 +991,8 @@ class SafeDatabaseManager:
             "products": {
                 "title", "coupon_amount", "new_customer_discount", "store_weight",
                 "store_weight_locked", "current_roi", "use_manual_spec_weight",
-                "transaction_bid", "return_rate", "is_limited_time", "is_marketing",
+                "transaction_bid", "return_rate", "use_manual_return_rate", "is_limited_time", "is_marketing",
+                "marketing_activity",
                 "is_natural_flow", "is_sitewide_managed", "profit_status",
                 "net_break_even_roi", "image_data", "product_category_label",
                 "product_memo", "link_combo_id", "link_type", "roi_input_mode",
@@ -790,12 +1002,16 @@ class SafeDatabaseManager:
                 "spec_name", "test_price", "quantity", "sort_order", "source_bg_color",
                 "category_label", "category_color", "product_attribute",
                 "product_attribute_combo_disabled", "product_attribute_is_combo",
+                "combo_components_json", "combo_reviewed",
                 "manual_sort_order", "product_cost", "unit_weight", "shipping_fee",
-                "misc_fee", "cost_calc_mode",
+                "misc_fee", "cost_calc_mode", "thumbnail_data", "thumbnail_manual",
             },
             "product_specs": {"is_locked", "spec_image_data", "is_temporarily_off_shelf"},
             "daily_records": {"category", "special_info"},
-            "imported_orders": {"product_id", "order_date", "actual_amount", "refund_count"},
+            "imported_orders": {
+                "product_id", "order_date", "actual_amount", "refund_count",
+                "refund_amount", "period_start", "period_end",
+            },
             "profit_records": {
                 "profit_per_transaction", "best_roi", "net_break_even_roi",
                 "net_break_even_125", "net_break_even_value",
@@ -850,12 +1066,17 @@ class SafeDatabaseManager:
                 order_date TEXT,
                 actual_amount REAL DEFAULT 0,
                 refund_count INTEGER DEFAULT 0,
+                refund_amount REAL,
+                period_start TEXT,
+                period_end TEXT,
                 UNIQUE(store_id, product_id, spec_code))''')
             print("  ✅ 已创建新结构表 imported_orders_new")
 
             # 3. 迁移数据：把 products.id 转换为 products.name
             self.cursor.execute('''
-                INSERT INTO imported_orders_new (id, store_id, product_id, spec_code, order_count, import_time, order_date, actual_amount, refund_count)
+                INSERT INTO imported_orders_new
+                    (id, store_id, product_id, spec_code, order_count, import_time,
+                     order_date, actual_amount, refund_count, refund_amount, period_start, period_end)
                 SELECT
                     io.id,
                     io.store_id,
@@ -865,7 +1086,10 @@ class SafeDatabaseManager:
                     io.import_time,
                     io.order_date,
                     io.actual_amount,
-                    COALESCE(io.refund_count, 0) as refund_count
+                    COALESCE(io.refund_count, 0) as refund_count,
+                    io.refund_amount,
+                    io.period_start,
+                    io.period_end
                 FROM imported_orders_backup io
                 LEFT JOIN products p ON io.product_id = p.id
             ''')
@@ -1047,18 +1271,24 @@ class SafeDatabaseManager:
                 for row in self.safe_fetchall("SELECT id FROM stores")
             )
 
-        recent_data = {}
+        streaks = {}
+        finished = set()
         rows = self.safe_fetchall(
-            """SELECT product_id, net_orders FROM (
-                   SELECT product_id, net_orders,
-                          ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY record_date DESC) AS recent_rank
-                   FROM promotion_daily_data WHERE store_id=?
-               ) WHERE recent_rank<=2
-               ORDER BY product_id, recent_rank""",
+            """SELECT product_id, net_orders, cost, transaction_amount,
+                      net_transaction_amount, impressions, clicks, promotion_impressions
+               FROM promotion_daily_data WHERE store_id=?
+               ORDER BY product_id, record_date DESC""",
             (store_id,),
         )
-        for product_code, net_orders in rows:
-            recent_data.setdefault(str(product_code), []).append(float(net_orders or 0))
+        for product_code, net_orders, *signals in rows:
+            product_code = str(product_code).strip()
+            if product_code in finished:
+                continue
+            has_data = any(float(value or 0) != 0 for value in signals)
+            if float(net_orders or 0) <= 0 and has_data:
+                streaks[product_code] = streaks.get(product_code, 0) + 1
+            else:
+                finished.add(product_code)
 
         now = datetime.now()
         created = 0
@@ -1069,12 +1299,8 @@ class SafeDatabaseManager:
             (store_id,),
         )
         for product_id, product_code, title, is_natural_flow in products:
-            values = recent_data.get(str(product_code or "").strip(), [])
-            is_garbage = (
-                not bool(is_natural_flow)
-                and len(values) == 2
-                and all(value <= 0 for value in values)
-            )
+            streak = streaks.get(str(product_code or "").strip(), 0)
+            is_garbage = not bool(is_natural_flow) and streak > 0
             task_args = (store_id, product_id)
             if not is_garbage:
                 self.safe_execute(
@@ -1086,14 +1312,19 @@ class SafeDatabaseManager:
                 "SELECT id FROM daily_tasks WHERE store_id=? AND product_id=? AND task_content LIKE '【垃圾链接】%' LIMIT 1",
                 task_args,
             )
+            content = (
+                f"【垃圾链接】连续{streak}次推广数据有数据但净成交笔数为 0。"
+                f"商品ID：{product_code}；标题：{title or ''}"
+            )
             if exists:
+                self.safe_execute("UPDATE daily_tasks SET task_content=? WHERE id=?", (content, exists[0][0]))
                 continue
             created_time = imported_at or now.strftime("%Y-%m-%d %H:%M:%S")
             self.safe_execute(
                 """INSERT INTO daily_tasks (store_id, product_id, year, month, day, task_content, created_time)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (store_id, product_id, now.year, now.month, now.day,
-                 f"【垃圾链接】该链接最近两条推广数据记录净成交笔数均为 0。商品ID：{product_code}；标题：{title or ''}", created_time),
+                 content, created_time),
             )
             created += 1
         return created
@@ -1148,8 +1379,9 @@ class SafeDatabaseManager:
             cursor.executemany("""
                 INSERT INTO imported_orders
                     (store_id, product_id, spec_code, order_count, import_time,
-                     order_date, actual_amount, refund_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     order_date, actual_amount, refund_count, refund_amount,
+                     period_start, period_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, order_rows)
 
     def get_setting(self, key, default=None):
@@ -1170,14 +1402,151 @@ class SafeDatabaseManager:
                 common = self._load_common_settings()
                 common[key] = str(value)
                 if self._save_common_settings(common):
+                    if key == "cost_sync_local_dirty" and str(value) == "1":
+                        callback = getattr(self, "cost_sync_change_callback", None)
+                        if callable(callback):
+                            callback()
                     return
             self.safe_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            if key == "cost_sync_local_dirty" and str(value) == "1":
+                callback = getattr(self, "cost_sync_change_callback", None)
+                if callable(callback):
+                    callback()
         except Exception as e:
             print(f"保存设置失败: {e}")
 
     def _is_common_setting_key(self, key):
         key = str(key or "")
         return key in self.COMMON_SETTING_KEYS or any(key.startswith(prefix) for prefix in self.COMMON_SETTING_PREFIXES)
+
+    def set_cost_history_source(self, source="manual"):
+        source = str(source or "manual").strip() or "manual"
+        self.cursor.execute("UPDATE cost_history_control SET source=? WHERE id=1", (source,))
+        self.conn.commit()
+
+    def clear_cost_history(self):
+        count = int(self.safe_fetchall("SELECT COUNT(*) FROM cost_history")[0][0])
+        clear_at = max(
+            int(time.time() * 1000),
+            int(self.get_setting("cost_history_clear_at", "0") or 0) + 1,
+        )
+        with self.conn:
+            self.conn.execute("DELETE FROM cost_history")
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('cost_history_clear_at', ?)",
+                (str(clear_at),),
+            )
+        self.set_setting("cost_sync_local_dirty", "1")
+        return count
+
+    def delete_cost_history_events(self, event_ids):
+        event_ids = list(dict.fromkeys(
+            str(value or "").strip() for value in event_ids if str(value or "").strip()
+        ))
+        if not event_ids:
+            return 0
+        placeholders = ",".join("?" for _ in event_ids)
+        self.cursor.execute(f"DELETE FROM cost_history WHERE event_id IN ({placeholders})", tuple(event_ids))
+        count = self.cursor.rowcount
+        self.conn.commit()
+        if count:
+            self.set_setting("cost_sync_local_dirty", "1")
+        return count
+
+    def _rename_cost_spec_references(self, old_code, new_code):
+        old_code = str(old_code or "").strip()
+        new_code = str(new_code or "").strip()
+        if not old_code or not new_code or old_code == new_code:
+            return
+        self.cursor.execute("UPDATE product_specs SET spec_code=? WHERE spec_code=?", (new_code, old_code))
+        order_rows = self.cursor.execute(
+            """SELECT id, store_id, product_id, order_count, import_time, order_date,
+                      actual_amount, refund_count, refund_amount, period_start, period_end
+               FROM imported_orders WHERE spec_code=?""",
+            (old_code,),
+        ).fetchall()
+        for row in order_rows:
+            (row_id, store_id, product_id, order_count, import_time, order_date,
+             actual_amount, refund_count, refund_amount, period_start, period_end) = row
+            target = self.cursor.execute(
+                """SELECT id, order_count, actual_amount, refund_count, refund_amount,
+                          period_start, period_end
+                   FROM imported_orders
+                   WHERE store_id=? AND product_id=? AND spec_code=? AND id<>?""",
+                (store_id, product_id, new_code, row_id),
+            ).fetchone()
+            if target:
+                merged_refund_amount = (
+                    None if target[4] is None or refund_amount is None
+                    else float(target[4]) + float(refund_amount)
+                )
+                starts = [value for value in (target[5], period_start) if value]
+                ends = [value for value in (target[6], period_end) if value]
+                self.cursor.execute(
+                    """UPDATE imported_orders
+                       SET order_count=?, actual_amount=?, refund_count=?, refund_amount=?,
+                           period_start=?, period_end=?, import_time=?, order_date=?
+                       WHERE id=?""",
+                    (
+                        int(target[1] or 0) + int(order_count or 0),
+                        float(target[2] or 0) + float(actual_amount or 0),
+                        int(target[3] or 0) + int(refund_count or 0),
+                        merged_refund_amount,
+                        min(starts) if len(starts) == 2 else None,
+                        max(ends) if len(ends) == 2 else None,
+                        import_time, order_date, target[0],
+                    ),
+                )
+                self.cursor.execute("DELETE FROM imported_orders WHERE id=?", (row_id,))
+            else:
+                self.cursor.execute("UPDATE imported_orders SET spec_code=? WHERE id=?", (new_code, row_id))
+        self.cursor.execute("UPDATE cost_history SET spec_code=? WHERE spec_code=?", (new_code, old_code))
+        combo_rows = self.cursor.execute(
+            """SELECT spec_code, combo_components_json FROM cost_library
+               WHERE COALESCE(combo_components_json, '')<>''"""
+        ).fetchall()
+        for combo_code, raw_json in combo_rows:
+            try:
+                items = json.loads(raw_json or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            changed = False
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and str(item.get("spec_code") or item.get("code") or "") == old_code:
+                    item["spec_code"] = new_code
+                    item.pop("code", None)
+                    changed = True
+            if changed:
+                self.cursor.execute(
+                    "UPDATE cost_library SET combo_components_json=? WHERE spec_code=?",
+                    (json.dumps(items, ensure_ascii=False), combo_code),
+                )
+
+    def rename_cost_spec_code(self, old_code, new_code, manage_transaction=True, mark_dirty=True):
+        old_code = str(old_code or "").strip()
+        new_code = str(new_code or "").strip()
+        if not old_code or not new_code:
+            raise ValueError("规格编码不能为空")
+        if old_code == new_code:
+            return False
+        if not self.cursor.execute("SELECT 1 FROM cost_library WHERE spec_code=?", (old_code,)).fetchone():
+            raise ValueError(f"原规格编码不存在：{old_code}")
+        if self.cursor.execute("SELECT 1 FROM cost_library WHERE spec_code=?", (new_code,)).fetchone():
+            raise ValueError(f"规格编码已存在：{new_code}")
+        try:
+            if manage_transaction:
+                self.conn.execute("BEGIN TRANSACTION")
+            self.cursor.execute("UPDATE cost_library SET spec_code=? WHERE spec_code=?", (new_code, old_code))
+            self._rename_cost_spec_references(old_code, new_code)
+            if manage_transaction:
+                self.conn.commit()
+        except Exception:
+            if manage_transaction:
+                self.conn.rollback()
+            raise
+        if mark_dirty:
+            self.set_setting("cost_sync_local_dirty", "1")
+        return True
 
     def _common_settings_path(self):
         if DataRootManager is None:
@@ -1191,6 +1560,25 @@ class SafeDatabaseManager:
             return manager.common_settings_path(root)
         except Exception:
             return None
+
+    def _migrate_legacy_common_cost_settings(self):
+        """Seed account-local cost settings once from older shared settings."""
+        common = self._load_common_settings()
+        changed = False
+        for key in self.ACCOUNT_COST_SETTING_KEYS:
+            if key not in common:
+                continue
+            exists = self.cursor.execute(
+                "SELECT 1 FROM settings WHERE key=?", (key,)
+            ).fetchone()
+            if not exists:
+                self.cursor.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    (key, str(common[key])),
+                )
+                changed = True
+        if changed:
+            self.conn.commit()
 
     def _load_common_settings(self):
         path = self._common_settings_path()
@@ -1302,20 +1690,293 @@ class SafeDatabaseManager:
         total_cost = product_cost * qty + misc_fee + shipping_fee
         return round(total_cost, 2), round(shipping_fee, 2), round(misc_fee, 2), round(total_weight, 4)
 
+    _COMBO_UNITS = "本|套|包|盒|件|册|支|份|组"
+    _CHINESE_NUMBERS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+                        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+    @classmethod
+    def cost_combo_multiplier(cls, name):
+        matches = re.findall(rf"(?<![/／])([2-9]|\d{{2,}}|[二两三四五六七八九十])\s*(?:{cls._COMBO_UNITS})", str(name or ""))
+        values = [int(value) if value.isdigit() else cls._CHINESE_NUMBERS.get(value, 0) for value in matches]
+        return values[-1] if values else 1
+
+    @classmethod
+    def is_cost_combo_name(cls, name):
+        text = str(name or "")
+        return bool(re.search(r"\+|＋|﹢", text)) or cls.cost_combo_multiplier(text) > 1
+
+    @classmethod
+    def _cost_combo_family_name(cls, name):
+        text = str(name or "").lower()
+        text = re.sub(r"\d+(?:\.\d+)?\s*张", "", text)
+        text = re.sub(
+            rf"(?<![/／])(?:共计?|合计)?\s*(?:\d+|[一二两三四五六七八九十])\s*(?:{cls._COMBO_UNITS})",
+            "",
+            text,
+        )
+        return re.sub(r"[\s,，。;；:：|｜/\\_\-（）()【】\[\]{}]+", "", text)
+
+    def _cost_combo_specs(self, exclude_code=""):
+        rows = self.safe_fetchall(
+            """SELECT spec_code, COALESCE(spec_name, ''), COALESCE(category_label, ''),
+                      COALESCE(product_attribute, ''), COALESCE(product_attribute_combo_disabled, 0),
+                      COALESCE(product_attribute_is_combo, 0)
+               FROM cost_library WHERE COALESCE(spec_code, '')<>''"""
+        )
+        return [
+            {"code": str(code), "name": str(name), "category": str(category), "attribute": str(attribute)}
+            for code, name, category, attribute, disabled, is_combo in rows
+            if str(code) != str(exclude_code or "")
+            and (
+                int(disabled or 0)
+                or (not int(is_combo or 0) and not self.is_cost_combo_name(name))
+            )
+        ]
+
+    def suggest_cost_combo_items(self, spec_code, candidates=None):
+        rows = self.safe_fetchall(
+            "SELECT COALESCE(spec_name, ''), COALESCE(category_label, '') FROM cost_library WHERE spec_code=?",
+            (str(spec_code or ""),),
+        )
+        if not rows:
+            return []
+        name, category = str(rows[0][0]), str(rows[0][1])
+        candidates = candidates if candidates is not None else self._cost_combo_specs(spec_code)
+
+        def best_match(part):
+            target = self._cost_combo_family_name(part)
+            best = None
+            best_score = -1
+            for item in candidates:
+                candidate = self._cost_combo_family_name(item["name"])
+                if not target or not candidate:
+                    continue
+                if candidate == target:
+                    score = 1000
+                elif candidate in target or target in candidate:
+                    score = min(len(candidate), len(target))
+                else:
+                    continue
+                if item["category"] == category:
+                    score += 100
+                if score > best_score:
+                    best, best_score = item, score
+            return best
+
+        parts = [part.strip() for part in re.split(r"\+|＋|﹢", name) if part.strip()]
+        if len(parts) > 1:
+            result = []
+            for part in parts:
+                item = best_match(part)
+                if item:
+                    result.append({**item, "quantity": 1})
+            return result
+        multiplier = self.cost_combo_multiplier(name)
+        item = best_match(name)
+        return [{**item, "quantity": multiplier}] if item and multiplier > 1 else []
+
+    @staticmethod
+    def _normalise_combo_items(items):
+        result = []
+        for item in items or []:
+            code = str(item.get("spec_code") or item.get("code") or "").strip()
+            if not code:
+                continue
+            quantity = max(float(item.get("quantity") or 1), 1)
+            result.append({"spec_code": code, "quantity": int(quantity) if quantity.is_integer() else quantity})
+        return result
+
+    def get_cost_combo_items(self, spec_code, suggest=False):
+        rows = self.safe_fetchall(
+            "SELECT COALESCE(combo_components_json, '') FROM cost_library WHERE spec_code=?",
+            (str(spec_code or ""),),
+        )
+        try:
+            saved = self._normalise_combo_items(json.loads(rows[0][0])) if rows and rows[0][0] else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            saved = []
+        raw_items = saved or (self.suggest_cost_combo_items(spec_code) if suggest else [])
+        result = []
+        for item in raw_items:
+            code = str(item.get("spec_code") or item.get("code") or "")
+            details = self.safe_fetchall(
+                """SELECT COALESCE(spec_name, ''), COALESCE(category_label, ''),
+                          COALESCE(product_attribute, ''), COALESCE(quantity, '')
+                   FROM cost_library WHERE spec_code=?""",
+                (code,),
+            )
+            if details:
+                result.append({"code": code, "name": details[0][0], "category": details[0][1],
+                               "attribute": details[0][2], "quantity": details[0][3],
+                               "combo_quantity": item.get("quantity") or 1})
+        return result
+
+    def detect_cost_combo_candidates(self):
+        rows = self.safe_fetchall(
+            """SELECT spec_code, COALESCE(spec_name, ''), COALESCE(combo_components_json, ''),
+                      COALESCE(product_attribute_combo_disabled, 0), COALESCE(combo_reviewed, 0),
+                      COALESCE(product_attribute_is_combo, 0)
+               FROM cost_library"""
+        )
+        single_specs = self._cost_combo_specs()
+        single_codes = {item["code"] for item in single_specs}
+        changed_codes = []
+        for code, name, components_json, disabled, reviewed, is_combo in rows:
+            if int(disabled or 0) or int(reviewed or 0) or not self.is_cost_combo_name(name):
+                continue
+            try:
+                saved_items = self._normalise_combo_items(json.loads(components_json or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                saved_items = []
+            saved_is_single_only = bool(saved_items) and all(
+                item["spec_code"] in single_codes for item in saved_items
+            )
+            if int(is_combo or 0) and saved_is_single_only:
+                continue
+            items = saved_items if saved_is_single_only else self.suggest_cost_combo_items(code, single_specs)
+            self.cursor.execute(
+                """UPDATE cost_library SET product_attribute_is_combo=1,
+                          combo_components_json=?
+                   WHERE spec_code=?""",
+                (json.dumps(self._normalise_combo_items(items), ensure_ascii=False), code),
+            )
+            changed_codes.append(str(code))
+        if changed_codes:
+            self.conn.commit()
+            self.recalculate_cost_combinations_for_components(
+                changed_codes, record_history=True, source="combo"
+            )
+            self.set_setting("cost_sync_local_dirty", "1")
+        return len(changed_codes)
+
+    def save_cost_combo_definition(
+        self, spec_code, is_combo, items=None, product_attribute="", combo_disabled=None,
+        mark_reviewed=True,
+    ):
+        spec_code = str(spec_code or "").strip()
+        normalised = self._normalise_combo_items(items)
+        self.cursor.execute(
+            """UPDATE cost_library SET product_attribute=?, product_attribute_is_combo=?,
+                      product_attribute_combo_disabled=?, combo_components_json=?,
+                      combo_reviewed=CASE WHEN ? THEN ? ELSE combo_reviewed END
+               WHERE spec_code=?""",
+            (str(product_attribute or ""), int(bool(is_combo)), 0 if is_combo else int(bool(combo_disabled)),
+             json.dumps(normalised, ensure_ascii=False) if is_combo else "",
+             int(bool(mark_reviewed)), int(bool(is_combo or combo_disabled)), spec_code),
+        )
+        self.conn.commit()
+        changed = self.recalculate_cost_combinations_for_components([spec_code], record_history=True)
+        self.inherit_single_multiplier_combo_thumbnails([spec_code], mark_dirty=False)
+        self.set_setting("cost_sync_local_dirty", "1")
+        return changed
+
+    def recalculate_cost_combinations_for_components(self, component_codes=None, record_history=False, source="manual"):
+        wanted = {str(code) for code in (component_codes or []) if str(code)}
+        rows = self.safe_fetchall(
+            """SELECT spec_code, COALESCE(combo_components_json, ''), COALESCE(quantity, ''), cost_price,
+                      product_cost, unit_weight, shipping_fee, misc_fee
+               FROM cost_library
+               WHERE COALESCE(product_attribute_is_combo, 0)=1"""
+        )
+        target_rows = []
+        needed_component_codes = set()
+        for row in rows:
+            combo_code, raw_json = row[0], row[1]
+            try:
+                items = self._normalise_combo_items(json.loads(raw_json or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            item_codes = {item["spec_code"] for item in items}
+            if wanted and not (wanted & item_codes) and str(combo_code) not in wanted:
+                continue
+            target_rows.append((row, items))
+            needed_component_codes.update(item_codes)
+        component_values = {}
+        needed_codes = list(needed_component_codes)
+        for start in range(0, len(needed_codes), 800):
+            batch = needed_codes[start:start + 800]
+            placeholders = ",".join("?" for _ in batch)
+            component_values.update({
+                str(code): (product_cost, unit_weight)
+                for code, product_cost, unit_weight in self.safe_fetchall(
+                    f"SELECT spec_code, product_cost, unit_weight FROM cost_library WHERE spec_code IN ({placeholders})",
+                    tuple(batch),
+                )
+            })
+        changed_codes = []
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for row, items in target_rows:
+            combo_code, _raw_json, combo_quantity, old_cost, old_product_cost, old_unit_weight, old_shipping, old_misc = row
+            product_cost = 0.0
+            unit_weight = 0.0
+            valid = bool(items)
+            for item in items:
+                component = component_values.get(item["spec_code"])
+                if not component or component[0] is None or component[1] is None:
+                    valid = False
+                    break
+                product_cost += float(component[0]) * float(item["quantity"])
+                unit_weight += float(component[1]) * float(item["quantity"])
+            if not valid:
+                if any(value is not None for value in (
+                    old_cost, old_product_cost, old_unit_weight, old_shipping, old_misc,
+                )):
+                    self.cursor.execute(
+                        """UPDATE cost_library
+                           SET product_cost=NULL, unit_weight=NULL, shipping_fee=NULL,
+                               misc_fee=NULL, cost_price=NULL, cost_calc_mode='detail'
+                           WHERE spec_code=?""",
+                        (combo_code,),
+                    )
+                    changed_codes.append(str(combo_code))
+                continue
+            total, shipping, misc, _ = self.calculate_detailed_cost(product_cost, 1, unit_weight)
+            product_cost = round(product_cost, 4)
+            unit_weight = round(unit_weight, 4)
+            old_value = float(old_cost) if old_cost is not None else None
+            details_changed = any((
+                old_product_cost is None or abs(float(old_product_cost) - product_cost) > 0.0001,
+                old_unit_weight is None or abs(float(old_unit_weight) - unit_weight) > 0.0001,
+                old_shipping is None or abs(float(old_shipping) - shipping) > 0.001,
+                old_misc is None or abs(float(old_misc) - misc) > 0.001,
+            ))
+            cost_changed = old_value is None or abs(total - old_value) > 0.001
+            if not details_changed and not cost_changed:
+                continue
+            self.cursor.execute(
+                """UPDATE cost_library SET product_cost=?, unit_weight=?, shipping_fee=?, misc_fee=?,
+                          cost_price=?, cost_calc_mode='detail' WHERE spec_code=?""",
+                (product_cost, unit_weight, shipping, misc, total, combo_code),
+            )
+            changed_codes.append(str(combo_code))
+        if changed_codes:
+            self.conn.commit()
+        return changed_codes
+
     def recalculate_detailed_cost_library(self, record_history=False, source="manual"):
         rows = self.safe_fetchall(
-            """SELECT spec_code, quantity, product_cost, unit_weight, cost_price
+            """SELECT spec_code, quantity, product_cost, unit_weight, cost_price,
+                      COALESCE(product_attribute_is_combo, 0)
                FROM cost_library
                WHERE cost_calc_mode='detail'"""
         )
         changed = 0
-        import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             self.conn.execute("BEGIN TRANSACTION")
-            for spec_code, quantity, product_cost, unit_weight, old_cost in rows:
+            for spec_code, quantity, product_cost, unit_weight, old_cost, is_combo in rows:
                 if product_cost is None or unit_weight is None:
+                    self.cursor.execute(
+                        """UPDATE cost_library
+                           SET cost_price=NULL, shipping_fee=NULL, misc_fee=NULL
+                           WHERE spec_code=?
+                             AND (cost_price IS NOT NULL OR shipping_fee IS NOT NULL OR misc_fee IS NOT NULL)""",
+                        (spec_code,),
+                    )
+                    changed += max(self.cursor.rowcount, 0)
                     continue
-                new_cost, shipping_fee, misc_fee, _total_weight = self.calculate_detailed_cost(product_cost, quantity, unit_weight)
+                new_cost, shipping_fee, misc_fee, _total_weight = self.calculate_detailed_cost(
+                    product_cost, 1 if is_combo else quantity, unit_weight
+                )
                 old_value = float(old_cost) if old_cost is not None else None
                 if old_value is not None and abs(new_cost - old_value) <= 0.001:
                     self.cursor.execute(
@@ -1327,21 +1988,673 @@ class SafeDatabaseManager:
                     "UPDATE cost_library SET cost_price=?, shipping_fee=?, misc_fee=? WHERE spec_code=?",
                     (new_cost, shipping_fee, misc_fee, spec_code),
                 )
-                if record_history and old_value is not None:
-                    change_amount = new_cost - old_value
-                    change_percent = (change_amount / old_value * 100) if old_value else None
-                    self.cursor.execute(
-                        """INSERT INTO cost_history
-                           (spec_code, old_cost_price, new_cost_price, change_amount, change_percent, source, import_time)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (spec_code, old_value, new_cost, change_amount, change_percent, source, import_time),
-                    )
                 changed += 1
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
+        combo_changed = self.recalculate_cost_combinations_for_components(
+            record_history=record_history, source=source
+        )
+        return changed + len(combo_changed)
+
+    def get_cost_sync_state(self):
+        rows = self.safe_fetchall(
+            """SELECT group_id, group_name, role, coordinator_host, secret, revision,
+                      snapshot_json, snapshot_hash, publisher_id, published_at,
+                      xlsx_path, mapping_json, file_signature
+               FROM cost_sync_state LIMIT 1"""
+        )
+        if not rows:
+            return {}
+        keys = (
+            "group_id", "group_name", "role", "coordinator_host", "secret", "revision",
+            "snapshot_json", "snapshot_hash", "publisher_id", "published_at",
+            "xlsx_path", "mapping_json", "file_signature",
+        )
+        return dict(zip(keys, rows[0]))
+
+    def configure_cost_sync(self, group_id, group_name, role, secret, coordinator_host=""):
+        current = self.get_cost_sync_state()
+        same_group = current.get("group_id") == group_id
+        self.cursor.execute("DELETE FROM cost_sync_state")
+        self.cursor.execute(
+            """INSERT INTO cost_sync_state
+               (group_id, group_name, role, coordinator_host, secret, revision,
+                snapshot_json, snapshot_hash, publisher_id, published_at,
+                xlsx_path, mapping_json, file_signature)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                group_id, group_name, role, coordinator_host, secret,
+                int(current.get("revision") or 0) if same_group else 0,
+                current.get("snapshot_json") if same_group else None,
+                current.get("snapshot_hash") if same_group else None,
+                current.get("publisher_id") if same_group else None,
+                current.get("published_at") if same_group else None,
+                current.get("xlsx_path") or "", current.get("mapping_json") or "",
+                current.get("file_signature") or "",
+            ),
+        )
+        self.conn.commit()
+
+    def update_cost_sync_state(self, **values):
+        allowed = {
+            "group_name", "role", "coordinator_host", "revision", "snapshot_json",
+            "snapshot_hash", "publisher_id", "published_at", "xlsx_path",
+            "mapping_json", "file_signature",
+        }
+        values = {key: value for key, value in values.items() if key in allowed}
+        if not values or not self.get_cost_sync_state():
+            return False
+        assignments = ", ".join(f"{key}=?" for key in values)
+        self.cursor.execute(f"UPDATE cost_sync_state SET {assignments}", tuple(values.values()))
+        self.conn.commit()
+        return True
+
+    def clear_cost_sync_state(self):
+        self.cursor.execute("DELETE FROM cost_sync_state")
+        self.conn.commit()
+
+    def build_cost_sync_snapshot(self):
+        rows = self.safe_fetchall(
+            """SELECT spec_code, COALESCE(spec_name, ''), COALESCE(category_label, ''),
+                      COALESCE(category_color, ''), COALESCE(quantity, ''),
+                      COALESCE(product_attribute, ''),
+                      COALESCE(product_attribute_combo_disabled, 0),
+                      COALESCE(product_attribute_is_combo, 0), product_cost, unit_weight,
+                      COALESCE(cost_calc_mode, 'total'), cost_price, sort_order, manual_sort_order,
+                      COALESCE(combo_components_json, ''), COALESCE(combo_reviewed, 0)
+               FROM cost_library
+               WHERE COALESCE(spec_code, '') <> ''
+               ORDER BY sort_order, spec_code"""
+        )
+        categories = self.safe_fetchall(
+            """SELECT label, COALESCE(color, ''), sort_order
+               FROM cost_categories WHERE COALESCE(label, '') <> ''
+               ORDER BY sort_order, label"""
+        )
+        images = self.safe_fetchall(
+            """SELECT spec_code, thumbnail_data, COALESCE(thumbnail_manual, 0)
+               FROM cost_library
+               WHERE COALESCE(spec_code, '') <> '' AND LENGTH(COALESCE(thumbnail_data, X'')) > 0
+               ORDER BY spec_code"""
+        )
+        history = self.safe_fetchall(
+            """SELECT event_id, spec_code, COALESCE(spec_name, ''),
+                      COALESCE(operation_type, 'price'), COALESCE(old_value, ''),
+                      COALESCE(new_value, ''), old_cost_price, new_cost_price,
+                      change_amount, change_percent, COALESCE(source, 'manual'),
+                      import_time, COALESCE(event_time_ms, 0)
+               FROM cost_history
+               WHERE COALESCE(event_id, '')<>''
+                 AND COALESCE(operation_type, 'price')<>'price'
+               ORDER BY event_time_ms, id"""
+        )
+        return {
+            "schema": 1,
+            "history_clear_at": int(self.get_setting("cost_history_clear_at", "0") or 0),
+            "rows": [
+                {
+                    "spec_code": row[0], "spec_name": row[1], "category_label": row[2],
+                    "category_color": row[3], "quantity": row[4], "product_attribute": row[5],
+                    "combo_disabled": int(row[6] or 0), "is_combo": int(row[7] or 0),
+                    "product_cost": row[8], "unit_weight": row[9], "cost_calc_mode": row[10],
+                    "cost_price": None if str(row[10]).lower() == "detail" else row[11],
+                    "sort_order": row[12], "manual_sort_order": row[13],
+                    "combo_components_json": row[14], "combo_reviewed": int(row[15] or 0),
+                }
+                for row in rows
+            ],
+            "categories": [
+                {"label": row[0], "color": row[1], "sort_order": row[2]}
+                for row in categories
+            ],
+            "images": [
+                {
+                    "spec_code": row[0],
+                    "data": base64.b64encode(bytes(row[1])).decode("ascii"),
+                    "manual": int(row[2] or 0),
+                }
+                for row in images
+            ],
+            "history": [
+                {
+                    "event_id": row[0], "spec_code": row[1], "spec_name": row[2],
+                    "operation_type": row[3], "old_value": row[4], "new_value": row[5],
+                    "old_cost_price": row[6], "new_cost_price": row[7],
+                    "change_amount": row[8], "change_percent": row[9], "source": row[10],
+                    "import_time": row[11], "event_time_ms": int(row[12] or 0),
+                }
+                for row in history
+            ],
+        }
+
+    @staticmethod
+    def merge_cost_sync_snapshots(current, incoming):
+        current = current if isinstance(current, dict) else {}
+        incoming = incoming if isinstance(incoming, dict) else {}
+        rows = {
+            str(row.get("spec_code") or "").strip(): dict(row)
+            for row in current.get("rows", []) if str(row.get("spec_code") or "").strip()
+        }
+        def should_replace(old, new):
+            old_stamp = int(old.get("_modified_at") or 0) if old else 0
+            new_stamp = int(new.get("_modified_at") or 0)
+            if not old_stamp and not new_stamp:
+                return True
+            if new_stamp != old_stamp:
+                return new_stamp > old_stamp
+            return str(new.get("_modified_by") or "") > str(old.get("_modified_by") or "")
+
+        for row in incoming.get("rows", []):
+            code = str(row.get("spec_code") or "").strip()
+            if code and should_replace(rows.get(code), row):
+                rows[code] = dict(row)
+        categories = {
+            str(row.get("label") or "").strip(): dict(row)
+            for row in current.get("categories", []) if str(row.get("label") or "").strip()
+        }
+        for row in incoming.get("categories", []):
+            label = str(row.get("label") or "").strip()
+            if label and should_replace(categories.get(label), row):
+                categories[label] = dict(row)
+        images = {
+            str(image.get("spec_code") or "").strip(): dict(image)
+            for image in current.get("images", [])
+            if str(image.get("spec_code") or "").strip() and image.get("data")
+        }
+        for image in incoming.get("images", []):
+            code = str(image.get("spec_code") or "").strip()
+            old = images.get(code)
+            if not code or not image.get("data") or image.get("_deleted"):
+                continue
+            if old is None or (int(image.get("manual") or 0) and should_replace(old, image)):
+                images[code] = dict(image)
+        history_clear_at = max(
+            int(current.get("history_clear_at") or 0),
+            int(incoming.get("history_clear_at") or 0),
+        )
+        history = {
+            str(item.get("event_id") or "").strip(): dict(item)
+            for item in current.get("history", [])
+            if str(item.get("event_id") or "").strip()
+            and str(item.get("operation_type") or "price") != "price"
+        }
+        for item in incoming.get("history", []):
+            event_id = str(item.get("event_id") or "").strip()
+            if (
+                event_id
+                and str(item.get("operation_type") or "price") != "price"
+                and should_replace(history.get(event_id), item)
+            ):
+                history[event_id] = dict(item)
+        history = {
+            event_id: item for event_id, item in history.items()
+            if int(item.get("event_time_ms") or 0) > history_clear_at
+        }
+        category_colors = {
+            label: str(row.get("color") or "")
+            for label, row in categories.items()
+            if not row.get("_deleted")
+        }
+        for row in rows.values():
+            label = str(row.get("category_label") or "").strip()
+            if not row.get("_deleted") and label in category_colors:
+                row["category_color"] = category_colors[label]
+        return {
+            "schema": 1,
+            "history_clear_at": history_clear_at,
+            "rows": sorted(rows.values(), key=lambda row: (row.get("sort_order") is None, row.get("sort_order") or 0, str(row.get("spec_code") or ""))),
+            "categories": sorted(categories.values(), key=lambda row: (row.get("sort_order") is None, row.get("sort_order") or 0, str(row.get("label") or ""))),
+            "images": sorted(images.values(), key=lambda image: str(image.get("spec_code") or "")),
+            "history": sorted(history.values(), key=lambda item: (int(item.get("event_time_ms") or 0), str(item.get("event_id") or ""))),
+        }
+
+    def apply_cost_sync_snapshot(self, snapshot, source="lan", manage_transaction=True, replace_local=False):
+        if not isinstance(snapshot, dict) or int(snapshot.get("schema") or 0) != 1:
+            raise ValueError("成本库同步数据格式不受支持")
+        changed_codes = []
+        cost_changed_codes = []
+        image_changed_codes = []
+        history_changed_count = 0
+        categories_changed = False
+        import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            if manage_transaction:
+                self.conn.execute("BEGIN TRANSACTION")
+            self.cursor.execute("UPDATE cost_history_control SET enabled=0 WHERE id=1")
+            if replace_local:
+                active_codes = {
+                    str(row.get("spec_code") or "").strip()
+                    for row in snapshot.get("rows", [])
+                    if not row.get("_deleted") and str(row.get("spec_code") or "").strip()
+                }
+                existing_codes = {
+                    str(row[0]) for row in self.cursor.execute("SELECT spec_code FROM cost_library").fetchall()
+                }
+                removed_codes = existing_codes - active_codes
+                if removed_codes:
+                    self.cursor.executemany(
+                        "DELETE FROM cost_library WHERE spec_code=?",
+                        [(code,) for code in removed_codes],
+                    )
+                    changed_codes.extend(sorted(removed_codes))
+                active_categories = {
+                    str(row.get("label") or "").strip()
+                    for row in snapshot.get("categories", [])
+                    if not row.get("_deleted") and str(row.get("label") or "").strip()
+                }
+                existing_categories = {
+                    str(row[0]) for row in self.cursor.execute("SELECT label FROM cost_categories").fetchall()
+                }
+                removed_categories = existing_categories - active_categories
+                if removed_categories:
+                    self.cursor.executemany(
+                        "DELETE FROM cost_categories WHERE label=?",
+                        [(label,) for label in removed_categories],
+                    )
+                    categories_changed = True
+            for category in snapshot.get("categories", []):
+                label = str(category.get("label") or "").strip()
+                if not label:
+                    continue
+                if category.get("_deleted"):
+                    affected = [
+                        str(row[0]) for row in self.cursor.execute(
+                            "SELECT spec_code FROM cost_library WHERE category_label=?", (label,)
+                        ).fetchall()
+                    ]
+                    self.cursor.execute(
+                        "UPDATE cost_library SET category_label='', category_color='' WHERE category_label=?",
+                        (label,),
+                    )
+                    self.cursor.execute("DELETE FROM cost_categories WHERE label=?", (label,))
+                    changed_codes.extend(affected)
+                    categories_changed = True
+                    continue
+                old_category = self.cursor.execute(
+                    "SELECT COALESCE(color, ''), sort_order FROM cost_categories WHERE label=?",
+                    (label,),
+                ).fetchone()
+                new_category = (str(category.get("color") or ""), category.get("sort_order"))
+                if old_category is None or tuple(old_category) != new_category:
+                    categories_changed = True
+                self.cursor.execute(
+                    """INSERT INTO cost_categories (label, color, sort_order, created_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(label) DO UPDATE SET color=excluded.color, sort_order=excluded.sort_order""",
+                    (label, str(category.get("color") or ""), category.get("sort_order"), import_time),
+                )
+                self.cursor.execute(
+                    "UPDATE cost_library SET category_color=? WHERE category_label=? AND COALESCE(category_color, '')<>?",
+                    (new_category[0], label, new_category[0]),
+                )
+
+            for row in snapshot.get("rows", []):
+                spec_code = str(row.get("spec_code") or "").strip()
+                if not spec_code:
+                    continue
+                old_rows = self.cursor.execute(
+                    """SELECT COALESCE(spec_name, ''), COALESCE(category_label, ''), COALESCE(quantity, ''),
+                              COALESCE(product_attribute, ''), COALESCE(product_attribute_combo_disabled, 0),
+                              COALESCE(product_attribute_is_combo, 0), product_cost, unit_weight,
+                              COALESCE(cost_calc_mode, 'total'), cost_price, sort_order, manual_sort_order,
+                              COALESCE(combo_components_json, ''), COALESCE(combo_reviewed, 0)
+                       FROM cost_library WHERE spec_code=?""",
+                    (spec_code,),
+                ).fetchall()
+                old = old_rows[0] if old_rows else None
+                if row.get("_deleted"):
+                    if old:
+                        self.cursor.execute("DELETE FROM cost_library WHERE spec_code=?", (spec_code,))
+                        changed_codes.append(spec_code)
+                    continue
+                mode = "detail" if str(row.get("cost_calc_mode") or "").lower() == "detail" else "total"
+                product_cost = row.get("product_cost")
+                unit_weight = row.get("unit_weight")
+                quantity = str(row.get("quantity") or "")
+                shipping_fee = misc_fee = None
+                if mode == "detail":
+                    if product_cost is not None and unit_weight is not None:
+                        cost_price, shipping_fee, misc_fee, _ = self.calculate_detailed_cost(
+                            product_cost, 1 if int(row.get("is_combo") or 0) else quantity, unit_weight
+                        )
+                    else:
+                        cost_price = None
+                else:
+                    cost_price = float(row.get("cost_price") or 0)
+                    product_cost = None
+                    unit_weight = None
+                values = (
+                    str(row.get("spec_name") or ""), quantity,
+                    str(row.get("category_label") or ""), str(row.get("category_color") or ""),
+                    cost_price, row.get("sort_order"), product_cost, unit_weight,
+                    shipping_fee, misc_fee, mode, str(row.get("product_attribute") or ""),
+                    int(row.get("combo_disabled") or 0), int(row.get("is_combo") or 0),
+                    row.get("manual_sort_order"), str(row.get("combo_components_json") or ""),
+                    int(row.get("combo_reviewed") or 0),
+                )
+                old_cost = float(old[9]) if old and old[9] is not None else None
+                comparable = (
+                    values[0], values[2], values[1], values[11], values[12], values[13],
+                    values[6], values[7], values[10], values[4], values[5], values[14], values[15], values[16],
+                )
+                if old:
+                    old_comparable = (old[0], old[1], old[2], old[3], int(old[4] or 0), int(old[5] or 0), old[6], old[7], old[8], old[9], old[10], old[11], old[12], int(old[13] or 0))
+                    if comparable == old_comparable:
+                        continue
+                self.cursor.execute(
+                    """INSERT INTO cost_library
+                       (spec_code, spec_name, quantity, category_label, category_color, cost_price,
+                        sort_order, product_cost, unit_weight, shipping_fee, misc_fee, cost_calc_mode,
+                        product_attribute, product_attribute_combo_disabled, product_attribute_is_combo,
+                         manual_sort_order, combo_components_json, combo_reviewed)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(spec_code) DO UPDATE SET
+                         spec_name=excluded.spec_name, quantity=excluded.quantity,
+                         category_label=excluded.category_label, category_color=excluded.category_color,
+                         cost_price=excluded.cost_price, sort_order=excluded.sort_order,
+                         product_cost=excluded.product_cost, unit_weight=excluded.unit_weight,
+                         shipping_fee=excluded.shipping_fee, misc_fee=excluded.misc_fee,
+                         cost_calc_mode=excluded.cost_calc_mode, product_attribute=excluded.product_attribute,
+                         product_attribute_combo_disabled=excluded.product_attribute_combo_disabled,
+                          product_attribute_is_combo=excluded.product_attribute_is_combo,
+                          manual_sort_order=excluded.manual_sort_order,
+                          combo_components_json=excluded.combo_components_json,
+                          combo_reviewed=excluded.combo_reviewed""",
+                    (spec_code,) + values,
+                )
+                changed_codes.append(spec_code)
+                if (
+                    (old_cost is None) != (cost_price is None)
+                    or (
+                        old_cost is not None and cost_price is not None
+                        and abs(float(cost_price) - old_cost) > 0.001
+                    )
+                ):
+                    cost_changed_codes.append(spec_code)
+            for image in snapshot.get("images", []):
+                spec_code = str(image.get("spec_code") or "").strip()
+                encoded = str(image.get("data") or "").strip()
+                if not spec_code or not encoded or image.get("_deleted"):
+                    continue
+                try:
+                    image_data = base64.b64decode(encoded, validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f"规格 {spec_code} 的同步缩略图无效") from exc
+                if not image_data or len(image_data) > 96 * 1024:
+                    raise ValueError(f"规格 {spec_code} 的同步缩略图超过 96KB")
+                old_image = self.cursor.execute(
+                    "SELECT thumbnail_data, COALESCE(thumbnail_manual, 0) FROM cost_library WHERE spec_code=?",
+                    (spec_code,),
+                ).fetchone()
+                if not old_image:
+                    continue
+                manual = int(image.get("manual") or 0)
+                if bytes(old_image[0] or b"") == image_data and int(old_image[1] or 0) == manual:
+                    continue
+                self.cursor.execute(
+                    "UPDATE cost_library SET thumbnail_data=?, thumbnail_manual=? WHERE spec_code=?",
+                    (image_data, manual, spec_code),
+                )
+                image_changed_codes.append(spec_code)
+
+            incoming_clear_at = int(snapshot.get("history_clear_at") or 0)
+            local_clear_row = self.cursor.execute(
+                "SELECT value FROM settings WHERE key='cost_history_clear_at'"
+            ).fetchone()
+            local_clear_at = int(local_clear_row[0] or 0) if local_clear_row else 0
+            if replace_local:
+                self.cursor.execute("DELETE FROM cost_history")
+                history_changed_count += max(self.cursor.rowcount, 0)
+            elif incoming_clear_at > local_clear_at:
+                self.cursor.execute(
+                    "DELETE FROM cost_history WHERE COALESCE(event_time_ms, 0)<=?",
+                    (incoming_clear_at,),
+                )
+                history_changed_count += max(self.cursor.rowcount, 0)
+            if incoming_clear_at > local_clear_at or replace_local:
+                self.cursor.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('cost_history_clear_at', ?)",
+                    (str(incoming_clear_at),),
+                )
+            for event in snapshot.get("history", []):
+                event_id = str(event.get("event_id") or "").strip()
+                if (
+                    not event_id
+                    or str(event.get("operation_type") or "price") == "price"
+                ):
+                    continue
+                if event.get("_deleted"):
+                    self.cursor.execute("DELETE FROM cost_history WHERE event_id=?", (event_id,))
+                    history_changed_count += max(self.cursor.rowcount, 0)
+                    continue
+                event_time_ms = int(event.get("event_time_ms") or 0)
+                if event_time_ms <= incoming_clear_at:
+                    continue
+                self.cursor.execute(
+                    """INSERT OR IGNORE INTO cost_history
+                       (event_id, spec_code, spec_name, operation_type, old_value, new_value,
+                        old_cost_price, new_cost_price, change_amount, change_percent,
+                        source, import_time, event_time_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event_id, str(event.get("spec_code") or ""), str(event.get("spec_name") or ""),
+                        str(event.get("operation_type") or "price"), str(event.get("old_value") or ""),
+                        str(event.get("new_value") or ""), event.get("old_cost_price"),
+                        float(event.get("new_cost_price") or 0), event.get("change_amount"),
+                        event.get("change_percent"), str(event.get("source") or source),
+                        str(event.get("import_time") or import_time), event_time_ms,
+                    ),
+                )
+                inserted = max(self.cursor.rowcount, 0)
+                history_changed_count += inserted
+                if inserted and str(event.get("operation_type") or "") == "code":
+                    old_code = str(event.get("old_value") or "").strip()
+                    new_code = str(event.get("new_value") or "").strip()
+                    if old_code and new_code and old_code != new_code:
+                        self._rename_cost_spec_references(old_code, new_code)
+            self.cursor.execute("UPDATE cost_history_control SET enabled=1, source='manual' WHERE id=1")
+            if manage_transaction:
+                self.conn.commit()
+        except Exception:
+            if manage_transaction:
+                self.conn.rollback()
+            raise
+        return {
+            "changed_codes": list(dict.fromkeys(changed_codes)),
+            "cost_changed_codes": list(dict.fromkeys(cost_changed_codes)),
+            "image_changed_codes": list(dict.fromkeys(image_changed_codes)),
+            "history_changed_count": history_changed_count,
+            "categories_changed": categories_changed,
+        }
+
+    @staticmethod
+    def _cost_sync_snapshot_json(snapshot):
+        return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def publish_cost_sync_snapshot(self, incoming, publisher_id=""):
+        """Merge one peer snapshot into this computer's local group state."""
+        state = self.get_cost_sync_state()
+        if not state:
+            raise RuntimeError("当前账号尚未加入成本同步组织")
+        try:
+            current = json.loads(state.get("snapshot_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            current = {}
+        merged = self.merge_cost_sync_snapshots(current, incoming)
+        snapshot_json = self._cost_sync_snapshot_json(merged)
+        snapshot_hash = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        if snapshot_hash == str(state.get("snapshot_hash") or ""):
+            return {
+                "revision": int(state.get("revision") or 0),
+                "snapshot": merged,
+                "snapshot_hash": snapshot_hash,
+                "publisher_id": state.get("publisher_id") or "",
+                "published_at": state.get("published_at") or "",
+                "changed_codes": [],
+                "cost_changed_codes": [],
+                "image_changed_codes": [],
+                "history_changed_count": 0,
+                "categories_changed": False,
+            }
+        revision = int(state.get("revision") or 0) + 1
+        published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            changes = self.apply_cost_sync_snapshot(merged, source="lan", manage_transaction=False)
+            self.cursor.execute(
+                """UPDATE cost_sync_state
+                   SET revision=?, snapshot_json=?, snapshot_hash=?, publisher_id=?, published_at=?
+                   WHERE group_id=?""",
+                (revision, snapshot_json, snapshot_hash, publisher_id, published_at, state.get("group_id")),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        combo_changes = self.recalculate_cost_combinations_for_components(
+            changes.get("changed_codes") or [], record_history=True, source="lan"
+        )
+        changes["changed_codes"] = list(dict.fromkeys((changes.get("changed_codes") or []) + combo_changes))
+        return {
+            "revision": revision,
+            "snapshot": merged,
+            "snapshot_hash": snapshot_hash,
+            "publisher_id": publisher_id,
+            "published_at": published_at,
+            **changes,
+        }
+
+    def apply_remote_cost_sync_snapshot(
+        self, snapshot, revision, snapshot_hash="", publisher_id="", published_at="", replace_local=False
+    ):
+        """Merge a peer snapshot and checkpoint it in one transaction."""
+        state = self.get_cost_sync_state()
+        if not state:
+            raise RuntimeError("当前账号尚未加入成本同步组织")
+        remote_json = self._cost_sync_snapshot_json(snapshot)
+        remote_hash = hashlib.sha256(remote_json.encode("utf-8")).hexdigest()
+        if snapshot_hash and not hmac.compare_digest(str(snapshot_hash), remote_hash):
+            raise ValueError("成本同步快照校验失败")
+        try:
+            current = json.loads(state.get("snapshot_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            current = {}
+        merged = self.merge_cost_sync_snapshots(current, snapshot)
+        snapshot_json = self._cost_sync_snapshot_json(merged)
+        actual_hash = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        if actual_hash == str(state.get("snapshot_hash") or ""):
+            return {
+                "changed_codes": [], "cost_changed_codes": [], "categories_changed": False,
+                "image_changed_codes": [], "history_changed_count": 0,
+                "revision": int(state.get("revision") or 0),
+            }
+        local_revision = max(int(state.get("revision") or 0), int(revision or 0)) + 1
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            changes = self.apply_cost_sync_snapshot(
+                merged, source="lan", manage_transaction=False, replace_local=replace_local
+            )
+            self.cursor.execute(
+                """UPDATE cost_sync_state
+                   SET revision=?, snapshot_json=?, snapshot_hash=?, publisher_id=?, published_at=?
+                   WHERE group_id=?""",
+                (
+                    local_revision, snapshot_json, actual_hash, publisher_id, published_at,
+                    state.get("group_id"),
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        combo_changes = self.recalculate_cost_combinations_for_components(
+            changes.get("changed_codes") or [], record_history=True, source="lan"
+        )
+        changes["changed_codes"] = list(dict.fromkeys((changes.get("changed_codes") or []) + combo_changes))
+        return {"revision": local_revision, **changes}
+
+    def set_cost_thumbnail(self, spec_code, image_data, manual=False, only_if_empty=False):
+        spec_code = str(spec_code or "").strip()
+        image_data = bytes(image_data or b"")
+        if not spec_code or not image_data or len(image_data) > 96 * 1024:
+            return False
+        where = " AND LENGTH(COALESCE(thumbnail_data, X''))=0" if only_if_empty else ""
+        self.cursor.execute(
+            f"UPDATE cost_library SET thumbnail_data=?, thumbnail_manual=? WHERE spec_code=?{where}",
+            (image_data, int(bool(manual)), spec_code),
+        )
+        changed = self.cursor.rowcount > 0
+        self.conn.commit()
+        if changed:
+            self.set_setting("cost_sync_local_dirty", "1")
         return changed
+
+    def inherit_single_multiplier_combo_thumbnails(self, spec_codes=None, mark_dirty=True):
+        """Fill empty xN combo thumbnails from their one real single-product component."""
+        codes = list(dict.fromkeys(
+            str(code or "").strip() for code in (spec_codes or []) if str(code or "").strip()
+        ))
+        where = ""
+        params = ()
+        if codes:
+            where = f" AND spec_code IN ({','.join('?' for _ in codes)})"
+            params = tuple(codes)
+        candidates = {}
+        for combo_code, combo_name, raw_json in self.safe_fetchall(
+            f"""SELECT spec_code, COALESCE(spec_name, ''), COALESCE(combo_components_json, '')
+                FROM cost_library
+                WHERE COALESCE(product_attribute_is_combo, 0)=1
+                  AND LENGTH(COALESCE(thumbnail_data, X''))=0{where}""",
+            params,
+        ):
+            if any(separator in str(combo_name or "") for separator in ("+", "＋", "﹢")):
+                continue
+            try:
+                items = self._normalise_combo_items(json.loads(raw_json or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if len(items) != 1 or float(items[0]["quantity"]) <= 1:
+                continue
+            source_code = str(items[0]["spec_code"])
+            if source_code != str(combo_code):
+                candidates[str(combo_code)] = source_code
+        if not candidates:
+            return []
+
+        source_images = {}
+        source_codes = list(dict.fromkeys(candidates.values()))
+        for start in range(0, len(source_codes), 800):
+            batch = source_codes[start:start + 800]
+            placeholders = ",".join("?" for _ in batch)
+            source_images.update({
+                str(code): bytes(image_data or b"")
+                for code, image_data in self.safe_fetchall(
+                    f"""SELECT spec_code, thumbnail_data FROM cost_library
+                        WHERE spec_code IN ({placeholders})
+                          AND COALESCE(product_attribute_is_combo, 0)=0
+                          AND LENGTH(COALESCE(thumbnail_data, X''))>0""",
+                    tuple(batch),
+                )
+            })
+
+        changed_codes = []
+        with self.conn:
+            for combo_code, source_code in candidates.items():
+                image_data = source_images.get(source_code)
+                if not image_data:
+                    continue
+                cursor = self.conn.execute(
+                    """UPDATE cost_library SET thumbnail_data=?, thumbnail_manual=0
+                       WHERE spec_code=? AND LENGTH(COALESCE(thumbnail_data, X''))=0""",
+                    (image_data, combo_code),
+                )
+                if cursor.rowcount:
+                    changed_codes.append(combo_code)
+        if changed_codes and mark_dirty:
+            self.set_setting("cost_sync_local_dirty", "1")
+        return changed_codes
 
     def category_color_for_label(self, label):
         label = str(label or "").strip()
@@ -1424,6 +2737,7 @@ class SafeDatabaseManager:
             self.cursor.execute("UPDATE cost_categories SET color=? WHERE label=?", (color, label))
             self.cursor.execute("UPDATE cost_library SET category_color=? WHERE category_label=?", (color, label))
             self.conn.commit()
+            self.set_setting("cost_sync_local_dirty", "1")
             return True
         except Exception as e:
             print(f"更新商品类型颜色失败: {e}")
@@ -1449,6 +2763,7 @@ class SafeDatabaseManager:
                 (new_label, old_label),
             )
             self.conn.commit()
+            self.set_setting("cost_sync_local_dirty", "1")
             return True
         except Exception:
             self.conn.rollback()
@@ -1472,6 +2787,7 @@ class SafeDatabaseManager:
             self.cursor.execute(f"DELETE FROM cost_categories WHERE label IN ({placeholders})", labels)
             deleted = self.cursor.rowcount
             self.conn.commit()
+            self.set_setting("cost_sync_local_dirty", "1")
             return deleted
         except Exception:
             self.conn.rollback()
@@ -1489,6 +2805,7 @@ class SafeDatabaseManager:
                 (label, color, spec_code),
             )
             self.conn.commit()
+            self.set_setting("cost_sync_local_dirty", "1")
             return True
         except Exception as e:
             print(f"更新规格商品类型失败: {e}")
@@ -1502,6 +2819,7 @@ class SafeDatabaseManager:
                     (index, spec_code),
                 )
             self.conn.commit()
+            self.set_setting("cost_sync_local_dirty", "1")
             return True
         except Exception as e:
             print(f"保存成本库手动排序失败: {e}")

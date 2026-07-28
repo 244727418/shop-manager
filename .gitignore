@@ -43,6 +43,10 @@ tmp*/
 *.log
 *.tmp
 *.temp
+.android-toolchain/
+mobile/material-uploader/local.properties
+mobile/material-uploader/keystore.properties
+mobile/material-uploader/.gradle/
 
 # OS files
 Thumbs.db

@@ -12,7 +12,7 @@ import time
 import uuid
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
@@ -228,13 +228,14 @@ def bind_trusted_update_source(manifest):
     server_url = manifest_server_url(manifest)
     if not server_id or not server_url:
         raise ValueError("更新来源缺少可信主机标识或下载地址")
+    parsed_url = urlsplit(server_url)
     settings = load_global_update_settings()
     settings.update({
         "trusted_update_server_id": server_id,
         "trusted_update_server_url": server_url,
-        "trusted_update_server_host": str(manifest.get("server_host") or "").strip(),
-        "trusted_update_server_port": int(manifest.get("server_port") or HTTP_PORT),
-        "auto_update_enabled": "0",
+        "trusted_update_server_host": parsed_url.hostname or "",
+        "trusted_update_server_port": parsed_url.port or HTTP_PORT,
+        "auto_update_enabled": "1",
     })
     save_global_update_settings(settings)
     return settings
@@ -311,7 +312,12 @@ def download_update_file(manifest, target_dir, progress_callback=None, require_h
     os.makedirs(target_dir, exist_ok=True)
     filename = _safe_update_filename(manifest)
     target_path = os.path.join(target_dir, filename)
-    temp_path = f"{target_path}.{os.getpid()}.download"
+    temp_dir = os.path.join(target_dir, ".update_tmp")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(
+        temp_dir,
+        f"{filename}.{os.getpid()}.{threading.get_ident()}.download",
+    )
     response = None
     try:
         response = requests.get(url, stream=True, timeout=(5, 60))
@@ -344,6 +350,10 @@ def download_update_file(manifest, target_dir, progress_callback=None, require_h
                 os.remove(temp_path)
             except OSError:
                 pass
+        try:
+            os.rmdir(temp_dir)
+        except OSError:
+            pass
 
 
 def save_pending_update(manifest, cached_path, cache_dir=None):
@@ -354,7 +364,7 @@ def save_pending_update(manifest, cached_path, cache_dir=None):
     return data
 
 
-def load_pending_update(current_version, cache_dir=None, verify_hash=True):
+def load_pending_update(current_version, cache_dir=None, verify_hash=True, allow_current=False):
     cache_dir = os.path.abspath(cache_dir or update_cache_dir())
     path = pending_update_path(cache_dir)
     if not os.path.exists(path):
@@ -364,7 +374,11 @@ def load_pending_update(current_version, cache_dir=None, verify_hash=True):
             manifest = json.load(f)
         if not isinstance(manifest, dict):
             return None
-        if not is_newer_version(manifest.get("version"), current_version):
+        manifest_version = str(manifest.get("version") or "").strip()
+        current_version = str(current_version or "").strip()
+        if not is_newer_version(manifest_version, current_version) and not (
+            allow_current and manifest_version == current_version
+        ):
             return None
         cached_path = os.path.abspath(str(manifest.get("cached_path") or ""))
         if os.path.commonpath([cache_dir, cached_path]) != cache_dir or not os.path.isfile(cached_path):
@@ -554,7 +568,7 @@ class UpdatePublishService:
         if not self.manifest:
             raise RuntimeError("请先开启更新服务")
         payload = json.dumps(self.manifest, ensure_ascii=False).encode("utf-8")
-        self._broadcast(payload)
+        self._broadcast(payload, (UDP_PORT, UPDATE_AGENT_UDP_PORT))
 
     def push_test_message(self):
         payload = {
@@ -623,12 +637,15 @@ def run_update_agent(current_version, stop_event=None):
             pass
     def check_and_cache(manifest=None):
         error = ""
+        accepted_manifest = None
         try:
             current_settings = load_global_update_settings()
             pushed = manifest is not None
             manifest = manifest or fetch_trusted_manifest(current_settings)
             if manifest and not is_trusted_update_manifest(manifest, current_settings):
                 raise ValueError("更新来源与首次绑定的主电脑不一致")
+            if isinstance(manifest, dict):
+                accepted_manifest = {key: value for key, value in manifest.items() if not str(key).startswith("_")}
             if manifest and is_newer_version(manifest.get("version"), current_version):
                 pending = load_pending_update(current_version, verify_hash=not pushed)
                 pending_version = str((pending or {}).get("version") or "")
@@ -639,10 +656,11 @@ def run_update_agent(current_version, stop_event=None):
         latest = load_global_update_settings()
         latest["auto_update_last_check"] = time.strftime("%Y-%m-%d %H:%M:%S")
         latest["auto_update_last_error"] = error
+        if accepted_manifest:
+            latest["last_update_manifest"] = accepted_manifest
         save_global_update_settings(latest)
         return not error
 
-    check_and_cache()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind(("", UPDATE_AGENT_UDP_PORT))
@@ -650,6 +668,7 @@ def run_update_agent(current_version, stop_event=None):
     except OSError:
         sock.close()
         return 0
+    check_and_cache()
     next_check = time.monotonic() + UPDATE_AGENT_INTERVAL_HOURS * 3600
     try:
         while stop_event is None or not stop_event.is_set():
@@ -669,9 +688,10 @@ def run_update_agent(current_version, stop_event=None):
             if manifest.get("message_kind") == "test":
                 continue
             filename = os.path.basename(str(manifest.get("filename") or ""))
-            if addr and filename:
+            sender_ip = str(manifest.pop("_sender_ip", "") or (addr[0] if addr else "")).strip()
+            if sender_ip and filename:
                 port = int(manifest.get("server_port") or HTTP_PORT)
-                manifest["url"] = urljoin(f"http://{addr[0]}:{port}/", filename)
+                manifest["url"] = urljoin(f"http://{sender_ip}:{port}/", filename)
             check_and_cache(manifest)
     finally:
         sock.close()
@@ -707,7 +727,12 @@ class UpdateBroadcastListener(QObject):
                 except Exception:
                     continue
                 if isinstance(payload, dict) and payload.get("type") == DISCOVERY_MAGIC:
-                    payload["_sender_ip"] = addr[0] if addr else ""
+                    sender_ip = addr[0] if addr else ""
+                    payload["_sender_ip"] = sender_ip
+                    filename = os.path.basename(str(payload.get("filename") or ""))
+                    if sender_ip and filename and payload.get("message_kind") != "test":
+                        port = int(payload.get("server_port") or HTTP_PORT)
+                        payload["url"] = urljoin(f"http://{sender_ip}:{port}/", filename)
                     self.updateReceived.emit(payload)
         except Exception as e:
             print(f"更新广播监听失败: {e}")
@@ -844,7 +869,9 @@ class UpdateAdminDialog(QDialog):
             host_ip = self.host_ip_input.text().strip() or get_lan_ip()
             published_package = stage_publish_package(self.package_path)
             self.publish_service.broadcast_host = host_ip
-            manifest = build_manifest(version, published_package, "", host_ip=host_ip)
+            notes_provider = getattr(self.main_app, "get_current_release_notes", None)
+            notes = notes_provider() if callable(notes_provider) and version == self.main_app.current_version else ""
+            manifest = build_manifest(version, published_package, notes, host_ip=host_ip)
             save_published_update(manifest)
             background_serving = False
             try:

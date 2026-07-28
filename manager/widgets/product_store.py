@@ -70,6 +70,13 @@ def _bubble_metric_typography(real_mode, visible_count):
     return (11, 12) if real_mode else (13, 15)
 
 
+def _expected_profit_for_100(is_natural_flow, margin_rate, return_rate, roi=0):
+    net_ratio = float(margin_rate or 0) * max(0.0, 1 - float(return_rate or 0) / 100) - 0.006
+    if is_natural_flow:
+        return 100 * net_ratio
+    return 100 * float(roi or 0) * net_ratio - 100 if float(roi or 0) > 0 else None
+
+
 _PIXMAP_CACHE = {}
 
 
@@ -139,7 +146,7 @@ def _enlarge_context_menu(menu):
 class ProductWidget(QWidget):
     """左侧冻结列中的商品展示控件"""
     BUBBLE_WIDTH = 340
-    BUBBLE_HEIGHT = 108
+    BUBBLE_HEIGHT = 104
 
     def __init__(self, prod_id, prod_code, prod_title, image_data, main_app, display_mode="table"):
         super().__init__()
@@ -248,6 +255,7 @@ class ProductWidget(QWidget):
 
         self.marketing_badge = QLabel()
         self.marketing_badge.setFixedSize(16, 16)
+        self.marketing_badge.installEventFilter(self)
         self.marketing_badge.hide()
         for badge in (self.coupon_badge, self.new_customer_badge, self.limited_time_badge, self.marketing_badge):
             badge.setStyleSheet("background: transparent; border: none; padding: 0px;")
@@ -271,18 +279,35 @@ class ProductWidget(QWidget):
         self.reminder_badge.installEventFilter(self)
         self.reminder_badge.hide()
 
-        self.garbage_badge = QLabel("垃圾")
+        self.garbage_badge = QLabel()
         self.garbage_badge.setFixedSize(26, 26)
-        self.garbage_badge.setAlignment(Qt.AlignCenter)
-        self.garbage_badge.setStyleSheet("color: white; background:#dc2626; border:1px solid #111; border-radius:13px; font-size:10px; font-weight:bold;")
-        self.garbage_badge.setToolTip("该链接最近两条推广数据记录均无净成交")
+        self.garbage_badge.setStyleSheet("background:transparent; border:none;")
+        self.garbage_badge.setToolTip("该链接最近一次推广数据有数据但无净成交")
+        self.garbage_badge_circle = QLabel("垃圾", self.garbage_badge)
+        self.garbage_badge_circle.setFixedSize(22, 22)
+        self.garbage_badge_circle.move(2, 4)
+        self.garbage_badge_circle.setAlignment(Qt.AlignCenter)
+        self.garbage_badge_circle.setStyleSheet(
+            "color:white; background:#dc2626; border:1px solid #111; border-radius:11px; "
+            "font-size:9px; font-weight:bold;"
+        )
+        self.garbage_streak_badge = QLabel(self.garbage_badge)
+        self.garbage_streak_badge.setFixedSize(15, 15)
+        self.garbage_streak_badge.move(5, 0)
+        self.garbage_streak_badge.setAlignment(Qt.AlignCenter)
+        self.garbage_streak_badge.setStyleSheet(
+            "color:white; background:black; border:none; border-radius:7px; "
+            "font-size:9px; font-weight:bold; padding:0px;"
+        )
+        self.garbage_streak_badge.raise_()
+        self.garbage_streak_badge.hide()
         self.garbage_badge.hide()
 
         self.waste_badge = QLabel("废物")
         self.waste_badge.setFixedSize(26, 26)
         self.waste_badge.setAlignment(Qt.AlignCenter)
         self.waste_badge.setStyleSheet("color:white; background:#7c2d12; border:1px solid #111; border-radius:13px; font-size:10px; font-weight:bold;")
-        self.waste_badge.setToolTip("最近两次订单表导入均无订单；推广数据出单后自动取消")
+        self.waste_badge.setToolTip("最近导入的一周订单表无订单；创建未满 7 天的链接不标记")
         self.waste_badge.hide()
 
         tag_layout.addWidget(self.coupon_badge)
@@ -368,7 +393,7 @@ class ProductWidget(QWidget):
             self.net_profit_label.installEventFilter(self)
 
             self.roi_label = QLabel("")
-            self.roi_label.setStyleSheet("font-family: Microsoft YaHei; color: blue; font-size: 13px;")
+            self.roi_label.setStyleSheet("color: blue; font-size: 13px;")
             self.roi_label.setTextFormat(Qt.RichText)
             self.roi_label.setWordWrap(True)
             self.roi_label.installEventFilter(self)
@@ -388,15 +413,41 @@ class ProductWidget(QWidget):
             self.metrics_panel.setLayout(margin_layout)
 
         if display_mode == "bubble":
+            self.bubble_chips_widget = QWidget()
+            self.bubble_chips_widget.setAttribute(Qt.WA_StyledBackground, True)
+            self.bubble_chips_widget.setStyleSheet("background: transparent; border: none;")
+            chips_layout = QGridLayout(self.bubble_chips_widget)
+            chips_layout.setContentsMargins(0, 0, 0, 0)
+            chips_layout.setHorizontalSpacing(2)
+            chips_layout.setVerticalSpacing(1)
+            self.bubble_chip_labels = {}
+            for key, row, column, column_span in (
+                ("promotion", 0, 0, 2), ("status", 0, 2, 1),
+                ("order", 1, 0, 1), ("multiple", 1, 1, 2),
+            ):
+                chip = QLabel()
+                chip.setAlignment(Qt.AlignCenter)
+                chip.setFixedHeight(18)
+                chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                chip.installEventFilter(self)
+                chips_layout.addWidget(chip, row, column, 1, column_span)
+                self.bubble_chip_labels[key] = chip
+            chips_layout.setColumnStretch(0, 1)
+            chips_layout.setColumnStretch(1, 1)
+            self.bubble_chips_widget.setFixedHeight(37)
+            self.bubble_chips_widget.hide()
+            self.bubble_metrics_widget = QWidget()
+            self.bubble_metrics_widget.setAttribute(Qt.WA_StyledBackground, True)
+            self.bubble_metrics_widget.setStyleSheet("background: transparent; border: none;")
+            self.bubble_metrics_layout = QGridLayout(self.bubble_metrics_widget)
+            self.bubble_metrics_layout.setContentsMargins(0, 0, 0, 0)
+            self.bubble_metrics_layout.setHorizontalSpacing(1)
+            self.bubble_metrics_layout.setVerticalSpacing(1)
+            self.bubble_metrics_layout.setAlignment(Qt.AlignTop)
+            self.bubble_metric_chips = []
             self.bubble_metrics_label = QLabel()
             self.bubble_metrics_label.setTextFormat(Qt.RichText)
-            self.bubble_metrics_label.setWordWrap(True)
-            self.bubble_metrics_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            self.bubble_metrics_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-            self.bubble_metrics_label.setStyleSheet(
-                "font-size: 13px; background: transparent; padding: 0px; margin: 0px;"
-            )
-            self.bubble_metrics_label.installEventFilter(self)
+            self.bubble_metrics_label.hide()
 
         if display_mode == "bubble":
             info_layout.setAlignment(Qt.AlignTop)
@@ -405,7 +456,7 @@ class ProductWidget(QWidget):
             title_layout.setContentsMargins(0, 0, 0, 0)
             title_layout.setSpacing(3)
             header_left = QWidget()
-            header_left.setFixedHeight(26)
+            header_left.setFixedHeight(24)
             header_left.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             header_left.setAttribute(Qt.WA_StyledBackground, True)
             header_left.setStyleSheet("background: transparent; border: none;")
@@ -418,14 +469,14 @@ class ProductWidget(QWidget):
             title_layout.addWidget(header_left, 1)
             title_layout.addWidget(self.category_label, 0, Qt.AlignRight | Qt.AlignVCenter)
             info_layout.addLayout(title_layout)
-            info_layout.addWidget(self.bubble_metrics_label)
+            info_layout.addWidget(self.bubble_chips_widget)
+            info_layout.addWidget(self.bubble_metrics_widget)
             body_layout = QHBoxLayout()
             body_layout.setContentsMargins(0, 0, 0, 0)
             body_layout.setSpacing(4)
             body_layout.addWidget(img_container, 0, Qt.AlignCenter)
             body_layout.addLayout(info_layout, 1)
             main_layout.addLayout(body_layout)
-            self.bubble_metrics_label.show()
             self.setFixedWidth(self.BUBBLE_WIDTH)
             self.setFixedHeight(self.BUBBLE_HEIGHT)
             self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
@@ -592,13 +643,20 @@ class ProductWidget(QWidget):
                     bool(reminder_rows) or any(
                         not text.startswith(("【垃圾链接】", "【废物链接】")) for text in task_contents
                     ),
+                    next((text for text in task_contents if text.startswith("【垃圾链接】")), ""),
                 )
                 if isinstance(states, dict):
                     states[self.prod_id] = state
-            garbage, waste, reminder = state
+            garbage, waste, reminder = state[:3]
+            match = re.search(r"连续(\d+)次", state[3] if len(state) > 3 else "")
+            streak = int(match.group(1)) if match else 1
             visible = self.display_mode == "bubble"
             self.reminder_badge.setVisible(visible and reminder)
             self.garbage_badge.setVisible(visible and garbage)
+            if hasattr(self, "garbage_streak_badge"):
+                self.garbage_streak_badge.setText(str(streak))
+                self.garbage_streak_badge.setVisible(visible and garbage and streak >= 2)
+                self.garbage_streak_badge.raise_()
             self.waste_badge.setVisible(visible and waste)
         except Exception as e:
             print(f"更新链接任务标签失败: {e}")
@@ -774,6 +832,7 @@ class ProductWidget(QWidget):
             new_customer = card_data.get("new_customer_discount") or 0
             is_limited_time = card_data.get("is_limited_time") or 0
             is_marketing = card_data.get("is_marketing") or 0
+            marketing_activity = str(card_data.get("marketing_activity") or "").strip()
             is_natural_flow = card_data.get("is_natural_flow") or 0
             is_sitewide_managed = card_data.get("is_sitewide_managed") or 0
             icons_dir = _icons_dir()
@@ -821,11 +880,16 @@ class ProductWidget(QWidget):
                     self.marketing_badge.setPixmap(pixmap)
                 else:
                     self.marketing_badge.setText("📢")
+                self.marketing_badge.setToolTip(marketing_activity or "营销活动")
                 self.marketing_badge.show()
             else:
                 self.marketing_badge.hide()
             self.natural_flow_badge.hide()
-            self.sitewide_badge.setVisible(bool(is_sitewide_managed) and not bool(is_natural_flow))
+            self.sitewide_badge.setVisible(
+                self.display_mode != "bubble"
+                and bool(is_sitewide_managed)
+                and not bool(is_natural_flow)
+            )
         except Exception as e:
             print(f"更新促销图标失败：{e}")
 
@@ -833,6 +897,18 @@ class ProductWidget(QWidget):
         self._update_margin_display(fresh=fresh)
         self._sync_bubble_metrics()
         self.refresh_violation_state()
+
+    def _set_bubble_chip(self, key, text, background, border, tooltip=""):
+        chip = getattr(self, "bubble_chip_labels", {}).get(key)
+        if chip is None:
+            return
+        chip.setText(text)
+        chip.setToolTip(tooltip or text)
+        chip.setStyleSheet(
+            f"color:#111; background:{background}; border:1px solid {border}; "
+            "border-radius:6px; padding:1px; font-weight:bold;"
+        )
+        chip.setVisible(bool(text))
 
     def _sync_bubble_metrics(self):
         if self.display_mode != "bubble":
@@ -858,9 +934,15 @@ class ProductWidget(QWidget):
             if self._search_highlight_active
             else self._bubble_foreground
         )
-        tooltips = []
-
         profit_status = None
+        card_data = self.main_app.get_product_card_data(self.prod_id) or {}
+        metric_prefixes = (
+            "全站投产倍数:", "点击转化率:", "投产倍数:", "出价倍数:", "净投产比:",
+            "保本出价:", "曝光占比:", "每笔成交:", "每笔花费:", "净成交:",
+            "交易额:", "毛利率:", "净利润:", "净利率:", "客单价:", "点击率:",
+            "毛利润:", "花费:", "单量:", "全站:", "投产:", "出价:",
+        )
+        split_pattern = r"(?<!\S)(?=" + "|".join(re.escape(prefix) for prefix in metric_prefixes) + r")"
 
         def metric_parts(label):
             nonlocal profit_status
@@ -868,58 +950,203 @@ class ProductWidget(QWidget):
             text = str(label.text() or "").strip()
             if label.isHidden() or not text:
                 return parts
-            if label is self.net_profit_label and "<br" not in text.lower():
-                match = re.search(r"\s+(微盈利|盈利|保本|微亏|一般亏|巨亏)$", text)
-                if match:
-                    profit_status = match.group(1)
-                    text = text[:match.start()].rstrip()
-            for line in re.split(r"<br\s*/?>", text, flags=re.IGNORECASE):
-                line = line.strip()
-                if not line:
-                    continue
-                plain = html.unescape(re.sub(r"<[^>]+>", "", line)).replace(" ", "\u00a0")
-                nonbreaking = "\u2060".join(plain)
-                parts.append(f'<span style="color:{foreground};font-weight:bold;">{html.escape(nonbreaking)}</span>')
-            tooltip = str(label.toolTip() or "").strip()
-            if tooltip:
-                tooltips.append(tooltip)
+            plain_text = html.unescape(re.sub(r"<[^>]+>", "", re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)))
+            for line in plain_text.splitlines():
+                for plain in re.split(split_pattern, line.strip()):
+                    plain = plain.strip()
+                    if not plain:
+                        continue
+                    match = re.search(r"\s*(微盈利|一般亏|微亏|巨亏|盈利|保本|亏损)$", plain)
+                    if label is self.net_profit_label and match:
+                        profit_status = match.group(1)
+                        plain = plain[:match.start()].rstrip()
+                    if plain:
+                        parts.append(plain)
             return parts
+
+        def metric_tooltip(plain):
+            name = plain.split(":", 1)[0]
+            descriptions = {
+                "单量": "单量：当前月份导入订单中识别到的该链接订单数。",
+                "净成交": "净成交：推广数据中扣除退款等影响后的成交单量。",
+                "毛利率": "毛利率：商品毛利润占成交金额的比例。",
+                "毛利润": "毛利润：成交金额扣除商品成本和优惠后的利润。",
+                "净利润": "净利润：扣除商品成本、优惠、退货、技术服务费及推广费用后的利润。",
+                "净利率": "净利率：净利润占成交金额的比例。",
+                "客单价": "客单价：该链接平均每单的成交金额。",
+                "花费": "花费：当前推广数据产生的推广费用。",
+                "交易额": "交易额：当前推广数据产生的成交金额。",
+                "净投产比": "净投产比：净成交金额除以推广花费。",
+                "投产": "投产：每花费 1 元推广费预计带来的成交金额。",
+                "全站": "全站投产：全站推广每花费 1 元预计带来的成交金额。",
+                "投产倍数": "投产倍数：当前投产除以保本投产；大于 1 通常表示高于保本线。",
+                "全站投产倍数": "全站投产倍数：当前全站投产除以保本投产。",
+                "出价": "出价：当前设置的每笔成交推广出价。",
+                "保本出价": "保本出价：预计单笔利润刚好为 0 时可承受的最高成交出价。",
+                "出价倍数": "出价倍数：当前成交出价除以保本出价；大于 1 通常表示高于保本线。",
+                "曝光占比": "曝光占比：推广曝光量占商品总曝光量的比例。",
+                "每笔成交": "每笔成交：平均每笔净成交对应的成交金额。",
+                "每笔花费": "每笔花费：平均获得一笔净成交所消耗的推广费用。",
+                "点击率": "点击率：点击量占曝光量的比例。",
+                "点击转化率": "点击转化率：净成交单量占点击量的比例。",
+            }
+            if name == "预计盈亏":
+                if card_data.get("is_natural_flow"):
+                    return "预计盈亏：按自然成交额 100 元估算，不计算推广花费。"
+                return "预计盈亏：按推广花费 100 元估算，结合当前投产或成交出价计算。"
+            if name == "净利润" and card_data.get("is_natural_flow"):
+                return "净利润：自然成交金额扣除商品成本、优惠、退货和技术服务费后的利润，不计算推广花费。"
+            return descriptions.get(name, plain)
+
+        def render(plain):
+            nonbreaking = "\u2060".join(plain.replace(" ", "\u00a0"))
+            return f'<span style="color:{foreground};font-weight:bold;">{html.escape(nonbreaking)}</span>'
 
         margin_parts = metric_parts(self.margin_label)
         order_parts = metric_parts(self.link_order_label)
         net_parts = metric_parts(self.net_profit_label)
         roi_parts = metric_parts(self.roi_label)
-        first_row = order_parts
+        order_source = next((part for part in order_parts if part.startswith("单量:")), "")
+        if real_mode:
+            order_source = next((part for part in net_parts if part.startswith("净成交:")), order_source)
+        order_text = order_source.replace("净成交:", "净成交").replace("单量:", "单量").rstrip("单")
+
+        if real_mode:
+            promotion_source = next((part for part in net_parts if part.startswith("净投产比:")), "")
+            promotion_text = f"真实推广·{promotion_source.replace(':', '', 1)}" if promotion_source else "真实推广"
+            promotion_colors = ("#a5f3fc", "#0891b2")
+        elif card_data.get("is_natural_flow"):
+            promotion_text = "无推广·自然流量"
+            promotion_colors = ("#86efac", "#16a34a")
+        elif card_data.get("is_sitewide_managed"):
+            promotion_source = next((part for part in roi_parts if part.startswith("全站:")), "全站:未设置")
+            promotion_text = f"推广中·全站托管·投产{promotion_source.split(':', 1)[1]}"
+            promotion_colors = ("#c4b5fd", "#7c3aed")
+        elif (card_data.get("roi_input_mode") or "roi") == "bid":
+            promotion_source = next((part for part in roi_parts if part.startswith("出价:")), "出价:未设置")
+            promotion_text = f"推广中·成交出价{promotion_source.replace('出价:', '')}"
+            promotion_colors = ("#fdba74", "#ea580c")
+        else:
+            promotion_source = next((part for part in roi_parts if part.startswith("投产:")), "投产:未设置")
+            promotion_text = f"推广中·稳定成本·{promotion_source.replace(':', '', 1)}"
+            promotion_colors = ("#93c5fd", "#2563eb")
+
+        multiple_source = next(
+            (part for part in roi_parts if part.startswith(("全站投产倍数:", "投产倍数:", "出价倍数:"))),
+            "",
+        )
+        multiple_text = (
+            multiple_source.replace("全站投产倍数:", "倍数")
+            .replace("投产倍数:", "倍数")
+            .replace("出价倍数:", "出价倍数")
+        )
+        status_colors = {
+            "盈利": ("#86efac", "#16a34a"), "微盈利": ("#bbf7d0", "#22c55e"),
+            "保本": ("#fde68a", "#d97706"), "微亏": ("#fed7aa", "#ea580c"),
+            "一般亏": ("#fecaca", "#dc2626"), "巨亏": ("#fca5a5", "#991b1b"),
+            "亏损": ("#fecaca", "#dc2626"),
+        }
+        if real_mode:
+            promotion_tooltip = "推广状态：当前展示该链接已导入的真实推广数据。"
+        elif card_data.get("is_natural_flow"):
+            promotion_tooltip = "推广状态：该链接当前未开启推广，按自然流量计算盈亏。"
+        elif card_data.get("is_sitewide_managed"):
+            promotion_tooltip = "推广状态：该链接当前使用全站托管推广。"
+        elif (card_data.get("roi_input_mode") or "roi") == "bid":
+            promotion_tooltip = "推广状态：该链接当前按成交出价进行推广。"
+        else:
+            promotion_tooltip = "推广状态：该链接当前使用稳定成本推广。"
+        self._set_bubble_chip("order", order_text, "#fde68a", "#d97706", metric_tooltip(order_source or "单量:"))
+        self._set_bubble_chip("promotion", promotion_text, *promotion_colors, promotion_tooltip)
+        self._set_bubble_chip("multiple", multiple_text, "#bfdbfe", "#2563eb", metric_tooltip(multiple_source))
+        self._set_bubble_chip(
+            "status", profit_status or "", *status_colors.get(profit_status, ("#e5e7eb", "#6b7280")),
+            f"盈亏状态：根据当前净利率判断为{profit_status}。" if profit_status else "",
+        )
+        self.bubble_chips_widget.setVisible(any(chip.text() for chip in self.bubble_chip_labels.values()))
+
+        moved_prefixes = (
+            "单量:", "净成交:", "净投产比:", "全站:", "投产:", "全站投产倍数:",
+            "投产倍数:", "出价:", "保本出价:", "出价倍数:", "无推广",
+        )
+        net_parts = [part for part in net_parts if not part.startswith(moved_prefixes)]
+        roi_parts = [part for part in roi_parts if not part.startswith(moved_prefixes)]
+        summary_parts = margin_parts + net_parts
         avg_price = getattr(self, "_bubble_avg_price", 0) or 0
-        if avg_price > 0 and "avg_price" not in hidden_metrics:
-            avg_text = "\u2060".join(f"客单价:¥{avg_price:.2f}")
-            first_row.append(f'<span style="color:{foreground};font-weight:bold;">{avg_text}</span>')
-        if profit_status:
-            status_text = "\u2060".join(profit_status)
-            first_row.append(f'<span style="color:{foreground};font-weight:bold;">{status_text}</span>')
-        rows = [first_row, margin_parts + net_parts, roi_parts]
+        if (
+            avg_price > 0
+            and "avg_price" not in hidden_metrics
+            and not any(part.startswith("客单价:") for part in summary_parts)
+        ):
+            summary_parts.append(f"客单价:¥{avg_price:.2f}")
+        remaining_parts = summary_parts + roi_parts
         expected_profit = getattr(self, "_bubble_expected_profit", None)
         if expected_profit is not None and not real_mode:
-            expected_text = "\u2060".join(f"预计盈亏（100限额）:¥{expected_profit:.2f}")
-            rows.append([f'<span style="color:{foreground};font-weight:bold;">{expected_text}</span>'])
+            remaining_parts.append(f"预计盈亏:¥{expected_profit:.2f}")
+        rows = [remaining_parts[index:index + 2] for index in range(0, len(remaining_parts), 2)]
         rows = [row for row in rows if row]
-        html_rows = []
-        cell_style = f' style="padding:0px; margin:0px; line-height:{line_height}px;"'
-        for row in rows:
-            if len(row) == 2:
-                html_rows.append(
-                    f'<tr><td align="left"{cell_style}>{row[0]}</td>'
-                    f'<td align="right"{cell_style}>{row[1]}</td></tr>'
-                )
+
+        while len(self.bubble_metric_chips) < len(remaining_parts):
+            chip = QLabel(self.bubble_metrics_widget)
+            chip.setAlignment(Qt.AlignCenter)
+            chip.setFixedHeight(18)
+            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            chip.installEventFilter(self)
+            self.bubble_metric_chips.append(chip)
+
+        loss_statuses = {"微亏", "一般亏", "巨亏", "亏损"}
+        for index, plain in enumerate(remaining_parts):
+            chip = self.bubble_metric_chips[index]
+            if plain.startswith(("毛利率:", "毛利润:")):
+                background, border = "#fecaca", "#ef4444"
+            elif plain.startswith(("净利率:", "净利润:", "预计盈亏:")):
+                if profit_status in loss_statuses or re.search(r":-|\(.*-", plain):
+                    background, border = "#fecaca", "#dc2626"
+                elif profit_status == "保本":
+                    background, border = "#fde68a", "#d97706"
+                else:
+                    background, border = "#bbf7d0", "#16a34a"
+            elif plain.startswith(("客单价:", "交易额:", "每笔成交:")):
+                background, border = "#bfdbfe", "#2563eb"
+            elif plain.startswith(("花费:", "每笔花费:")):
+                background, border = "#fed7aa", "#ea580c"
+            elif plain.startswith("曝光占比:"):
+                background, border = "#ddd6fe", "#7c3aed"
+            elif plain.startswith(("点击率:", "点击转化率:")):
+                background, border = "#a5f3fc", "#0891b2"
             else:
-                html_rows.append(f'<tr><td colspan="2"{cell_style}>{" ".join(row)}</td></tr>')
+                background, border = "#e5e7eb", "#6b7280"
+            row, column = divmod(index, 2)
+            column_span = 2 if index == len(remaining_parts) - 1 and column == 0 else 1
+            self.bubble_metrics_layout.addWidget(chip, row, column, 1, column_span)
+            chip.setText(plain)
+            chip.setToolTip(metric_tooltip(plain))
+            chip.setStyleSheet(
+                f"color:#111; background:{background}; border:1px solid {border}; "
+                "border-radius:6px; padding:1px; font-weight:bold;"
+            )
+            chip.show()
+        for chip in self.bubble_metric_chips[len(remaining_parts):]:
+            chip.hide()
+        self.bubble_metrics_widget.setVisible(bool(remaining_parts))
+
+        html_rows = []
+        for row in rows:
+            cells = []
+            for plain in row:
+                span = 2 if len(row) == 1 else 1
+                cells.append(
+                    f'<td colspan="{span}" align="center" style="background-color:transparent; border:1px solid {foreground}; '
+                    f'border-radius:4px; padding:1px; margin:0px; line-height:{line_height}px; white-space:nowrap;">'
+                    f'{render(plain)}</td>'
+                )
+            html_rows.append(f'<tr>{"".join(cells)}</tr>')
         self.bubble_metrics_label.setText(
-            '<table width="100%" cellspacing="0" cellpadding="0" style="margin:0px;">'
+            '<table width="100%" cellspacing="1" cellpadding="0" style="margin:0px; background-color:transparent;">'
             + "".join(html_rows) + "</table>"
         )
-        self.bubble_metrics_label.setToolTip("\n".join(tooltips))
-        self.bubble_metrics_label.setVisible(bool(rows))
-        self.bubble_metrics_label.updateGeometry()
+        self.bubble_metrics_label.setToolTip("")
+        self.bubble_metrics_label.hide()
 
     def _update_margin_display(self, fresh=True):
         self._bubble_avg_price = 0
@@ -991,9 +1218,15 @@ class ProductWidget(QWidget):
                 net_margin_formula = margin_rate_decimal * (1 - return_rate / 100) - 0.006
                 net_break_even_roi = 1 / net_margin_formula if net_margin_formula > 0 else 0
                 effective_roi = sitewide_roi if is_sitewide_managed and not is_natural_flow else current_roi
-                if effective_roi > 0:
-                    actual_amount = 100 * effective_roi * max(0, 1 - return_rate / 100)
-                    self._bubble_expected_profit = actual_amount * (margin_rate_decimal - 0.006) - 100
+                expected_roi = effective_roi
+                if roi_input_mode == "bid" and not is_natural_flow and avg_price > 0:
+                    bid = float(transaction_bid or 0)
+                    if bid <= 0 and effective_roi > 0:
+                        bid = avg_price / effective_roi
+                    expected_roi = avg_price / bid if bid > 0 else 0
+                self._bubble_expected_profit = _expected_profit_for_100(
+                    is_natural_flow, margin_rate_decimal, return_rate, expected_roi
+                )
                 if (
                     real_promotion_mode
                 ):
@@ -1031,7 +1264,7 @@ class ProductWidget(QWidget):
                 elif effective_roi > 0:
                     label = "全站" if is_sitewide_managed else "投产"
                     multiple_label = "全站投产倍数" if is_sitewide_managed else "投产倍数"
-                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">{label}:</span><span style="color: #e74c3c; font-weight: bold;">{effective_roi:.2f}</span><br><span style="color: #666666; font-weight: bold;">{multiple_label}:</span><span style="color: #3498db; font-weight: bold;">--</span>'
+                    roi_multiple_text = f'<span style="color: #666666; font-weight: bold;">{label}:</span><span style="color: #e74c3c; font-weight: bold;">{effective_roi:.2f}</span><br><span style="color: #666666; font-weight: bold;">{multiple_label}:</span><span style="color: #e74c3c; font-weight: bold;">无法保本</span>'
                 else:
                     roi_multiple_text = ""
                 self.roi_label.setText(roi_multiple_text)
@@ -1358,15 +1591,19 @@ class ProductWidget(QWidget):
             return False
         if getattr(self, "_disposing", False):
             return False
-        if obj in tuple(
+        tooltip_targets = tuple(
             widget for widget in (
                 getattr(self, "code_label", None),
                 getattr(self, "category_label", None),
                 getattr(self, "bubble_metrics_label", None),
                 getattr(self, "img_label", None),
                 getattr(self, "reminder_badge", None),
+                getattr(self, "marketing_badge", None),
             ) if widget is not None
-        ):
+        ) + tuple(getattr(self, "bubble_metric_chips", ())) + tuple(
+            getattr(self, "bubble_chip_labels", {}).values()
+        )
+        if obj in tooltip_targets:
             if event.type() == QEvent.ToolTip:
                 text = obj.toolTip()
                 if obj == getattr(self, "reminder_badge", None):
@@ -1432,9 +1669,17 @@ class ProductWidget(QWidget):
                 "padding: 4px 6px; font-size: 12px;"
             )
             self._bubble_tooltip = popup
+        popup.hide()
         popup.setText(text)
+        popup.ensurePolished()
         popup.adjustSize()
-        popup.move(global_pos + QPoint(12, 16))
+        position = global_pos + QPoint(12, 16)
+        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            position.setX(max(available.left(), min(position.x(), available.right() - popup.width() + 1)))
+            position.setY(max(available.top(), min(position.y(), available.bottom() - popup.height() + 1)))
+        popup.move(position)
         popup.show()
 
     def _hide_bubble_tooltip(self):
@@ -1445,7 +1690,7 @@ class ProductWidget(QWidget):
     def show_category_link_editor_menu(self, global_pos):
         menu = QMenu(self)
         action_category = QAction("编辑商品类型（成本库）", self)
-        action_link_type = QAction("编辑链接类型（链接组合）", self)
+        action_link_type = QAction("编辑链接类型（商品类型）", self)
         menu.addAction(action_category)
         menu.addAction(action_link_type)
         selected = menu.exec_(global_pos)
@@ -2379,8 +2624,9 @@ class StoreWidget(QWidget):
             self.garbage_ratio_label,
             self.waste_ratio_label,
         ):
+            foreground = "#111111" if label in (self.garbage_ratio_label, self.waste_ratio_label) else self._store_foreground
             label.setStyleSheet(
-                f"background: transparent; color: {self._store_foreground}; border: none; "
+                f"background: transparent; color: {foreground}; border: none; "
                 "padding: 0px 4px; font-size: 14px; font-weight: bold;"
             )
             label.setWordWrap(False)
@@ -2472,7 +2718,7 @@ class StoreWidget(QWidget):
     def _refresh_garbage_ratio_label(self):
         total_rows = self.db.safe_fetchall(
             """SELECT COUNT(*) FROM products WHERE store_id=?
-               AND COALESCE(is_archived, 0)=0 AND COALESCE(is_violation, 0)=0""",
+               AND COALESCE(is_archived, 0)=0""",
             (self.store_id,),
         )
         task_rows = self.db.safe_fetchall(
@@ -2502,8 +2748,8 @@ class StoreWidget(QWidget):
         self.waste_ratio_badge.setVisible(bool(waste))
         self.waste_ratio_label.setVisible(bool(waste))
         if self.display_mode != "bubble":
-            self.garbage_ratio_label.setStyleSheet("background:#fff1f2; color:#b91c1c; padding:3px 8px; font-size:12px; font-weight:bold;")
-            self.waste_ratio_label.setStyleSheet("background:#fff7ed; color:#7c2d12; padding:3px 8px; font-size:12px; font-weight:bold;")
+            self.garbage_ratio_label.setStyleSheet("background:#fff1f2; color:#111; padding:3px 8px; font-size:12px; font-weight:bold;")
+            self.waste_ratio_label.setStyleSheet("background:#fff7ed; color:#111; padding:3px 8px; font-size:12px; font-weight:bold;")
         self.task_ratio_widget.show()
 
     def _calculate_store_summary(self):

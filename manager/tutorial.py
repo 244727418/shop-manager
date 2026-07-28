@@ -6,7 +6,7 @@ from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, QTimer, pyq
 from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget, QMessageBox,
 )
 
 
@@ -19,6 +19,7 @@ SCREEN_ANCHORS = {
         "tag_filter": "btn_tag_filter",
         "store_filter": "btn_store_filter",
         "sort": "product_sort_combo",
+        "sort_direction": "btn_product_sort_direction",
         "main_area": "data_mode_scroll",
         "store_bubble": "@first_store_bubble",
         "product_bubble": "@first_product_bubble",
@@ -49,6 +50,7 @@ SCREEN_ANCHORS = {
         "table": "margin_data_table",
         "profit": "btn_profit_calc",
         "orders": "btn_import_orders",
+        "order_table": "table",
         "history": "btn_history",
         "ai": "btn_ai_report",
         "promotion": "btn_promotion_data",
@@ -81,7 +83,9 @@ SCREEN_ANCHORS = {
         "combos": "btn_link_combos",
         "cart": "listing_cart_widget",
         "price_test": "btn_price_test",
-        "save": "btn_save",
+        "combo_review": "btn_combo_review",
+        "history": "btn_history",
+        "lan_sync": "btn_lan_sync",
     },
     "material": {
         "mode": "mode_button",
@@ -90,6 +94,7 @@ SCREEN_ANCHORS = {
         "back": "back_button",
         "pdf": "pdf_extract_button",
         "reference": "btn_prompts",
+        "mobile": "btn_mobile_upload",
     },
     "promotion": {
         "date": "date_edit",
@@ -117,6 +122,7 @@ SCREEN_ANCHORS = {
     "settings": {
         "auto_start": "auto_start_checkbox",
         "hotkeys": "hotkey_panel",
+        "font": "font_combo",
         "window": None,
     },
 }
@@ -163,6 +169,7 @@ TUTORIAL_TOPICS = [
         _step("tag_filter", "标签筛选", "可按商品类型、优惠、活动、推广方式和盈亏状态组合筛选。", "示例：只看“营销活动 + 亏钱”的链接。"),
         _step("store_filter", "店铺筛选", "只显示指定店铺，适合多店铺账号。", "示例：仅查看“旗舰店”和“测试店”。"),
         _step("sort", "链接排序", "支持按单量、净利润、净利率、毛利率、投产等指标排序。", "示例：按净利润排序，优先处理亏损链接。"),
+        _step("sort_direction", "升序与降序", "排序指标右侧可切换升序或降序，决定较大值还是较小值排在前面。", "示例：按净利润升序，先找出亏损最多的链接。"),
     ),
     _topic(
         "stores_links", "店铺与链接", "店铺和链接管理",
@@ -175,7 +182,7 @@ TUTORIAL_TOPICS = [
         "records_tasks", "记录与任务", "操作记录与每日任务",
         "记录每天做过的事情，并集中处理提醒、待办和异常链接。", "records",
         _step("entry", "操作记录", "从店铺或链接气泡的右键菜单进入，可按日期添加时间与操作内容；教程不会点击保存。", "示例：10:30 调整主图；14:00 优化投产至 3.2。"),
-        _step("overview", "每日任务大盘", "集中查看店铺任务、链接任务、废物链接和垃圾链接。", "示例：今日待办：检查近两条推广数据均为 0 的链接。", screen="daily"),
+        _step("overview", "每日任务大盘", "集中查看店铺任务、链接任务、废物链接和垃圾链接。", "示例：今日待办：检查最近一次推广有数据但无单的链接。", screen="daily"),
         _step("reminders", "定时提醒", "任务可以设置提醒时间，到时弹出提示并可标记完成。", "示例：今天 16:00 提醒复查价格。", screen="daily"),
     ),
     _topic(
@@ -184,6 +191,7 @@ TUTORIAL_TOPICS = [
         _step("settings", "店铺计算参数", "维护全站投产与店铺满减规则，作为利润计算基础。", "示例：满 50 减 5，全站投产目标 3.0。"),
         _step("table", "毛利数据表", "按日期查看真实客单、推广消耗、利润和净利率。", "示例：净利润 128 元，净利率 12.8%。"),
         _step("orders", "导入订单", "导入订单后可按实际单量生成规格权重；教程不会打开文件选择器。", "示例：规格红色占订单 60%，蓝色占 40%。"),
+        _step("order_table", "订单、退款与主卖规格", "订单表可读取订单状态和实付金额，展示单量、销售额、退款率及退款占比最多的规格，并把退款率同步到规格毛利计算。", "示例：本周 100 单、退款 8 单，退款率 8%；红色 M 为退款占比最多规格。"),
         _step("history", "订单导入历史", "“全部记录”只查看导入订单产生的规格毛利、单量和售卖权重历史。", "示例：核对红色规格 60%、蓝色规格 40% 的权重来源。"),
         _step("ai", "AI 报告", "根据当前店铺毛利数据生成经营分析；教程不会调用 API。", "示例：报告建议降低亏损链接出价 5%。"),
     ),
@@ -191,19 +199,22 @@ TUTORIAL_TOPICS = [
         "product_spec", "毛利与利润", "规格与链接毛利",
         "维护优惠、活动、投产、出价、退货率、规格价格和权重。", "product_spec",
         _step("discount", "优惠与活动", "整块促销区域包含优惠券、新客立减、店铺满减、限时活动和营销活动，都会影响成交价或活动标记。", "示例：售价 29.9 元，优惠券减 3 元，并开启限时活动。"),
-        _step("roi", "投产与出价", "可使用投产模式或出价模式，系统结合毛利和退货率计算结果。", "示例：当前投产 3.2，退货率 8%。"),
+        _step("roi", "投产、出价与退款率", "可使用投产模式或出价模式，系统结合毛利和退货率计算结果。订单导入可自动同步退款率；手工修改后会保留人工值。", "示例：当前投产 3.2，订单退款率 8%；需要时手工改为 7.5%。"),
         _step("batch", "规格筛选与批量改价", "先通过规格表头筛选可见规格，再按固定售价、折扣、增减金额或目标毛利率批量修改价格。", "示例：把筛选出的红色规格售价统一设置为 29.9 元。"),
         _step("profit", "利润计算", "打开利润计算器，并自动带入当前综合毛利、客单价和退款率。", "示例：预计每单利润 4.62 元，保本投产 2.7。"),
     ),
     _topic(
         "cost_library", "资料库", "成本库完整工作流",
-        "管理商品类型、规格成本、运费杂费、链接组合、上架车与测价。", "cost",
+        "管理商品类型、规格成本、运费杂费、商品类型链接、上架车与测价。", "cost",
         _step("mode", "成本模式与费用规则", "总成本模式直接维护成本；明细模式拆分货品、运费和杂费。默认 Ctrl+Shift+C 可快速呼出成本库。", "示例：货品 10 元 + 运费 1.7 元 + 杂费 0.45 元。"),
         _step("search", "搜索规格", "按商品类型、商品名称或规格编码搜索，支持用空格分隔多个关键词。", "示例：搜索“水杯 RED”同时限定商品和规格。"),
-        _step("table", "成本表", "维护规格的商品类型、名称、编码、成本、重量和库存属性。", "示例：规格 SKU-RED-M 总成本 12.15 元。"),
-        _step("combos", "链接组合", "打开链接组合窗口，把多个成本规格整理为销售链接组合。", "示例：红色 M + 蓝色 M 组成“夏季组合链接”。"),
+        _step("table", "成本表", "维护规格的商品类型、名称、编码、成本、重量和产品属性；右键可从素材库选择或替换缩略图。", "示例：规格 SKU-RED-M 总成本 12.15 元，并从素材库选用红色款缩略图。"),
+        _step("combos", "商品类型链接", "按成本库商品类型查看链接，并维护各链接的链接类型。", "一个链接含多个商品类型时，归入规格数量最多的商品类型。"),
         _step("cart", "上架车", "Ctrl+单击规格可加入或移出上架车，再用所选规格创建链接。", "示例：把红色 M、蓝色 M 加入上架车后创建组合链接。"),
         _step("price_test", "测价", "打开测价窗口，组合规格数量和售价，预览成本与毛利结果。", "示例：目标毛利率 35%，比较 24.9 元和 29.9 元售价。"),
+        _step("combo_review", "组合待处理", "集中检查系统识别出的组合产品及其包含单品；对钩只表示已人工核对，不会重新计算组合。教程不会标记。", "示例：核对“礼盒装”由单品 A ×2、单品 B ×1 组成后再打钩。"),
+        _step("history", "成本操作历史", "查看成本价格、名称、属性、图片和类型的修改记录，可按关键词、时间和操作类型筛选。教程不会删除记录。", "示例：搜索 SKU-RED-M，核对昨天的成本从 11.8 元改为 12.15 元。"),
+        _step("lan_sync", "局域网实时同步", "多台电脑可创建或加入同一成本组织，软件内的成本变化会自动实时同步；首次加入前请确认组织密钥。教程不会连接或同步。", "示例：主电脑创建“运营组”，副电脑粘贴组织密钥加入。"),
     ),
     _topic(
         "material_library", "资料库", "素材库完整工作流",
@@ -213,6 +224,7 @@ TUTORIAL_TOPICS = [
         _step("search", "多关键词搜索", "可搜索商品类型、规格名称、规格编码或链接；支持拼音、首字母，并用空格分隔多个关键词。", "示例：输入“水杯 RED”同时匹配水杯分类和红色规格。"),
         _step("pdf", "PDF 图片提取", "从供应商 PDF 中提取图片并放入当前素材目录。", "示例：从供应商 PDF 提取 6 张产品图。"),
         _step("reference", "通用参考", "管理通用参考图和常用提示词，供不同商品素材制作时复用。", "示例：保存一组白底主图参考和常用修图提示词。"),
+        _step("mobile", "手机扫码上传素材", "在产品素材库点击“手机绑定”，用素材库助手扫码后，可在手机选择商品类型和规格并上传原图；需要电脑和手机处于同一局域网。教程不会生成二维码或上传文件。", "示例：手机选择“水杯 / SKU-RED-M”，拍摄并上传 4 张原图到对应规格文件夹。"),
     ),
     _topic(
         "promotion_orders", "推广与报表", "推广数据与订单分析",
@@ -243,6 +255,8 @@ TUTORIAL_TOPICS = [
         _step("pdd", "打开商家后台", "按当前店铺打开拼多多商家后台；教程不会启动浏览器。", "示例：选择旗舰店后打开对应登录环境。"),
         _step("store_bubble", "店铺抓取入口", "店铺右键可抓取添加编码、价格管理和推广状态。", "示例：抓取价格后先核对匹配状态，再决定是否同步。"),
         _step("product_bubble", "链接级同步", "规格毛利窗口可针对当前链接抓取编码或价格。", "示例：商品 123456 匹配到 3 个在线规格。"),
+        _step("pdd_code", "抓取添加编码", "在规格毛利窗口打开当前链接的添加编码页面，核对平台规格与软件规格。教程不会打开浏览器。", "示例：商品 123456 的红色 M 匹配编码 SKU-RED-M。", screen="product_spec"),
+        _step("pdd_price", "价格匹配与未匹配跳转", "抓取价格管理后会分类显示商品 ID、规格、价格和活动/营销的未匹配项；可用“跳转下一个未匹配”逐个定位后再决定是否同步。教程不会抓取或覆盖数据。", "示例：3 个链接中有 1 个价格未匹配，跳转定位并手工核对。", screen="product_spec"),
     ),
     _topic(
         "api_ai", "系统与账号", "API 与 AI 功能",
@@ -271,11 +285,12 @@ TUTORIAL_TOPICS = [
         _step("auto_start", "开机自启", "默认开启；取消勾选并保存后不会随 Windows 启动。教程不会修改。", "示例：开机后静默进入托盘，不弹出主窗口。"),
         _step("hotkeys", "全局快捷键", "主界面、成本库和素材库都有可修改的快速呼出快捷键。", "示例：Ctrl+Shift+Z 呼出主界面。"),
         _step("window", "系统托盘", "关闭主窗口会进入托盘；双击托盘显示，右键可设置或退出。", "示例：右键托盘 → 设置 → 修改快捷键。"),
+        _step("font", "软件字体", "可选择默认、黄油体、卡通体、书法体、宋体、黑体或圆体，保存设置后立即应用。教程不会保存修改。", "示例：选择“圆体”预览名称，确认后再保存。"),
     ),
     _topic(
         "software_update", "系统与账号", "检查软件更新",
         "普通用户可以检查并安装收到的新版本。", "main",
-        _step("update", "检查更新", "检查已收到或服务器上的新版；教程不会联网或下载。", "示例：发现 v5.8 后查看版本说明，再确认安装。"),
+        _step("update", "接收并安装更新", "可检查服务器新版；绑定可信主电脑后，后台助手也能接收并校验更新包，下载完成后再由用户选择重启安装。教程不会联网或下载。", "示例：收到 v5.17 后查看版本说明，再确认重启安装。"),
         _step("tutorial", "教程随功能同步", "功能目录和教程步骤来自同一份注册表，新增功能时必须补齐对应步骤。", "示例：新增报表入口时，同时注册“报表”教程锚点和示例。"),
     ),
 ]
@@ -312,9 +327,11 @@ validate_tutorial_catalog()
 
 
 class TutorialCatalogDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, release_version="", release_notes=""):
         super().__init__(parent)
         self.selected_topic_id = ""
+        self.release_version = str(release_version or "").strip()
+        self.release_notes = str(release_notes or "").strip()
         self.setWindowTitle("📖 功能教程")
         self.resize(860, 580)
         self.setMinimumSize(760, 500)
@@ -375,7 +392,11 @@ class TutorialCatalogDialog(QDialog):
 
         close_button = QPushButton("关闭")
         close_button.clicked.connect(self.reject)
+        self.release_notes_button = QPushButton("本次版本更新内容")
+        self.release_notes_button.setEnabled(bool(self.release_notes))
+        self.release_notes_button.clicked.connect(self._show_release_notes)
         footer = QHBoxLayout()
+        footer.addWidget(self.release_notes_button)
         footer.addStretch()
         footer.addWidget(close_button)
         root.addLayout(footer)
@@ -398,6 +419,14 @@ class TutorialCatalogDialog(QDialog):
     def _start_selected(self):
         if self.selected_topic_id:
             self.accept()
+
+    def _show_release_notes(self):
+        if self.release_notes:
+            QMessageBox.information(
+                self,
+                f"v{self.release_version} 本次版本更新内容" if self.release_version else "本次版本更新内容",
+                self.release_notes,
+            )
 
 
 class TutorialOverlay(QWidget):
@@ -601,7 +630,13 @@ class TutorialController(QObject):
 
     def show_catalog(self):
         self._cleanup()
-        dialog = TutorialCatalogDialog(self.main_window)
+        notes_provider = getattr(self.main_window, "get_current_release_notes", None)
+        notes = notes_provider() if callable(notes_provider) else ""
+        dialog = TutorialCatalogDialog(
+            self.main_window,
+            getattr(self.main_window, "current_version", ""),
+            notes,
+        )
         if dialog.exec_() == QDialog.Accepted and dialog.selected_topic_id:
             QTimer.singleShot(0, lambda topic_id=dialog.selected_topic_id: self.start_topic(topic_id))
 
