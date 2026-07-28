@@ -15,7 +15,7 @@ def test_conda_runtime_dlls_exist():
 
 
 def test_current_spec_is_workspace_relative():
-    spec = Path(__file__).resolve().parents[1] / "shop_manager_v5.2.spec"
+    spec = Path(__file__).resolve().parents[1] / "shop_manager_v5.19.spec"
     content = spec.read_text(encoding="utf-8")
     assert "C:\\Users\\" not in content
     assert "D:\\" not in content

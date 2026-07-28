@@ -81,8 +81,9 @@ def test_category_edit_can_save_after_editor_focus_change(tmp_path):
     assert editor is not None
     QTest.keyClick(editor, Qt.Key_A, Qt.ControlModifier)
     QTest.keyClicks(editor, "new-category")
-    QTest.mouseClick(dialog.btn_save, Qt.LeftButton)
-    QTest.qWait(150)
+    dialog.table_view.setFocus(Qt.OtherFocusReason)
+    app.processEvents()
+    QTest.qWait(300)
     assert db.safe_fetchall("SELECT category_label FROM cost_library WHERE spec_code='SKU1'")[0][0] == "new-category"
     dialog.close()
     db.conn.close()
@@ -109,6 +110,6 @@ def test_cost_library_first_open_does_not_recalculate_every_row():
     source = Path("manager/dialogs/cost_library.py").read_text(encoding="utf-8-sig")
     init_body = source.split("class CostLibraryDialog", 1)[1].split("def _setup_button", 1)[0]
     load_body = source.split("    def load_data(self):", 1)[1].split("    def _configure_column_widths", 1)[0]
-    assert "QTimer.singleShot(0, self.load_data)" in init_body
+    assert "QTimer.singleShot(0, self._run_initial_load)" in init_body
     assert "recalculate_detailed_cost_library" not in init_body
     assert "self.recalculate_row(row_index)" not in load_body
